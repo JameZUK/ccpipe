@@ -663,16 +663,30 @@ def _origin_allowed(websocket: WebSocket) -> bool:
 
 
 def _allowed_origins(websocket: WebSocket) -> set[str]:
+    """Build the WS upgrade allowlist.
+
+    When ``CCPIPE_ALLOWED_ORIGINS`` is set, use that exclusively — the
+    operator has declared the canonical origin(s) and we don't second-
+    guess. This is the recommended posture for any non-localhost
+    deployment.
+
+    When it's unset, fall back to ``http(s)://<host-header>`` to keep
+    the zero-config LAN-HTTP path working (the default deployment).
+    The Host header is browser-determined, so this is safe against
+    script-driven CSWSH (SameSite-Lax keeps the auth cookie off the
+    upgrade) but it's a softer gate than a configured allowlist — under
+    TLS the operator should always set ``CCPIPE_ALLOWED_ORIGINS``.
+    """
     extra = os.environ.get(ALLOWED_ORIGINS_ENV, "").strip()
-    out: set[str] = set()
     if extra:
+        out: set[str] = set()
         for part in extra.split(","):
             part = part.strip()
             if part:
                 out.add(part)
-    # Always allow same-host upgrades. Host is the value the browser used
-    # to reach us, so this naturally permits localhost, the LAN IP, or any
-    # hostname the user has set up.
+        return out
+    # Fallback: derive from the request's Host header.
+    out = set()
     host = websocket.headers.get("host")
     if host:
         # Browsers may send Origin with either scheme; allow both.

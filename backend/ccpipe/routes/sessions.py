@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from .. import tmux
 from ..auth import AuthDep, CsrfDep
 from ..tmux_control import CONTROL_SESSION_NAME
+from .fs import content_disposition_attachment
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -321,7 +322,7 @@ async def claude_session_export(session_id: str, cwd: str) -> StreamingResponse:
     return StreamingResponse(
         _iter_jsonl_as_markdown(target),
         media_type="text/markdown; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition_attachment(filename)},
     )
 
 

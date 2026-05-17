@@ -646,10 +646,25 @@ function _renderEnrollForm(host: HTMLElement, done: () => void): void {
       pendingSecret = data.secret;
       // QR is rendered server-side as SVG so the otpauth:// URI
       // (which embeds the secret) never reaches a third party.
+      // Parse as XML and attach the resulting element rather than
+      // assigning to innerHTML — defence-in-depth against a future
+      // qrcode-lib change that embeds attacker-influenced text
+      // (e.g. the username appearing in a <title>/<desc>) into the
+      // SVG body.
       qr.innerHTML = "";
       const qrWrap = document.createElement("div");
       qrWrap.className = "totp-enroll__qr-image";
-      qrWrap.innerHTML = data.qr_svg ?? "";
+      const svgText = (data.qr_svg ?? "") as string;
+      if (svgText) {
+        const parsed = new DOMParser().parseFromString(svgText, "image/svg+xml");
+        const svgEl = parsed.documentElement;
+        // DOMParser surfaces a <parsererror> element if the XML was
+        // malformed; in that case we just skip the QR (the manual
+        // secret fallback below still renders).
+        if (svgEl && svgEl.nodeName.toLowerCase() === "svg") {
+          qrWrap.appendChild(document.importNode(svgEl, true));
+        }
+      }
       qr.append(qrWrap);
       const fallback = document.createElement("div");
       fallback.className = "totp-enroll__secret";
@@ -688,7 +703,14 @@ function _renderEnrollForm(host: HTMLElement, done: () => void): void {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-Requested-By": "ccpipe" },
-        body: JSON.stringify({ secret: pendingSecret, code: code.value }),
+        // currentPassword is required server-side so a stolen session
+        // can't persist an attacker-chosen TOTP secret and lock the
+        // legitimate user out. We still have it from the enroll step.
+        body: JSON.stringify({
+          currentPassword: cur.value,
+          secret: pendingSecret,
+          code: code.value,
+        }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));

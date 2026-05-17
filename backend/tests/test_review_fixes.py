@@ -242,11 +242,14 @@ def test_totp_enroll_then_login_requires_code(authed_client):
     # can render it via element.innerHTML cleanly. Just check we got
     # an SVG root element back.
     assert "qr_svg" in enroll and enroll["qr_svg"].lstrip().startswith("<svg")
-    # 2. Confirm with a fresh code.
+    # 2. Confirm with a fresh code. currentPassword is required so a
+    # session-stealer can't lock the legitimate user out by enrolling
+    # their own TOTP via a CSRF-protected but password-less endpoint.
     code = pyotp.TOTP(secret).now()
     r = authed_client.post("/api/auth/totp/confirm",
                             headers={"X-Requested-By": "ccpipe"},
-                            json={"secret": secret, "code": code})
+                            json={"currentPassword": "letmein",
+                                  "secret": secret, "code": code})
     assert r.status_code == 200
     # 3. Log out, then try password-only login — should signal otp_required.
     authed_client.post("/api/auth/logout",
@@ -281,8 +284,34 @@ def test_totp_confirm_rejects_bad_code(authed_client):
     secret = pyotp.random_base32()
     r = authed_client.post("/api/auth/totp/confirm",
                             headers={"X-Requested-By": "ccpipe"},
-                            json={"secret": secret, "code": "000000"})
+                            json={"currentPassword": "letmein",
+                                  "secret": secret, "code": "000000"})
     assert r.status_code == 401
+
+
+def test_totp_confirm_requires_current_password(authed_client):
+    """A session-stealer must NOT be able to enrol their own TOTP by
+    calling /api/auth/totp/confirm with an arbitrary secret + code.
+    Without the password check the legitimate user is locked out at
+    the next login (and can't disable because /disable also needs
+    the new code)."""
+    import pyotp
+    secret = pyotp.random_base32()
+    code = pyotp.TOTP(secret).now()
+    # No currentPassword field at all → 422 (pydantic rejects).
+    r = authed_client.post("/api/auth/totp/confirm",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"secret": secret, "code": code})
+    assert r.status_code in (400, 422)
+    # Wrong password → 401, secret NOT persisted.
+    r = authed_client.post("/api/auth/totp/confirm",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "wrong",
+                                  "secret": secret, "code": code})
+    assert r.status_code == 401
+    # /api/auth/status should show no enrolment.
+    r = authed_client.get("/api/auth/status")
+    assert r.json().get("otp_enrolled", False) is False
 
 
 def test_totp_code_replay_refused(authed_client):
@@ -299,7 +328,8 @@ def test_totp_code_replay_refused(authed_client):
     code = pyotp.TOTP(secret).now()
     r = authed_client.post("/api/auth/totp/confirm",
                             headers={"X-Requested-By": "ccpipe"},
-                            json={"secret": secret, "code": code})
+                            json={"currentPassword": "letmein",
+                                  "secret": secret, "code": code})
     assert r.status_code == 200
     # First login with the current code succeeds.
     authed_client.post("/api/auth/logout", headers={"X-Requested-By": "ccpipe"})
@@ -783,6 +813,31 @@ def test_fs_download(authed_client, tmp_path):
     assert r.status_code == 200
     assert r.content == b"deadbeef"
     assert "attachment" in r.headers["content-disposition"]
+
+
+def test_fs_download_filename_with_quote_and_newline_is_safe(authed_client, tmp_path):
+    """A filename containing characters that would break or inject into
+    the Content-Disposition header must be rendered safely: the ASCII
+    fallback strips dangerous chars to underscores, and the RFC 5987
+    filename* carries the real name percent-encoded. Nothing in the
+    header line can be confused with a CRLF response-split."""
+    nasty = 'evil"\r\nX-Injected: yes; .txt'
+    p = tmp_path / nasty
+    p.write_bytes(b"x")
+    # We send the path raw via the query string; the server resolves it
+    # by absolute path so the filename round-trips into the header.
+    from urllib.parse import quote
+    r = authed_client.get(f"/api/fs/download?path={quote(str(p))}")
+    assert r.status_code == 200
+    cd = r.headers["content-disposition"]
+    # No raw CR/LF inside the header value.
+    assert "\r" not in cd and "\n" not in cd
+    # The original double-quote must not appear unescaped inside filename="…".
+    assert 'filename="evil"' not in cd
+    # RFC 5987 extended form must be present.
+    assert "filename*=UTF-8''" in cd
+    # And it must NOT contain a header that looks like injection.
+    assert "X-Injected" not in r.headers
 
 
 # ── #19  CSP tightening ──────────────────────────────────────────────────

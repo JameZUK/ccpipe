@@ -176,6 +176,11 @@ class TotpEnrollBody(BaseModel):
 
 
 class TotpConfirmBody(BaseModel):
+    # currentPassword is required so a session-stealer (XSS, shared
+    # device) can't enrol their own TOTP and lock the legitimate user
+    # out — without it, AuthDep alone gates this endpoint, and the
+    # caller picks both the secret and the code that "verifies" it.
+    currentPassword: str
     secret: str
     code: str
 
@@ -221,8 +226,17 @@ async def totp_confirm_endpoint(body: TotpConfirmBody) -> dict[str, bool]:
     """Validate a 6-digit code against the provided candidate secret
     BEFORE persisting it — if the user's authenticator app drifted or
     they scanned the wrong QR, we want to fail loudly here instead of
-    locking them out on the next login."""
+    locking them out on the next login.
+
+    Also re-verifies the current password: without this, an attacker
+    holding only a session cookie could persist a TOTP secret of their
+    choosing and lock the legitimate user out.
+    """
     import pyotp
+    cred = get_credential()
+    if not verify_credential(cred.username, body.currentPassword):
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=401, detail="current password is wrong")
     secret = (body.secret or "").strip()
     code = (body.code or "").strip()
     if not secret or len(secret) < 16 or len(secret) > 64:
@@ -234,6 +248,7 @@ async def totp_confirm_endpoint(body: TotpConfirmBody) -> dict[str, bool]:
     except Exception:
         raise HTTPException(status_code=400, detail="invalid secret")
     if not ok:
+        await asyncio.sleep(1.0)
         raise HTTPException(status_code=401, detail="code did not verify")
     saved, msg = set_totp_secret(secret)
     if not saved:

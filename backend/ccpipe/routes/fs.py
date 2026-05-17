@@ -19,6 +19,7 @@ import os
 import stat as stat_mod
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -48,6 +49,27 @@ _FS_DENY_SUBPATHS = (
     ".local/state/ccpipe",
     ".config/ccpipe",
 )
+
+def content_disposition_attachment(name: str) -> str:
+    """Build a safe ``Content-Disposition: attachment`` value for *name*.
+
+    Filenames on disk can contain quotes, CR/LF, and non-ASCII codepoints.
+    Interpolating them straight into ``filename="..."`` would produce a
+    malformed header (best case) or allow header injection on a non-
+    validating ASGI stack (worst case). We emit both:
+
+      - a sanitised ASCII fallback in ``filename=``, with control chars
+        + ``"\\`` mapped to ``_``,
+      - the original name as ``filename*=UTF-8''<percent-encoded>`` per
+        RFC 5987 so modern clients still see the real name.
+    """
+    safe_ascii = "".join(
+        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_"
+        for c in name
+    ) or "download"
+    return (f'attachment; filename="{safe_ascii}"; '
+            f"filename*=UTF-8''{quote(name, safe='')}")
+
 
 # Inline editor cap. Files larger than this won't load into the editor;
 # the panel offers them for download/delete only.
@@ -367,7 +389,7 @@ async def fs_download(path: str) -> StreamingResponse:
         media_type="application/octet-stream",
         headers={
             "Content-Length": str(st.st_size),
-            "Content-Disposition": f'attachment; filename="{resolved.name}"',
+            "Content-Disposition": content_disposition_attachment(resolved.name),
         },
     )
 

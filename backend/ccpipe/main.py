@@ -79,12 +79,44 @@ def _warn_if_tls_with_public_bind() -> None:
     log.warning(bar)
 
 
+def _warn_if_tls_with_open_host_validation() -> None:
+    """Under TLS the operator is expected to pin both the Host header
+    (``CCPIPE_TRUSTED_HOSTS``) and the WS Origin allowlist
+    (``CCPIPE_ALLOWED_ORIGINS``). When either is missing or wildcarded
+    the matching defense is silently disabled — TrustedHostMiddleware
+    accepts ``Host: anything.attacker.example`` and the WS Origin gate
+    falls back to that same Host header. Warn loudly so the operator
+    doesn't deploy with a soft gate by accident."""
+    if not behind_tls():
+        return
+    trusted_raw = os.environ.get("CCPIPE_TRUSTED_HOSTS", "").strip()
+    trusted = [h.strip() for h in trusted_raw.split(",") if h.strip()]
+    open_hosts = (not trusted) or ("*" in trusted)
+    open_origins = not os.environ.get("CCPIPE_ALLOWED_ORIGINS", "").strip()
+    if not (open_hosts or open_origins):
+        return
+    bar = "─" * 64
+    log.warning(bar)
+    log.warning("  CCPIPE_BEHIND_TLS=1 but host/origin validation is OPEN.")
+    if open_hosts:
+        log.warning("    CCPIPE_TRUSTED_HOSTS=%r → Host header is NOT validated.",
+                    trusted_raw or "(unset)")
+    if open_origins:
+        log.warning("    CCPIPE_ALLOWED_ORIGINS unset → WS upgrades trust the")
+        log.warning("    request's Host header verbatim (softer gate).")
+    log.warning("  Set both to your public hostname, e.g.:")
+    log.warning("    Environment=CCPIPE_TRUSTED_HOSTS=ccpipe.example.com")
+    log.warning("    Environment=CCPIPE_ALLOWED_ORIGINS=https://ccpipe.example.com")
+    log.warning(bar)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Eagerly resolve (or generate + persist) credentials so the operator
     # can see them in the journal right away rather than on first login.
     get_credential()
     _warn_if_tls_with_public_bind()
+    _warn_if_tls_with_open_host_validation()
     # Reset the login throttle on every app launch. Module-level state
     # in routes.auth survives importlib.reload(main); without this, tests
     # that re-import main accumulate hits across runs and trip the global
