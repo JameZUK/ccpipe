@@ -187,7 +187,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   pathInput.spellcheck = false;
   pathInput.autocapitalize = "none";
   pathInput.autocomplete = "off";
-  pathInput.value = opts.initialPath ?? "/home";
+  pathInput.value = opts.initialPath ?? "/";
   const goBtn = document.createElement("button");
   goBtn.type = "submit";
   goBtn.className = "btn btn--ghost";
@@ -225,7 +225,11 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   parent.append(shell);
 
   // ── State ─────────────────────────────────────────────────────────
-  let currentPath = opts.initialPath ?? "/home";
+  // Caller is expected to pass a sensible initialPath (typically the
+  // jail root from /api/fs/config). "/" is the last-resort fallback —
+  // it's almost certainly outside the jail, but the next /api/fs/list
+  // 403 surfaces in the status line rather than silently failing.
+  let currentPath = opts.initialPath ?? "/";
   let uploadLimitMb = 50;
 
   const setStatus = (msg: string, isError = false) => {

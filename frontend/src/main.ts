@@ -171,8 +171,15 @@ async function attachTerminal(session: string): Promise<void> {
   filesBtn.title = "Files";
   filesBtn.innerHTML = FOLDER_SVG;
   filesBtn.addEventListener("click", async () => {
-    const { openFilePanel } = await import("./file-panel");
-    openFilePanel(document.body, { initialPath: "/home" });
+    // Resolve the fs jail root before opening so we land inside it —
+    // the previous hardcoded "/home" was the parent of the default
+    // root and got rejected by every fs endpoint with a 403.
+    const { getFsConfig } = await import("./api");
+    const [{ openFilePanel }, cfg] = await Promise.all([
+      import("./file-panel"),
+      getFsConfig().catch(() => ({ root: "/" } as { root: string })),
+    ]);
+    openFilePanel(document.body, { initialPath: cfg.root });
   });
 
   const settingsBtn = document.createElement("button");

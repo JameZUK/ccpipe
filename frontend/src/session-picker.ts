@@ -1,4 +1,4 @@
-import { apiJson } from "./api";
+import { apiJson, getFsConfig } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
 import { clearLastSession } from "./display-prefs";
 import { FOLDER_SVG, GEAR_SVG, KEBAB_SVG } from "./icons";
@@ -327,8 +327,15 @@ export function renderSessionPicker(
   cwdInput.addEventListener("change", onCwdChanged);
   cwdInput.addEventListener("blur", onCwdChanged);
 
-  browseBtn.addEventListener("click", () => {
-    const start = cwdInput.value.trim() || "/home";
+  browseBtn.addEventListener("click", async () => {
+    // Resolve the fs jail root once so the directory browser opens
+    // inside it. "/home" used to be hardcoded here but it's the
+    // parent of the default root and gets refused by the jail check.
+    let start = cwdInput.value.trim();
+    if (!start) {
+      try { start = (await getFsConfig()).root; }
+      catch { start = "/"; }
+    }
     openDirectoryBrowser(document.body, {
       initialPath: start,
       onPick: (p) => {

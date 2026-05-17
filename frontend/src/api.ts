@@ -72,3 +72,27 @@ export async function apiRaw(input: RequestInfo, init: RequestInit = {}): Promis
     headers: mergeHeaders(init, hasJsonBody),
   });
 }
+
+// ─── /api/fs/config cache ─────────────────────────────────────────────
+// File-panel + session-picker both need to know where the fs jail is
+// rooted (otherwise they'd default to /home, which is the parent of
+// the default root and gets 403'd by the jail check). Fetched once
+// per SPA lifetime; the operator doesn't hot-swap CCPIPE_FS_ROOT.
+export interface FsConfig {
+  root: string;
+  upload_limit_mb: number;
+}
+
+let _fsConfigPromise: Promise<FsConfig> | null = null;
+
+export function getFsConfig(): Promise<FsConfig> {
+  if (_fsConfigPromise === null) {
+    _fsConfigPromise = apiJson<FsConfig>("/api/fs/config").catch((err) => {
+      // Reset so a transient failure doesn't lock the cache to a
+      // rejected promise; next caller retries.
+      _fsConfigPromise = null;
+      throw err;
+    });
+  }
+  return _fsConfigPromise;
+}

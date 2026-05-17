@@ -426,6 +426,13 @@ async def fs_mkdir(body: FsPathBody) -> dict[str, str]:
 
 @router.get("/api/fs/config", dependencies=[AuthDep])
 async def fs_config_get() -> dict[str, Any]:
-    """Surfacing the upload cap to the UI so it can validate locally
-    before initiating a multi-MB transfer."""
-    return {"upload_limit_mb": app_config.load().fs.upload_limit_mb}
+    """Surfacing the upload cap + resolved fs root to the UI.
+
+    The root lets the file panel default to a path inside the jail
+    rather than hardcoding ``/home`` (which is the parent of the
+    default root and so gets rejected with 403 every time the user
+    opens the panel)."""
+    return {
+        "upload_limit_mb": app_config.load().fs.upload_limit_mb,
+        "root": str(_fs_root()),
+    }
