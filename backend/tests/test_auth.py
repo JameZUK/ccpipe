@@ -122,8 +122,15 @@ def test_credentials_are_generated_when_no_env(app_generated_creds):
     assert creds_path.exists()
     data = json.loads(creds_path.read_text())
     assert "username" in data and isinstance(data["username"], str) and data["username"]
-    assert "password" in data and isinstance(data["password"], str)
-    assert len(data["password"]) >= 12
+    # The file now contains a hash, not the plaintext password.
+    assert "password_hash" in data
+    assert data["password_hash"].startswith("$argon2")
+    assert "password" not in data
+    # Plaintext lives in a sidecar (mode 0400).
+    sidecar = creds_path.parent / "initial_password.txt"
+    assert sidecar.exists()
+    body = sidecar.read_text()
+    assert "username:" in body and "password:" in body
 
 
 def test_credentials_file_is_0600(app_generated_creds):
@@ -132,20 +139,32 @@ def test_credentials_file_is_0600(app_generated_creds):
         c.get("/api/auth/status")
     mode = creds_path.stat().st_mode & 0o777
     assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    sidecar = creds_path.parent / "initial_password.txt"
+    sidecar_mode = sidecar.stat().st_mode & 0o777
+    assert sidecar_mode == 0o400, f"sidecar expected 0400, got {oct(sidecar_mode)}"
 
 
 def test_login_with_generated_credentials(app_generated_creds):
     app, creds_path = app_generated_creds
     with TestClient(app) as c:
         c.get("/api/auth/status")  # force generation
-        data = json.loads(creds_path.read_text())
-        r = c.post("/api/auth/login", headers={"X-Requested-By": "ccpipe"}, json=data)
+        # The credentials file no longer contains plaintext; read the
+        # sidecar to recover it.
+        sidecar = creds_path.parent / "initial_password.txt"
+        body = sidecar.read_text()
+        username = next(l.split(":", 1)[1].strip() for l in body.splitlines() if l.startswith("username:"))
+        password = next(l.split(":", 1)[1].strip() for l in body.splitlines() if l.startswith("password:"))
+        r = c.post("/api/auth/login", headers={"X-Requested-By": "ccpipe"},
+                   json={"username": username, "password": password})
         assert r.status_code == 200, r.text
-        assert r.json()["username"] == data["username"]
+        assert r.json()["username"] == username
 
 
 def test_existing_credentials_file_is_reused(state_files: Path,
                                               monkeypatch: pytest.MonkeyPatch):
+    """Legacy plaintext credentials files are accepted and migrated to
+    argon2id on first read. The user can still log in with the original
+    plaintext, and the file is rewritten with the hash."""
     creds_path = state_files / "credentials"
     creds_path.write_text(json.dumps({"username": "preset", "password": "preset-pw"}))
     creds_path.chmod(0o600)
@@ -159,6 +178,12 @@ def test_existing_credentials_file_is_reused(state_files: Path,
     with TestClient(m.app) as c:
         r = c.post("/api/auth/login", headers={"X-Requested-By": "ccpipe"}, json={"username": "preset", "password": "preset-pw"})
         assert r.status_code == 200
+    # After login (which forced credential resolution), the file should
+    # have been migrated to the new schema.
+    data = json.loads(creds_path.read_text())
+    assert "password_hash" in data
+    assert data["password_hash"].startswith("$argon2")
+    assert "password" not in data
 
 
 def test_malformed_credentials_file_regenerates(state_files: Path,
@@ -174,6 +199,7 @@ def test_malformed_credentials_file_regenerates(state_files: Path,
     importlib.reload(m)
     with TestClient(m.app) as c:
         c.get("/api/auth/status")
-    # File should now contain valid JSON
+    # File should now contain valid JSON with the new schema.
     data = json.loads(creds_path.read_text())
-    assert "username" in data and "password" in data
+    assert "username" in data and "password_hash" in data
+    assert data["password_hash"].startswith("$argon2")

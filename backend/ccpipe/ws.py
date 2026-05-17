@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import tmux
+from .auth import is_session_authed
 from .mic import MicWriter
 from .pty_relay import PtyProcess, pump
 from .tmux_control import TmuxEvent, control_client
@@ -317,7 +318,27 @@ async def handle_terminal_ws(websocket: WebSocket, session: str,
                 # message) within ~45s of its keepalive ping; absence
                 # forces a reconnect.
                 if _is_ping(text):
+                    # Re-check the session on every ping. authorize_websocket
+                    # only fires at connect, so without this an open WS would
+                    # survive a credential bump (password change, TOTP
+                    # disable, "sign out everywhere"). Closing with 1008
+                    # tells the frontend it must re-authenticate.
+                    if not _is_session_still_authed(websocket):
+                        log.info("ws closed mid-stream: session no longer authorized")
+                        await websocket.close(code=1008, reason="session revoked")
+                        break
                     await send_json({"type": "pong"})
+                    continue
+                # Mute state mirror: the client tells us when the user
+                # toggles TTS, so we can skip the Kokoro round-trip
+                # while nobody's listening. Cheap dispatch — no JSON
+                # parse on the hot input path.
+                if '"type":"tts_mute"' in text or '"type": "tts_mute"' in text:
+                    try:
+                        payload = json.loads(text)
+                        tts_sub.muted = bool(payload.get("value"))
+                    except Exception:
+                        pass
                     continue
                 _handle_client_text(text, pty_proc)
             elif (data := msg.get("bytes")) is not None:
@@ -458,6 +479,15 @@ async def _wait_for_initial_resize(websocket: WebSocket
                 pass
             return cols, rows, leftover
         leftover.append(text)
+
+
+def _is_session_still_authed(websocket: WebSocket) -> bool:
+    """Re-check the session cookie at heartbeat time. Cheap (in-memory
+    only) and catches a credential bump that happened after the WS
+    upgrade completed — without this, a password change would not
+    revoke active sockets."""
+    session = websocket.scope.get("session") or {}
+    return is_session_authed(session)
 
 
 def _is_ping(text: str) -> bool:

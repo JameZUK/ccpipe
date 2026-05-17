@@ -40,5 +40,9 @@ tmp/
 # Claude Code workspace state (not part of ccpipe itself)
 .claude/
 
+# Local agent-skills installs (per-machine tooling, not part of the project)
+.agents/
+skills-lock.json
+
 # vite/tsc incremental build cache (don't ship)
 tsconfig.tsbuildinfo

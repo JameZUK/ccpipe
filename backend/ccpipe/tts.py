@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,16 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from . import config as app_config
+
+# Bound the in-memory bookkeeping for files-seen so a host with thousands
+# of historical claude sessions doesn't leak. JSONL transcripts are
+# append-only and watchdog rarely fires "deleted" events for them, so
+# eviction-by-delete alone (in _forget_threadsafe) isn't enough.
+_LRU_CAP = 5000
+
+# Bound the watchdog → worker queue so a stalled Kokoro + fast writes
+# can't grow it unbounded.
+_QUEUE_MAX = 1000
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +54,12 @@ class _Subscription:
     on_end: EndCallback
     service: "TtsService"
     content_filter: ContentFilter | None = None
+    # Per-WS mute state, mirrored from the browser via the `tts_mute`
+    # text frame. When every subscriber that *accepts* an utterance is
+    # muted, _speak() short-circuits — saving the Kokoro round-trip and
+    # the audio bytes we'd otherwise stream straight into a client that
+    # was just going to drop them.
+    muted: bool = False
 
     def accepts(self, record: dict[str, Any]) -> bool:
         return self.content_filter is None or self.content_filter(record)
@@ -189,14 +206,27 @@ class TtsService:
     model: str = "kokoro"
     response_format: str = "mp3"
 
-    _positions: dict[Path, int] = field(default_factory=dict)
+    # OrderedDict-backed LRU so a long-running operator doesn't leak one
+    # entry per claude session ever started. Cap at LRU_CAP entries;
+    # least-recently-touched evicted on insert. JSONL transcripts are
+    # append-only and rarely deleted, so we can't rely on _forget alone.
+    _positions: "OrderedDict[Path, int]" = field(default_factory=OrderedDict)
     # Per-path locks serialize _process_file so two concurrent watchdog
     # events for the same file can't read the same byte range twice.
-    _locks: dict[Path, asyncio.Lock] = field(default_factory=dict)
+    _locks: "OrderedDict[Path, asyncio.Lock]" = field(default_factory=OrderedDict)
     _subscribers: list[_Subscription] = field(default_factory=list)
+    # Cap so a stalled Kokoro + a fast-writing claude session can't grow
+    # the queue unbounded. 1000 events is comfortably more than any
+    # legitimate burst, and overflow drops the new event (next watchdog
+    # tick re-enqueues anyway).
     _queue: asyncio.Queue[Path] | None = None
     _observer: Observer | None = None
     _worker_task: asyncio.Task[None] | None = None
+    # Debounce timers per path — pulled out of _worker's local so stop()
+    # can cancel them before the worker task is cancelled. Without this,
+    # a call_later scheduled before stop() can fire after shutdown and
+    # call create_task on a torn-down loop.
+    _debounce_handles: dict[Path, asyncio.TimerHandle] = field(default_factory=dict)
     # Outstanding per-utterance speak tasks. Tracked so stop() can cancel
     # them rather than leaving Kokoro reads dangling on shutdown.
     _speak_tasks: set[asyncio.Task] = field(default_factory=set)
@@ -212,7 +242,7 @@ class TtsService:
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
-        self._queue = asyncio.Queue()
+        self._queue = asyncio.Queue(maxsize=_QUEUE_MAX)
         # Short connect timeout means Kokoro outages bounce fast; the read
         # window stays generous for long utterances. Per-utterance speaks
         # run as detached tasks so a stalled one doesn't block the worker.
@@ -245,9 +275,18 @@ class TtsService:
         # join (timeout below is best-effort) drops its events instead of
         # poking call_soon_threadsafe on a torn-down loop.
         self._stopped = True
+        # Cancel debounce timers BEFORE the worker — if any timer's
+        # deadline has not yet fired its create_task lambda would
+        # otherwise run AFTER stop() completes, against an already-
+        # closed HTTP client.
+        for handle in list(self._debounce_handles.values()):
+            handle.cancel()
+        self._debounce_handles.clear()
         if self._observer is not None:
             self._observer.stop()
-            self._observer.join(timeout=2.0)
+            # join() is a blocking thread join; run it in a worker so
+            # it doesn't stall uvicorn's graceful shutdown timer.
+            await asyncio.to_thread(self._observer.join, 2.0)
             self._observer = None
         if self._worker_task is not None:
             self._worker_task.cancel()
@@ -294,11 +333,24 @@ class TtsService:
         if path.suffix != ".jsonl":
             return
         try:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, path)
+            self._loop.call_soon_threadsafe(self._put_path, path)
         except RuntimeError:
             # Loop closed between our flag check and the scheduling call;
             # harmless during shutdown.
             pass
+
+    def _put_path(self, path: Path) -> None:
+        """call_soon_threadsafe target that drops events on overflow
+        rather than raising. The worker debounces by 100ms anyway, so a
+        burst of writes coalesces; if the queue is genuinely full the
+        next watchdog tick will re-enqueue the latest position."""
+        if self._queue is None:
+            return
+        try:
+            self._queue.put_nowait(path)
+        except asyncio.QueueFull:
+            log.warning("tts queue full (%d); dropping event for %s",
+                         self._queue.qsize(), path)
 
     def _forget_threadsafe(self, path: Path) -> None:
         """Drop the tracked position for a vanished file so _positions
@@ -315,18 +367,28 @@ class TtsService:
 
     async def _worker(self) -> None:
         assert self._queue is not None
-        debounce: dict[Path, asyncio.TimerHandle] = {}
 
         while True:
             path = await self._queue.get()
-            if path in debounce:
-                debounce[path].cancel()
+            if self._stopped:
+                return
+            prev = self._debounce_handles.pop(path, None)
+            if prev is not None:
+                prev.cancel()
             handle = asyncio.get_running_loop().call_later(
-                0.1, lambda p=path: asyncio.create_task(self._process_path(p, debounce)))
-            debounce[path] = handle
+                0.1, lambda p=path: self._fire_debounced(p))
+            self._debounce_handles[path] = handle
 
-    async def _process_path(self, path: Path, debounce: dict[Path, Any]) -> None:
-        debounce.pop(path, None)
+    def _fire_debounced(self, path: Path) -> None:
+        """call_later target. Skips the work if stop() already ran —
+        avoids creating tasks against a torn-down HTTP client when the
+        deadline lands just past our shutdown."""
+        self._debounce_handles.pop(path, None)
+        if self._stopped:
+            return
+        asyncio.create_task(self._process_path(path))
+
+    async def _process_path(self, path: Path) -> None:
         try:
             await self._process_file(path)
         except Exception:
@@ -354,9 +416,23 @@ class TtsService:
         # _read_range, and both dispatch the same lines — audible as TTS
         # repeating sentences. The lock keeps reads-and-position-updates
         # atomic for a given file.
-        lock = self._locks.setdefault(path, asyncio.Lock())
+        lock = self._locks.get(path)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[path] = lock
+            self._evict_lru()
+        else:
+            self._locks.move_to_end(path)
         async with lock:
             await self._process_file_locked(path)
+
+    def _evict_lru(self) -> None:
+        """Trim _positions and _locks to LRU_CAP. Called whenever we
+        insert a new path so the dicts can't grow without bound."""
+        while len(self._positions) > _LRU_CAP:
+            self._positions.popitem(last=False)
+        while len(self._locks) > _LRU_CAP:
+            self._locks.popitem(last=False)
 
     async def _process_file_locked(self, path: Path) -> None:
         try:
@@ -370,8 +446,12 @@ class TtsService:
         # that flushes its system prompt + first turn before we attach).
         if path not in self._positions:
             self._positions[path] = stat.st_size
+            self._evict_lru()
             return
 
+        # Move-to-end on each access so the LRU eviction naturally
+        # preserves the actively-tailed files and drops the stale ones.
+        self._positions.move_to_end(path)
         last = self._positions[path]
         if stat.st_size < last:
             last = 0  # file truncated/rotated
@@ -415,7 +495,16 @@ class TtsService:
         """Spawn _speak as a detached task so the file-watcher worker
         keeps draining its queue even if Kokoro stalls. The handle is
         tracked so stop() can cancel outstanding utterances.
+
+        Capped at 50 outstanding tasks — past that, Kokoro is clearly
+        not draining and queuing more would just consume memory until
+        eventual OOM. Dropping is the only sane response; the user
+        will hear the next utterance after Kokoro recovers.
         """
+        if len(self._speak_tasks) >= 50:
+            log.warning("tts: %d speak tasks pending, dropping new utterance",
+                         len(self._speak_tasks))
+            return
         task = asyncio.create_task(self._speak(text, record),
                                     name=f"tts-speak-{record.get('uuid', '?')[:8]}")
         self._speak_tasks.add(task)
@@ -435,6 +524,20 @@ class TtsService:
             log.info("tts: filter rejected utterance (cwd=%s subs=%d)",
                      record.get("cwd"), len(self._subscribers))
             return
+        # If every accepting subscriber is muted, skip the Kokoro call
+        # entirely — synthesising MP3 just to stream it into a player
+        # that drops every chunk is pure waste. If even one subscriber
+        # is listening we still synthesise once (Kokoro work is shared
+        # across subscribers anyway).
+        if all(s.muted for s in targets):
+            log.info("tts: all %d subscribers muted; skipping kokoro for cwd=%s",
+                     len(targets), record.get("cwd"))
+            return
+        # Also drop the muted subscribers from the dispatch set so we
+        # don't burn WS frames on them even when at least one peer is
+        # active. The browser would silently discard the audio either
+        # way; this just saves bandwidth on mobile uplinks.
+        targets = [s for s in targets if not s.muted]
 
         sentences = split_sentences(text)
         if not sentences:

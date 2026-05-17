@@ -87,9 +87,18 @@ def authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("CCPIPE_CREDENTIALS_FILE", str(tmp_path / "credentials"))
     monkeypatch.setenv("CCPIPE_AUTH_USERNAME", "alice")
     monkeypatch.setenv("CCPIPE_AUTH_PASSWORD", "letmein")
+    # /api/fs/* tests operate under tmp_path which lives outside $HOME.
+    # Point the jail at tmp_path so the fs endpoints accept it.
+    monkeypatch.setenv("CCPIPE_FS_ROOT", str(tmp_path))
     import ccpipe.auth as auth
     import ccpipe.main as m
+    import ccpipe.routes.auth as routes_auth
     auth.reset_cached_credential()
+    # Throttle + TOTP burn-list state survives importlib.reload(main)
+    # because routes.auth is cached separately. Reset both so tests
+    # don't carry state between runs.
+    routes_auth.reset_throttle_state()
+    auth._totp_burned.clear()
     importlib.reload(m)
     c = TestClient(m.app)
     c.post("/api/auth/login",
@@ -276,6 +285,38 @@ def test_totp_confirm_rejects_bad_code(authed_client):
     assert r.status_code == 401
 
 
+def test_totp_code_replay_refused(authed_client):
+    """A code that has been accepted once is burned for ~120s. Replay
+    within that window must be refused even though pyotp's window
+    would normally still accept it."""
+    import pyotp
+    # Enrol.
+    r = authed_client.post("/api/auth/totp/enroll",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein"})
+    assert r.status_code == 200
+    secret = r.json()["secret"]
+    code = pyotp.TOTP(secret).now()
+    r = authed_client.post("/api/auth/totp/confirm",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"secret": secret, "code": code})
+    assert r.status_code == 200
+    # First login with the current code succeeds.
+    authed_client.post("/api/auth/logout", headers={"X-Requested-By": "ccpipe"})
+    code = pyotp.TOTP(secret).now()
+    r = authed_client.post("/api/auth/login",
+                           headers={"X-Requested-By": "ccpipe"},
+                           json={"username": "alice", "password": "letmein", "code": code})
+    assert r.status_code == 200
+    assert r.json()["authenticated"] is True
+    # Second login with the SAME code — replay, must fail.
+    authed_client.post("/api/auth/logout", headers={"X-Requested-By": "ccpipe"})
+    r = authed_client.post("/api/auth/login",
+                           headers={"X-Requested-By": "ccpipe"},
+                           json={"username": "alice", "password": "letmein", "code": code})
+    assert r.status_code == 401
+
+
 # ── Login rate-limit ────────────────────────────────────────────────────
 
 def test_login_rate_limit(authed_client):
@@ -287,8 +328,8 @@ def test_login_rate_limit(authed_client):
     # The test_review_fixes.py module hasn't tripped the bucket yet,
     # but other tests in this module do log in successfully; reset
     # the in-memory bucket so this test is order-independent.
-    import ccpipe.main as m
-    m._login_attempts.clear()
+    import ccpipe.routes.auth as routes_auth
+    routes_auth.reset_throttle_state()
     # 5 attempts is the cap.
     for i in range(5):
         r = authed_client.post("/api/auth/login",
@@ -479,15 +520,64 @@ def test_fs_list_show_hidden(authed_client, tmp_path):
     assert "regular" in names
 
 
+# ── /api/fs/* root-jail ─────────────────────────────────────────────────
+
+def test_fs_read_rejects_path_outside_jail(authed_client):
+    """The jail is set to tmp_path by the authed_client fixture; /etc
+    is outside it and must be refused with 403 even though it exists."""
+    r = authed_client.get("/api/fs/read?path=/etc/passwd")
+    assert r.status_code == 403
+
+
+def test_fs_list_rejects_path_outside_jail(authed_client):
+    r = authed_client.get("/api/fs/list?path=/etc")
+    assert r.status_code == 403
+
+
+def test_fs_write_rejects_path_outside_jail(authed_client):
+    r = authed_client.post(
+        "/api/fs/write",
+        headers={"X-Requested-By": "ccpipe"},
+        json={"path": "/etc/ccpipe-jail-escape", "content": "x"},
+    )
+    # parent (/etc) resolves and is outside jail → 403.
+    assert r.status_code == 403
+
+
+def test_fs_read_rejects_non_regular_file(authed_client):
+    """/dev/null is a character device — st_size is 0 but a read would
+    happily return arbitrary bytes. Must be refused with 400 before we
+    ever open it. Use a CCPIPE_FS_ROOT that contains /dev for the test."""
+    import os as _os
+    _os.environ["CCPIPE_FS_ROOT"] = "/"
+    try:
+        r = authed_client.get("/api/fs/read?path=/dev/null")
+        # Either 400 (not a regular file) or 403 (denied dir, e.g. .ssh
+        # is below root) — both are correct safety outcomes; the
+        # negative is a 200 with arbitrary content.
+        assert r.status_code in (400, 403)
+    finally:
+        _os.environ.pop("CCPIPE_FS_ROOT", None)
+
+
+def test_fs_path_with_nul_byte_rejected_cleanly(authed_client):
+    """A NUL byte in the path raises ValueError inside Path.resolve;
+    the endpoint must catch it and return 404, not a 500 + traceback."""
+    r = authed_client.get("/api/fs/read?path=/tmp/%00")
+    assert r.status_code in (404, 403)
+    # Must NOT be a 500.
+    assert r.status_code != 500
+
+
 def test_claude_sessions_lists_resumable_only(authed_client, tmp_path, monkeypatch):
     """Sessions whose JSONLs sit in the matching projects subdir should be
     returned; sessions currently running on the box (per the live
     ~/.claude/sessions/<pid>.json index) must be filtered OUT so we don't
     tempt the user into resuming a live conversation."""
-    import ccpipe.main as m
+    import ccpipe.routes.sessions as routes_sessions
 
     fake_home = tmp_path
-    monkeypatch.setattr(m.Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setattr(routes_sessions.Path, "home", staticmethod(lambda: fake_home))
 
     proj_cwd = tmp_path / "code" / "myproject"
     proj_cwd.mkdir(parents=True)
@@ -529,9 +619,9 @@ def test_claude_sessions_skips_framework_caveat_messages(authed_client, tmp_path
     """The first record in a fresh transcript is often a framework caveat
     wrapped in <local-command-…> tags. _read_first_real_user_message must
     skip those and surface the first plain prompt instead."""
-    import ccpipe.main as m
+    import ccpipe.routes.sessions as routes_sessions
 
-    monkeypatch.setattr(m.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(routes_sessions.Path, "home", staticmethod(lambda: tmp_path))
     proj_cwd = tmp_path / "p"
     proj_cwd.mkdir()
     encoded = (
@@ -616,8 +706,8 @@ def test_fs_read_rejects_oversize(authed_client, tmp_path):
 
 def test_fs_upload_respects_cap(authed_client, tmp_path, monkeypatch):
     """Cap honoured by /api/fs/upload."""
-    import ccpipe.main as m
-    monkeypatch.setattr(m.app_config, "load",
+    import ccpipe.routes.fs as routes_fs
+    monkeypatch.setattr(routes_fs.app_config, "load",
                          lambda: type("C", (), {"fs": type("F", (), {"upload_limit_mb": 1})()})())
     payload = b"x" * (2 * 1024 * 1024)
     r = authed_client.post(
@@ -639,6 +729,27 @@ def test_fs_upload_round_trip(authed_client, tmp_path):
     )
     assert r.status_code == 200
     assert (tmp_path / "u.txt").read_bytes() == payload
+
+
+def test_fs_upload_oversize_leaves_no_tmp_file(authed_client, tmp_path, monkeypatch):
+    """When the upload exceeds the cap mid-stream, the .ccpipe.tmp temp
+    file must be unlinked — otherwise repeated aborted uploads would
+    accumulate junk in the target directory."""
+    import ccpipe.routes.fs as routes_fs
+    monkeypatch.setattr(routes_fs.app_config, "load",
+                         lambda: type("C", (), {"fs": type("F", (), {"upload_limit_mb": 1})()})())
+    payload = b"x" * (2 * 1024 * 1024)
+    r = authed_client.post(
+        f"/api/fs/upload?path={tmp_path}/big.bin",
+        headers={"X-Requested-By": "ccpipe",
+                 "Content-Type": "application/octet-stream"},
+        content=payload,
+    )
+    assert r.status_code == 413
+    # No tmp file left behind.
+    assert not (tmp_path / "big.bin.ccpipe.tmp").exists()
+    # And of course no final file either.
+    assert not (tmp_path / "big.bin").exists()
 
 
 def test_fs_rename_and_delete(authed_client, tmp_path):

@@ -13,6 +13,7 @@ dependencies = [
     "itsdangerous>=2",   # signed session cookies via starlette.middleware.sessions
     "pyotp>=2.9",        # TOTP (RFC 6238) for optional second-factor auth
     "qrcode>=7",         # render the TOTP enrolment QR server-side (SVG, no PIL)
+    "argon2-cffi>=23",   # password hashing (argon2id) for stored credentials
 ]
 
 [project.optional-dependencies]
