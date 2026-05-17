@@ -27,7 +27,7 @@ export function openDirectoryBrowser(
   opts: OpenDirectoryBrowserOptions,
 ): void {
   const overlay = document.createElement("div");
-  overlay.className = "modal";
+  overlay.className = "modal-overlay";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-label", "Choose directory");
 

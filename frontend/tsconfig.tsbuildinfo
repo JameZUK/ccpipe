@@ -1,1 +1,0 @@
-{"root":["./src/auth.ts","./src/directory-browser.ts","./src/display-prefs.ts","./src/icons.ts","./src/main.ts","./src/mic.ts","./src/mobile.ts","./src/notifications.ts","./src/recent-dirs.ts","./src/session-picker.ts","./src/settings.ts","./src/terminal.ts","./src/tts.ts","./src/wake-lock.ts","./src/waveform.ts","./src/ws.ts"],"version":"5.9.3"}

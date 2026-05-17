@@ -63,10 +63,15 @@ export function openSettings(opts: SettingsOpts): void {
   modal.setAttribute("aria-modal", "true");
   modal.setAttribute("aria-label", "Settings");
 
+  // Logical grouping: identity first (account + 2FA), then runtime
+  // preferences (voice, display). Two-factor lives in its own section
+  // rather than nested under Account so the enroll flow has room to
+  // breathe (the QR + confirmation steps want vertical space).
   modal.append(
     buildHeader(),
-    buildVoiceSection(),
     buildAccountSection(opts),
+    buildTwoFactorSection(),
+    buildVoiceSection(),
     buildDisplaySection(opts),
     buildAboutFooter(),
   );
@@ -306,11 +311,6 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
       <button type="button" class="btn btn--ghost" data-role="signout">${ICONS.logout}<span>sign out</span></button>
       <button type="button" class="btn btn--primary" data-role="save">Save credentials</button>
     </div>
-    <div class="modal__subsection" data-role="totp-subsection">
-      <div class="modal__subsection-title">Two-factor (TOTP)</div>
-      <div class="modal__subsection-status" data-role="totp-status-text">loading…</div>
-      <div data-role="totp-actions"></div>
-    </div>
   `;
 
   const status = sec.querySelector<HTMLElement>("[data-role=account-status]")!;
@@ -319,9 +319,6 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
   const newPw = sec.querySelector<HTMLInputElement>("input[name=newPassword]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
   const signOutBtn = sec.querySelector<HTMLButtonElement>("[data-role=signout]")!;
-  const totpStatusText = sec.querySelector<HTMLElement>("[data-role=totp-status-text]")!;
-  const totpActions = sec.querySelector<HTMLElement>("[data-role=totp-actions]")!;
-  _wireTotpUi(totpStatusText, totpActions);
 
   saveBtn.addEventListener("click", async () => {
     status.classList.remove("modal__status--error");
@@ -442,7 +439,23 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
   return sec;
 }
 
-// ─── TOTP enrollment + disable (Account → Two-factor) ──────────────────
+// ─── Two-factor (TOTP) section ─────────────────────────────────────────
+
+function buildTwoFactorSection(): HTMLElement {
+  const sec = document.createElement("section");
+  sec.className = "modal__section";
+  sec.innerHTML = `
+    <h2 class="modal__section-title">two-factor</h2>
+    <div class="totp-status" data-role="totp-status-text">loading…</div>
+    <div data-role="totp-actions"></div>
+  `;
+  const statusEl = sec.querySelector<HTMLElement>("[data-role=totp-status-text]")!;
+  const actions  = sec.querySelector<HTMLElement>("[data-role=totp-actions]")!;
+  _wireTotpUi(statusEl, actions);
+  return sec;
+}
+
+// ─── TOTP enrollment + disable (helpers used by the section above) ─────
 
 async function _wireTotpUi(statusEl: HTMLElement, actions: HTMLElement): Promise<void> {
   const refresh = async () => {
@@ -457,7 +470,7 @@ async function _wireTotpUi(statusEl: HTMLElement, actions: HTMLElement): Promise
     }
     if (s.otp_enrolled) {
       statusEl.textContent = "enrolled — required at next login";
-      statusEl.className = "modal__subsection-status modal__subsection-status--on";
+      statusEl.className = "totp-status totp-status--on";
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn btn--ghost";
@@ -466,7 +479,7 @@ async function _wireTotpUi(statusEl: HTMLElement, actions: HTMLElement): Promise
       actions.append(btn);
     } else {
       statusEl.textContent = "disabled — password-only login";
-      statusEl.className = "modal__subsection-status";
+      statusEl.className = "totp-status";
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn btn--primary";

@@ -7,7 +7,8 @@ import {
   onDisplayPrefsChange,
   saveLastSession,
 } from "./display-prefs";
-import { GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
+import { openFilePanel } from "./file-panel";
+import { FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI } from "./mobile";
 import * as notifications from "./notifications";
 import { renderSessionPicker } from "./session-picker";
@@ -163,6 +164,16 @@ async function attachTerminal(session: string): Promise<void> {
     void tts.playText(lastSpokenText);
   });
 
+  // File panel — opens the upload/download/edit sheet rooted at the
+  // session's cwd if we can resolve it, otherwise /home.
+  const filesBtn = document.createElement("button");
+  filesBtn.className = "pill pill--icon";
+  filesBtn.title = "Files";
+  filesBtn.innerHTML = FOLDER_SVG;
+  filesBtn.addEventListener("click", () => {
+    openFilePanel(document.body, { initialPath: "/home" });
+  });
+
   const settingsBtn = document.createElement("button");
   settingsBtn.className = "pill pill--icon";
   settingsBtn.title = "Settings";
@@ -173,7 +184,7 @@ async function attachTerminal(session: string): Promise<void> {
     onSessionInvalidated: () => { socket.close(); bootstrap(); },
   });
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, settingsBtn);
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, filesBtn, settingsBtn);
   statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────

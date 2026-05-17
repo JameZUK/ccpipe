@@ -36,11 +36,21 @@ class TtsConfig:
 
 
 @dataclass
+class FsConfig:
+    """Settings for the file-transfer side-panel."""
+    # Maximum size (megabytes) we'll accept for a single upload. Edit
+    # this in ~/.local/state/ccpipe/config.json to change without a
+    # restart. Hard floor of 1 MB so the inline editor still works.
+    upload_limit_mb: int = 50
+
+
+@dataclass
 class AppConfig:
     tts: TtsConfig = field(default_factory=TtsConfig)
+    fs: FsConfig = field(default_factory=FsConfig)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"tts": asdict(self.tts)}
+        return {"tts": asdict(self.tts), "fs": asdict(self.fs)}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
@@ -60,7 +70,16 @@ class AppConfig:
         scope = tts_data.get("scope")
         if isinstance(scope, str) and scope in VALID_SCOPES:
             tts.scope = scope
-        return cls(tts=tts)
+        fs_data = data.get("fs", {}) if isinstance(data, dict) else {}
+        if not isinstance(fs_data, dict):
+            fs_data = {}
+        fs = FsConfig()
+        try:
+            limit = int(fs_data.get("upload_limit_mb", fs.upload_limit_mb))
+            fs.upload_limit_mb = max(1, min(10_240, limit))   # 1MB .. 10GB
+        except (TypeError, ValueError):
+            pass
+        return cls(tts=tts, fs=fs)
 
 
 def _state_dir() -> Path:

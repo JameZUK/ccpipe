@@ -229,7 +229,10 @@ def test_totp_enroll_then_login_requires_code(authed_client):
     assert r.status_code == 200, r.text
     enroll = r.json()
     secret = enroll["secret"]
-    assert "qr_svg" in enroll and enroll["qr_svg"].startswith("<?xml")
+    # SVG is stripped of its XML prolog server-side so the frontend
+    # can render it via element.innerHTML cleanly. Just check we got
+    # an SVG root element back.
+    assert "qr_svg" in enroll and enroll["qr_svg"].lstrip().startswith("<svg")
     # 2. Confirm with a fresh code.
     code = pyotp.TOTP(secret).now()
     r = authed_client.post("/api/auth/totp/confirm",
@@ -565,6 +568,110 @@ def test_create_session_rejects_bad_cwd(authed_client):
                             json={"name": "test", "cwd": "relative/path"})
     assert r.status_code == 400
     assert "absolute" in r.json()["detail"]
+
+
+# ── File-transfer panel endpoints ────────────────────────────────────────
+
+def test_fs_list_with_files_returns_files(authed_client, tmp_path):
+    """`files=1` extends the directory-only listing with file entries
+    that carry size + mtime."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "hello.txt").write_text("hi")
+    r = authed_client.get(f"/api/fs/list?path={tmp_path}&files=1")
+    assert r.status_code == 200
+    body = r.json()
+    names = {(e["name"], e["type"]) for e in body["entries"]}
+    assert ("sub", "dir") in names
+    assert ("hello.txt", "file") in names
+    f_entry = next(e for e in body["entries"] if e["name"] == "hello.txt")
+    assert f_entry["size"] == 2
+
+
+def test_fs_read_write_round_trip(authed_client, tmp_path):
+    p = tmp_path / "note.md"
+    p.write_text("hello\nworld")
+    r = authed_client.get(f"/api/fs/read?path={p}")
+    assert r.status_code == 200
+    assert r.json()["content"] == "hello\nworld"
+    r = authed_client.post("/api/fs/write",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"path": str(p), "content": "new content"})
+    assert r.status_code == 200
+    assert p.read_text() == "new content"
+
+
+def test_fs_read_rejects_binary(authed_client, tmp_path):
+    p = tmp_path / "blob.bin"
+    p.write_bytes(b"\x00\x01\x02\x03" * 100)
+    r = authed_client.get(f"/api/fs/read?path={p}")
+    assert r.status_code == 415
+
+
+def test_fs_read_rejects_oversize(authed_client, tmp_path):
+    p = tmp_path / "big.txt"
+    p.write_bytes(b"x" * (2 * 1024 * 1024))  # 2 MB > editor cap
+    r = authed_client.get(f"/api/fs/read?path={p}")
+    assert r.status_code == 413
+
+
+def test_fs_upload_respects_cap(authed_client, tmp_path, monkeypatch):
+    """Cap honoured by /api/fs/upload."""
+    import ccpipe.main as m
+    monkeypatch.setattr(m.app_config, "load",
+                         lambda: type("C", (), {"fs": type("F", (), {"upload_limit_mb": 1})()})())
+    payload = b"x" * (2 * 1024 * 1024)
+    r = authed_client.post(
+        f"/api/fs/upload?path={tmp_path}/big.bin",
+        headers={"X-Requested-By": "ccpipe",
+                 "Content-Type": "application/octet-stream"},
+        content=payload,
+    )
+    assert r.status_code == 413
+
+
+def test_fs_upload_round_trip(authed_client, tmp_path):
+    payload = b"hello world\n"
+    r = authed_client.post(
+        f"/api/fs/upload?path={tmp_path}/u.txt",
+        headers={"X-Requested-By": "ccpipe",
+                 "Content-Type": "application/octet-stream"},
+        content=payload,
+    )
+    assert r.status_code == 200
+    assert (tmp_path / "u.txt").read_bytes() == payload
+
+
+def test_fs_rename_and_delete(authed_client, tmp_path):
+    src = tmp_path / "a.txt"
+    src.write_text("hi")
+    r = authed_client.post("/api/fs/rename",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"src": str(src), "dst": str(tmp_path / "b.txt")})
+    assert r.status_code == 200
+    assert (tmp_path / "b.txt").exists()
+    r = authed_client.post("/api/fs/delete",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"path": str(tmp_path / "b.txt")})
+    assert r.status_code == 200
+    assert not (tmp_path / "b.txt").exists()
+
+
+def test_fs_mkdir(authed_client, tmp_path):
+    new_dir = tmp_path / "fresh"
+    r = authed_client.post("/api/fs/mkdir",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"path": str(new_dir)})
+    assert r.status_code == 200
+    assert new_dir.is_dir()
+
+
+def test_fs_download(authed_client, tmp_path):
+    p = tmp_path / "dl.bin"
+    p.write_bytes(b"deadbeef")
+    r = authed_client.get(f"/api/fs/download?path={p}")
+    assert r.status_code == 200
+    assert r.content == b"deadbeef"
+    assert "attachment" in r.headers["content-disposition"]
 
 
 # ── #19  CSP tightening ──────────────────────────────────────────────────

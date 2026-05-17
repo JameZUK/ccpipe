@@ -995,27 +995,22 @@ a:hover { color: var(--fg); }
   letter-spacing: 0.08em;
 }
 
-/* Two-factor sub-section inside Account. */
-.modal__subsection {
-  margin-top: var(--s-4);
-  padding-top: var(--s-3);
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-3);
-}
-.modal__subsection-title {
-  font-family: var(--font-display);
-  font-size: var(--t-sm);
-  letter-spacing: 0.22em;
-  color: var(--fg-muted);
-  text-transform: lowercase;
-}
-.modal__subsection-status {
+/* Two-factor (TOTP) section status pill */
+.totp-status {
   font-size: var(--t-xs);
   color: var(--fg-muted);
+  padding: 0.2rem var(--s-3);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  align-self: flex-start;
+  display: inline-block;
+  margin-bottom: var(--s-3);
 }
-.modal__subsection-status--on { color: var(--ok); }
+.totp-status--on {
+  color: var(--ok);
+  border-color: var(--ok);
+}
 
 .totp-enroll {
   display: flex;
@@ -1064,6 +1059,148 @@ a:hover { color: var(--fg); }
   font-family: var(--font-mono);
   color: var(--fg);
   letter-spacing: 0.04em;
+}
+
+/* ─── File panel (upload/download/edit) ────────────────────────────── */
+
+.file-panel { font-family: var(--font-mono); max-width: 42rem; }
+.file-panel__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.file-panel__title {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  margin-right: var(--s-3);
+}
+.file-panel__pathbar {
+  display: flex;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.file-panel__path {
+  flex: 1;
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  outline: none;
+  min-width: 0;
+}
+.file-panel__path:focus { border-color: var(--accent); }
+.file-panel__up { width: 2.4rem; flex-shrink: 0; }
+.file-panel__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.file-panel__upload {
+  cursor: pointer;
+}
+.file-panel__status {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  flex: 1;
+  text-align: right;
+}
+.file-panel__status--error { color: var(--critical); }
+.file-panel__list {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  -webkit-overflow-scrolling: touch;
+}
+.file-panel__empty {
+  padding: var(--s-4);
+  color: var(--fg-faint);
+  text-align: center;
+  font-size: var(--t-sm);
+}
+.file-panel__row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.file-panel__row:last-child { border-bottom: none; }
+.file-panel__row:hover { background: var(--bg-input); }
+.file-panel__row__main {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.file-panel__row__icon { color: var(--accent); flex-shrink: 0; }
+.file-panel__row__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-panel__row--dir .file-panel__row__name { color: var(--fg); }
+.file-panel__row--file .file-panel__row__name { color: var(--fg-dim); }
+.file-panel__row__meta {
+  color: var(--fg-faint);
+  font-size: var(--t-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.file-panel__row__actions { position: relative; }
+
+/* Inline editor sheet. */
+.file-editor {
+  max-width: 56rem;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.file-editor__area {
+  flex: 1;
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: none;
+  outline: none;
+  padding: var(--s-3) var(--s-4);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  resize: none;
+  tab-size: 4;
+  white-space: pre;
+}
+.file-editor__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-top: 1px solid var(--border);
+}
+@media (max-width: 480px) {
+  .file-editor { height: 100vh; }
 }
 
 @media (max-width: 640px) {
@@ -1629,18 +1766,10 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   .picker__cwd-row .btn { width: 100%; justify-content: center; }
 }
 
-/* ─── Modal directory browser ──────────────────────────────────────── */
-
-.modal {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.62);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  padding: var(--s-4);
-}
+/* ─── Modal sheet (directory browser + file panel) ─────────────────── */
+/* These reuse the .modal-overlay backdrop defined elsewhere in this
+   sheet so there's only ONE "is-a-modal" class in the codebase. The
+   sheet itself sits inside the overlay; .modal__sheet is the body. */
 .modal__sheet {
   background: var(--bg);
   border: 1px solid var(--border-strong);
@@ -1749,7 +1878,7 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
 .dir-browser__status.error { color: var(--critical); }
 
 @media (max-width: 480px) {
-  .modal { padding: 0; }
+  .modal-overlay { padding: 0; }
   .modal__sheet {
     max-width: 100%;
     max-height: 100vh;

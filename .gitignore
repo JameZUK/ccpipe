@@ -39,3 +39,6 @@ tmp/
 
 # Claude Code workspace state (not part of ccpipe itself)
 .claude/
+
+# vite/tsc incremental build cache (don't ship)
+tsconfig.tsbuildinfo
