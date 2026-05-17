@@ -96,25 +96,48 @@ curl http://127.0.0.1:8080/api/health   # should print {"status":"ok"}
 
 ## Reverse proxy (TLS termination)
 
-The bundled `nginx/ccpipe.conf` is a sample server block. If nginx
-runs **on the same host** as ccpipe, copy and enable it:
+ccpipe runs HTTP only — it does not terminate TLS itself. The
+recommended deployment is **nginx in front, terminating TLS**, with
+ccpipe's uvicorn bound to `0.0.0.0:8080` so the proxy can reach it
+regardless of where it runs.
+
+The bundled `nginx/ccpipe.conf` is a complete, production-shaped
+sample (HTTPS server block + HTTP-to-HTTPS redirect + WS tuning +
+defence-in-depth headers). Three sections work together; all three
+must agree on which host is the proxy:
+
+1. **nginx** — `server_name`, cert paths, and `proxy_pass` target
+2. **ccpipe backend** — runs with `--proxy-headers
+   --forwarded-allow-ips=<nginx-host-IP>` and `CCPIPE_BEHIND_TLS=1`
+3. **firewall** — :8080 reachable only from the nginx host
+
+### Topology: same-host vs off-host
+
+| | nginx **on the same host** as ccpipe | nginx **on a different LAN host** |
+|---|---|---|
+| `proxy_pass` | `http://127.0.0.1:8080` | `http://<ccpipe-host>:8080` |
+| ccpipe `--host` | tighten to `127.0.0.1` if you want | leave `0.0.0.0` |
+| `--forwarded-allow-ips` | `127.0.0.1` | the nginx host's LAN IP |
+| Firewall on :8080 | deny all external | allow from nginx host only |
+
+Off-host is the documented default; the systemd unit ships with
+`--host 0.0.0.0` so it works out of the box for that case.
+
+### Step 1: install the nginx config
 
 ```bash
+# Edit the four marked spots (server_name, cert paths, proxy_pass)
 sudo cp nginx/ccpipe.conf /etc/nginx/sites-available/ccpipe
+sudo $EDITOR /etc/nginx/sites-available/ccpipe
 sudo ln -sf /etc/nginx/sites-available/ccpipe /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-If the proxy runs on a **different host** (which is the supported
-default — uvicorn binds `0.0.0.0:8080` so the proxy can reach it over
-the LAN), point its `proxy_pass` at `http://<ccpipe-host>:8080` and
-make sure your firewall only exposes 8080 to the proxy's IP. The
-plain-HTTP listener on 8080 will still answer LAN requests; combine
-TLS + `CCPIPE_BEHIND_TLS=1` + the optional TOTP (see below) so the
-secure path is the only realistic way in.
+### Step 2: wire the ccpipe TLS drop-in
 
-Once TLS is in front, drop in a service drop-in to flip the security
-toggles. Replace `10.0.0.5` with the actual IP of your nginx host:
+Replace `10.0.0.5` with the actual IP of your nginx host. **The
+allow-ips list MUST be tight** — every IP in it can spoof
+`X-Forwarded-For` to bypass the per-IP login throttle.
 
 ```bash
 mkdir -p ~/.config/systemd/user/ccpipe.service.d/
@@ -124,12 +147,7 @@ Environment=CCPIPE_BEHIND_TLS=1
 Environment=CCPIPE_TRUSTED_HOSTS=ccpipe.example.com
 Environment=CCPIPE_ALLOWED_ORIGINS=https://ccpipe.example.com
 
-# Reset ExecStart and re-run uvicorn with proxy-headers honoured. The
-# allow-ips list MUST be tight — every IP in it can spoof X-Forwarded-
-# For to bypass the per-IP login throttle. List only the host(s) where
-# nginx actually runs. Without this, request.client.host returns the
-# nginx IP for every request and the per-IP throttle is effectively
-# global.
+# Reset ExecStart and re-run uvicorn with proxy-headers honoured.
 ExecStart=
 ExecStart=%h/Projects/ccpipe/backend/.venv/bin/uvicorn ccpipe.main:app \
     --host 0.0.0.0 --port 8080 \
@@ -138,21 +156,104 @@ EOF
 systemctl --user daemon-reload && systemctl --user restart ccpipe
 ```
 
-This:
-- marks the session cookie `Secure` + uses the `__Host-` prefix so it
-  refuses to travel over plain HTTP,
-- enables `TrustedHostMiddleware` bound to your hostname,
-- restricts WebSocket Origin checks to the HTTPS origin so a browser
-  loaded over HTTP can't hijack the WS upgrade,
-- sends `Strict-Transport-Security` on every response,
-- accepts `X-Real-IP` / `X-Forwarded-For` from the configured proxy
-  IP(s) only, so the per-IP login throttle works per-real-client and
-  the journal records true source IPs in throttle-tripped warnings.
+What `CCPIPE_BEHIND_TLS=1` flips on:
+- Session cookie gets `Secure` + the `__Host-` prefix so it refuses
+  to travel over plain HTTP.
+- `TrustedHostMiddleware` binds to your hostname so HTTP `Host`
+  header spoofing is rejected.
+- WebSocket Origin checks restricted to the HTTPS origin so a page
+  loaded over HTTP can't hijack the WS upgrade.
+- `Strict-Transport-Security` is sent on every response.
+- A startup banner reminds you to firewall :8080 to the proxy IP.
 
-Confirm the proxy-headers wiring is correct after restart by tailing
-the journal during a deliberate wrong-password attempt — the
-`login throttle tripped for ip=…` line should show the real client
-IP, not the nginx IP.
+What `--proxy-headers --forwarded-allow-ips=…` flips on:
+- `request.client.host` (used by the per-IP login throttle) reads
+  `X-Forwarded-For` from the proxy instead of always showing
+  nginx's IP.
+- The throttle log line (`login throttle tripped for ip=…`) shows
+  the real client IP, so you can see who's hammering you.
+- Combined with the firewall rule below, makes the per-IP cap
+  meaningful per-real-client.
+
+### Step 3: firewall :8080 to the proxy
+
+If nginx is off-host, only the nginx host should be allowed to reach
+ccpipe's backend port. Otherwise a LAN attacker can hit :8080
+directly over plaintext HTTP, bypassing both TLS and (in the
+spoofable case) the per-IP throttle.
+
+```bash
+# ufw example — replace 10.0.0.5 with the nginx host's IP
+sudo ufw deny  in on <iface> to any port 8080
+sudo ufw allow from 10.0.0.5 to any port 8080
+sudo ufw reload
+```
+
+iptables, nftables, your router ACL, or binding to a specific LAN
+interface (`--host 192.168.1.50`) all achieve the same thing — pick
+whatever fits your environment.
+
+### Verifying the wiring
+
+After `systemctl --user restart ccpipe` and `systemctl reload nginx`:
+
+```bash
+# 1. ccpipe's startup banner should warn about :8080:
+journalctl --user -u ccpipe -b | grep -A 6 BEHIND_TLS
+
+# 2. Hit the site over HTTPS — should return JSON, not an error:
+curl -sS https://ccpipe.example.com/api/health
+
+# 3. Deliberately fail a login and watch the journal for the real IP:
+curl -sS -X POST https://ccpipe.example.com/api/auth/login \
+     -H 'Content-Type: application/json' \
+     -H 'X-Requested-By: ccpipe' \
+     -d '{"username":"bad","password":"bad"}' &
+journalctl --user -u ccpipe -f | grep "login throttle"
+# If the logged IP is the nginx host, --proxy-headers isn't wired.
+# If it's your laptop, you're good.
+
+# 4. Backend should NOT be reachable directly from anywhere except
+#    the nginx host:
+curl -sS --max-time 3 http://<ccpipe-host>:8080/api/health
+# expected: timeout from a LAN host that isn't the proxy
+```
+
+### Common gotchas
+
+- **WebSocket disconnects after ~60 s of idle.** `proxy_read_timeout`
+  defaults to 60 s on nginx. The sample sets it to 1 day; tune
+  shorter if you want.
+- **Login throttle locks out everyone after 5 attempts.** Without
+  `--proxy-headers --forwarded-allow-ips=<nginx-IP>` every request
+  shows up as the same source IP and the per-IP cap is effectively
+  global. The fix is the systemd drop-in above.
+- **Cookie not set on first login.** `__Host-` cookies require both
+  `Secure` and `Path=/`; if you forgot `CCPIPE_BEHIND_TLS=1`, the
+  Secure flag isn't applied and the browser silently drops the
+  cookie under HTTPS. Look for `Set-Cookie: __Host-ccpipe_session`
+  in the response headers to confirm.
+- **`502 Bad Gateway` on first request.** Either nginx is pointing
+  at the wrong `proxy_pass` host/port, or the firewall rule blocks
+  the nginx host. `curl http://<ccpipe-host>:8080/api/health` from
+  the nginx box should return JSON.
+
+### Alternatives
+
+Caddy can replace the nginx server block in 5 lines and handles
+TLS issuance automatically:
+
+```caddy
+ccpipe.example.com {
+    reverse_proxy <ccpipe-host>:8080 {
+        # Trust X-Forwarded-* from Caddy. Caddy sets these by default.
+        header_up Host {host}
+    }
+}
+```
+
+Pair with the same `tls.conf` systemd drop-in, swapping
+`--forwarded-allow-ips=` for the Caddy host's IP.
 
 Then visit `https://<server_name>/`.
 
