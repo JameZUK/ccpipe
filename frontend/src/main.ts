@@ -54,13 +54,14 @@ export function consumePendingShare(): string | null {
   } catch { return null; }
 }
 
-function wsUrlFor(session: string, isReconnect: boolean): string {
+function wsUrlFor(session: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  // On reconnect, ask the backend NOT to replay tmux history — xterm's
-  // buffer already holds it from the first open, and replaying would
-  // append a duplicate copy on top of the live content.
-  const skip = isReconnect ? "&skip_history=1" : "";
-  return `${proto}//${location.host}/ws?session=${encodeURIComponent(session)}${skip}`;
+  // No more skip_history on reconnect — the server now always replays
+  // tmux's full pane and the frontend `term.reset()`s on hello so the
+  // replay replaces rather than appends. This is what fixes the bug
+  // where output that arrived during a disconnect window never made it
+  // into xterm's scrollback (refresh was the only workaround).
+  return `${proto}//${location.host}/ws?session=${encodeURIComponent(session)}`;
 }
 
 let authRequired = false;
@@ -323,6 +324,10 @@ async function attachTerminal(session: string): Promise<void> {
   };
 
   let writeToTerm: ((d: Uint8Array | string) => void) | null = null;
+  // Set once createTerminal has run. Called from onHello so each
+  // (re)connect starts with a clean buffer before the server's pane
+  // replay writes the current scrollback into it.
+  let resetTerminal: (() => void) | null = null;
   let mic: MicStreamerType | null = null;
   // Pass the session name so mute state is scoped per-session — muting
   // one conversation no longer silences a sibling tab.
@@ -469,7 +474,7 @@ async function attachTerminal(session: string): Promise<void> {
     }
   };
 
-  const socket = new TerminalSocket((isReconnect) => wsUrlFor(session, isReconnect), {
+  const socket = new TerminalSocket(wsUrlFor(session), {
     onStatus(status, info) {
       dot.className = "statusbar__dot " + (
         status === "open" ? "ok"
@@ -527,6 +532,12 @@ async function attachTerminal(session: string): Promise<void> {
       }
     },
     onHello(msg) {
+      // Reset xterm BEFORE the server's pane-replay bytes arrive on the
+      // wire so the replay replaces, not appends. On initial connect
+      // this is a no-op (buffer is empty); on reconnect it discards
+      // stale content so the replay accurately reflects tmux's current
+      // pane — closing the "new output not in scrollback" gap.
+      resetTerminal?.();
       sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(msg.session)}`;
       const secure = isSecureContext();
       setMicAvailable(!!(msg.voice && secure));
@@ -586,6 +597,7 @@ async function attachTerminal(session: string): Promise<void> {
 
   const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session);
   writeToTerm = terminalApi.writeToTerm;
+  resetTerminal = terminalApi.resetBuffer;
 
   // Cross-tab pref sync: if another tab changes display settings, mirror them here.
   const unsubPrefs = onDisplayPrefsChange((p) => terminalApi.applyPrefs(p));

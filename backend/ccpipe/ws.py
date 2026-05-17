@@ -118,8 +118,7 @@ async def _build_tts_filter(tmux_session: str):
     return _accept_cwd
 
 
-async def handle_terminal_ws(websocket: WebSocket, session: str,
-                              skip_history: bool = False) -> None:
+async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     await websocket.accept()
 
     # Auto-create the session if it doesn't exist yet.
@@ -132,16 +131,14 @@ async def handle_terminal_ws(websocket: WebSocket, session: str,
     # first attach instead of briefly rendering at the fallback 120x40.
     initial_cols, initial_rows, leftover = await _wait_for_initial_resize(websocket)
 
-    # Capture tmux's scrollback BEFORE the pty/attach spins up. Doing it
-    # after attach causes a sync race (see _capture_session_history docs).
-    #
-    # Skipped on reconnects (skip_history=true): xterm already holds the
-    # history from the initial connect, and replaying would dump a
-    # duplicate copy on top of the live buffer the user has been reading.
-    if skip_history:
-        history_bytes = b""
-    else:
-        history_bytes = await _capture_session_history(session, initial_rows)
+    # Capture tmux's full pane (history + visible) on EVERY connect, not
+    # just the first one. The frontend `term.reset()`s on `hello` so the
+    # bytes we send below replace the xterm buffer rather than appending
+    # to it. This is what closes the "new output isn't in scrollback after
+    # a reconnect" hole — during a network blip, lines that scrolled into
+    # tmux's history were previously never delivered to xterm because we
+    # skipped this capture on reconnects.
+    history_bytes = await _capture_session_history(session, initial_rows)
 
     pty_proc = PtyProcess(tmux.attach_argv(session),
                           cols=initial_cols, rows=initial_rows)

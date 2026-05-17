@@ -108,20 +108,18 @@ export class TerminalSocket {
   private removeLifecycleHooks: (() => void) | null = null;
 
   constructor(
-    // url is either a fixed string or a function that receives a flag
-    // indicating whether this is a reconnect (true) vs. first connect
-    // (false). Used to skip server-side history replay on reconnects so
-    // the xterm buffer isn't duplicated.
-    private readonly url: string | ((isReconnect: boolean) => string),
+    // url is a fixed string now — the previous form took an isReconnect
+    // flag to vary the URL (skip_history=1) on retries. That's gone; the
+    // backend always replays the full pane and the terminal resets on
+    // hello so the replay is a clean overwrite.
+    private readonly url: string,
     private readonly handlers: TerminalSocketHandlers,
   ) {
     this.attachLifecycleHooks();
   }
 
   private resolveUrl(): string {
-    return typeof this.url === "function"
-      ? this.url(this.hadOpenedOnce)
-      : this.url;
+    return this.url;
   }
 
   connect(): void {

@@ -221,6 +221,12 @@ mount_static(app)
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket, session: str, skip_history: int = 0) -> None:
+    # ``skip_history`` is accepted but ignored — we always replay tmux's
+    # current pane on every (re)connect so xterm's scrollback can't drift
+    # from tmux's during a disconnect window. The frontend ``term.reset()``s
+    # on hello so the replay replaces rather than appends. Kept in the
+    # signature so a cached pre-fix frontend still negotiates.
+    del skip_history
     if not await authorize_websocket(websocket):
         return
     try:
@@ -234,6 +240,6 @@ async def ws(websocket: WebSocket, session: str, skip_history: int = 0) -> None:
     if name == CONTROL_SESSION_NAME:
         await websocket.close(code=1008, reason="reserved session name")
         return
-    await handle_terminal_ws(websocket, name, skip_history=bool(skip_history))
+    await handle_terminal_ws(websocket, name)
 
 

@@ -395,8 +395,18 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     sendResize();
   };
 
+  /** Clear scrollback + visible AND reset terminal state so the next
+   * write starts from a clean slate. Used on every WS hello so the
+   * backend's pane-replay replaces xterm's buffer rather than appending.
+   * Without this, content that scrolled out of view during a network
+   * blip never made it into xterm's scrollback. */
+  const resetBuffer = (): void => {
+    if (disposed) return;
+    try { term.reset(); } catch {}
+  };
+
   return {
-    term, writeToTerm, sendResize, applyPrefs,
+    term, writeToTerm, sendResize, applyPrefs, resetBuffer,
     dispose: () => {
       disposed = true;
       pillCleanup?.();
