@@ -617,9 +617,51 @@ function openEditor(path: string): void {
   saveBtn.textContent = "save";
   foot.append(status, saveBtn);
 
-  sheet.append(head, textarea, foot);
+  // Custom corner-drag resize handle. CSS `resize: both` was being
+  // blocked by the save button in the footer (they shared the
+  // bottom-right pixel), so we drive width + height ourselves.
+  const handle = document.createElement("div");
+  handle.className = "file-editor__handle";
+  handle.setAttribute("aria-label", "Resize editor");
+  handle.setAttribute("role", "separator");
+  sheet.append(head, textarea, foot, handle);
   overlay.append(sheet);
   document.body.append(overlay);
+
+  let dragStart = { x: 0, y: 0, w: 0, h: 0 };
+  const clamp = () => ({
+    minW: 480,
+    minH: 320,
+    maxW: Math.floor(window.innerWidth * 0.98),
+    maxH: Math.floor(window.innerHeight * 0.98),
+  });
+  handle.addEventListener("pointerdown", (e) => {
+    if (sheet.dataset.maximised === "true") return;
+    e.preventDefault();
+    const r = sheet.getBoundingClientRect();
+    dragStart = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
+    handle.setPointerCapture(e.pointerId);
+    document.body.classList.add("file-editor-resizing");
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    const c = clamp();
+    const w = Math.max(c.minW, Math.min(c.maxW, dragStart.w + (e.clientX - dragStart.x)));
+    const h = Math.max(c.minH, Math.min(c.maxH, dragStart.h + (e.clientY - dragStart.y)));
+    sheet.style.width = `${w}px`;
+    sheet.style.height = `${h}px`;
+  });
+  const endResize = (e: PointerEvent) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    handle.releasePointerCapture(e.pointerId);
+    document.body.classList.remove("file-editor-resizing");
+    saveEditorSize({
+      w: Math.round(sheet.getBoundingClientRect().width),
+      h: Math.round(sheet.getBoundingClientRect().height),
+    });
+  };
+  handle.addEventListener("pointerup", endResize);
+  handle.addEventListener("pointercancel", endResize);
 
   const setStatus = (msg: string, error = false) => {
     status.textContent = msg;

@@ -1336,22 +1336,55 @@ body.file-panel-resizing {
   min-height: 320px;
   display: flex;
   flex-direction: column;
-  resize: both;
   overflow: hidden;
-  /* Anchor to top-left of the overlay cell so the bottom-right
-     native resize handle grows the editor naturally without the grid
-     re-centring fighting the drag — the previous `center` alignment
-     on either axis caused the handle to move out from under the
-     cursor as the element grew, which felt like "can't resize wider".
-     Both dimensions now respond cleanly to the corner drag. The
-     overlay's own padding gives margin so the editor isn't flush
-     against the viewport edge. */
+  position: relative;
+  /* Anchored top-left of the overlay's grid cell so the resize
+     handle below can drag both dimensions outward without the grid
+     re-centring fighting the drag. The overlay's own padding gives
+     breathing room from the viewport edge. */
   place-self: start start;
 }
 .file-editor[data-maximised="true"] {
   width: 98vw !important;
   height: 98vh !important;
-  resize: none;
+}
+.file-editor[data-maximised="true"] .file-editor__handle { display: none; }
+
+/* Custom corner-drag resize handle. Native `resize: both` was being
+   obscured by the save button in the footer (same bottom-right
+   pixel), so we drive width + height ourselves with pointer events.
+   Visible affordance is a small diagonal stripe pattern; bumps to
+   amber on hover. */
+.file-editor__handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  z-index: 5;
+  touch-action: none;
+  background:
+    linear-gradient(135deg, transparent 0 35%,
+                            var(--fg-muted) 35% 45%,
+                            transparent 45% 60%,
+                            var(--fg-muted) 60% 70%,
+                            transparent 70% 100%);
+  transition: background 0.15s var(--ease-out);
+}
+.file-editor__handle:hover,
+body.file-editor-resizing .file-editor__handle {
+  background:
+    linear-gradient(135deg, transparent 0 35%,
+                            var(--accent) 35% 45%,
+                            transparent 45% 60%,
+                            var(--accent) 60% 70%,
+                            transparent 70% 100%);
+}
+body.file-editor-resizing {
+  cursor: nwse-resize;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .file-editor__area {
   flex: 1;
