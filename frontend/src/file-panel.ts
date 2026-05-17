@@ -123,6 +123,10 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   // 8px handle strip.
   let dragStartX = 0;
   let dragStartWidth = 0;
+  // Tracks the user's last "wide" width so dbl-click snap-to-half can
+  // toggle back to it on a second double-click. Initialised from the
+  // loaded preference.
+  let lastUserWidth = startWidth;
   resize.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     dragStartX = e.clientX;
@@ -141,10 +145,34 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
     if (!resize.hasPointerCapture(e.pointerId)) return;
     resize.releasePointerCapture(e.pointerId);
     document.body.classList.remove("file-panel-resizing");
-    saveStoredWidth(sheet.getBoundingClientRect().width);
+    const w = sheet.getBoundingClientRect().width;
+    saveStoredWidth(w);
+    lastUserWidth = w;
   };
   resize.addEventListener("pointerup", endDrag);
   resize.addEventListener("pointercancel", endDrag);
+
+  // Double-click the resize handle to snap the panel to 50% of the
+  // viewport — and a second double-click flips back to the user's
+  // last hand-set width. Useful for quick "side by side" layout
+  // without dragging precisely.
+  const halfWidth = () => Math.max(
+    MIN_WIDTH_PX,
+    Math.min(window.innerWidth * MAX_WIDTH_VW, Math.round(window.innerWidth * 0.5)),
+  );
+  resize.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    const cur = sheet.getBoundingClientRect().width;
+    const half = halfWidth();
+    const target = Math.abs(cur - half) < 4 ? lastUserWidth : half;
+    // Brief CSS transition for the snap; cleared after so subsequent
+    // drag pointermove updates feel instant.
+    sheet.style.transition = "width 180ms var(--ease-out)";
+    sheet.style.width = `${target}px`;
+    window.setTimeout(() => { sheet.style.transition = ""; }, 220);
+    saveStoredWidth(target);
+    if (target !== half) lastUserWidth = target;
+  });
 
   // ── Header ──────────────────────────────────────────────────────────
   const head = document.createElement("div");
