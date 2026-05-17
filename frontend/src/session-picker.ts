@@ -106,13 +106,44 @@ export function renderSessionPicker(
   errBox.className = "error";
 
   // ─── New-session panel ────────────────────────────────────────────────
+  // Collapsed-by-default accordion. The "start a new session" toggle
+  // lives below the list; clicking it expands the form below. Keeps
+  // the picker tight when the user is just looking for an existing
+  // session, and gives the form full breathing room when needed.
   const create = document.createElement("div");
   create.className = "picker__create";
+  create.dataset.expanded = "false";
 
-  const createTitle = document.createElement("div");
-  createTitle.className = "picker__create__label";
-  createTitle.textContent = "start a new session";
-  create.append(createTitle);
+  const createToggle = document.createElement("button");
+  createToggle.type = "button";
+  createToggle.className = "picker__create__toggle";
+  createToggle.setAttribute("aria-expanded", "false");
+  createToggle.innerHTML = `
+    <span class="picker__create__plus" aria-hidden="true">+</span>
+    <span class="picker__create__toggle-label">start a new session</span>
+    <span class="picker__create__chev" aria-hidden="true">▾</span>
+  `;
+  create.append(createToggle);
+
+  // CSS grid-template-rows trick: animate 0fr ↔ 1fr to expand without
+  // measuring content height manually. Body lives inside an overflow:
+  // hidden wrap so contents don't peek during the transition.
+  const createBodyWrap = document.createElement("div");
+  createBodyWrap.className = "picker__create__body-wrap";
+  const createBody = document.createElement("div");
+  createBody.className = "picker__create__body";
+  createBodyWrap.append(createBody);
+  create.append(createBodyWrap);
+
+  createToggle.addEventListener("click", () => {
+    const next = create.dataset.expanded !== "true";
+    create.dataset.expanded = next ? "true" : "false";
+    createToggle.setAttribute("aria-expanded", next ? "true" : "false");
+    if (next) {
+      // Focus the cwd input once the expand animation has run.
+      setTimeout(() => cwdInput.focus(), 220);
+    }
+  });
 
   // Working directory
   const cwdField = document.createElement("div");
@@ -135,13 +166,13 @@ export function renderSessionPicker(
   const recentBox = document.createElement("div");
   recentBox.className = "picker__recent";
   cwdField.append(cwdLabel, cwdRow, recentBox);
-  create.append(cwdField);
+  createBody.append(cwdField);
 
   // Resume list (hidden until a cwd resolves)
   const resumeBox = document.createElement("div");
   resumeBox.className = "picker__resume";
   resumeBox.hidden = true;
-  create.append(resumeBox);
+  createBody.append(resumeBox);
 
   // Session name
   const nameField = document.createElement("div");
@@ -154,7 +185,7 @@ export function renderSessionPicker(
   nameInput.autocapitalize = "none";
   nameInput.autocomplete = "off";
   nameField.append(nameLabel, nameInput);
-  create.append(nameField);
+  createBody.append(nameField);
 
   // Action row
   const actionRow = document.createElement("div");
@@ -164,7 +195,7 @@ export function renderSessionPicker(
   startBtn.className = "btn btn--primary";
   startBtn.textContent = "start session";
   actionRow.append(startBtn);
-  create.append(actionRow);
+  createBody.append(actionRow);
 
   picker.append(list, errBox, create);
   inner.append(head, picker);
@@ -387,17 +418,19 @@ export function renderSessionPicker(
     const dot = document.createElement("span");
     dot.className = "session-row__dot" + (s.attached ? " attached" : "");
 
-    const body = document.createElement("div");
-    body.className = "session-row__body";
+    // Single-line layout: name takes the available width and truncates
+    // with an ellipsis; status sits to its right tightly. The old
+    // two-line meta block has been folded into the status pill.
     const nameEl = document.createElement("div");
     nameEl.className = "session-row__name";
     nameEl.textContent = s.name;
-    const meta = document.createElement("div");
-    meta.className = "session-row__meta";
-    meta.innerHTML =
-      `<span>${s.windows} window${s.windows === 1 ? "" : "s"}</span>` +
-      `<span>${s.attached ? "attached" : `idle ${relativeTime(s.created)}`}</span>`;
-    body.append(nameEl, meta);
+    const statusEl = document.createElement("span");
+    statusEl.className = "session-row__status"
+      + (s.attached ? " session-row__status--attached" : "");
+    const winLabel = `${s.windows}w`;
+    statusEl.textContent = s.attached
+      ? `attached · ${winLabel}`
+      : `idle ${relativeTime(s.created)} · ${winLabel}`;
 
     const actions = document.createElement("div");
     actions.className = "session-row__actions";
@@ -426,7 +459,7 @@ export function renderSessionPicker(
     menu.append(renameItem, killItem);
     actions.append(kebab, menu);
 
-    row.append(dot, body, actions);
+    row.append(dot, nameEl, statusEl, actions);
 
     // Row-level click + Enter/Space open the session. Skip when the
     // click bubbles from the inline rename input or the kebab.
