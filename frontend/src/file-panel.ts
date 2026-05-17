@@ -1,15 +1,43 @@
 // File transfer / management side-panel.
 //
-// Shares the modal-sheet treatment with directory-browser so the UX is
-// consistent: full-screen sheet on phones, modal on desktop. Hits the
-// /api/fs/* endpoints for list + read + write + upload + download +
-// rename + delete + mkdir.
+// Adaptive layout:
+//   ≥ 600px viewport: anchored to the right edge of the screen, full
+//                     height, with a draggable resize handle on its
+//                     left. Width persists across sessions in
+//                     localStorage so the user's preferred ratio
+//                     between terminal and panel is sticky.
+//   < 600px viewport: full-screen overlay (mobile pattern).
 //
-// Inline editor is a plain <textarea> for v1 (UTF-8, ≤1 MB enforced
-// server-side). CodeMirror is queued for a later iteration once the
-// rest of the panel has settled.
+// Background backdrop is dimmed but not blocking — clicking outside
+// the sheet dismisses, the rest of the terminal stays interactive
+// underneath while the panel is open so the user can see what
+// they're operating on.
+//
+// Hits the /api/fs/* endpoints for list + read + write + upload +
+// download + rename + delete + mkdir. Inline editor is a plain
+// <textarea> for v1 (UTF-8, ≤1 MB enforced server-side).
 
 import { CLOSE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
+
+const LS_WIDTH_KEY = "ccpipe.filePanelWidth";
+const DEFAULT_WIDTH_PX = 480;
+const MIN_WIDTH_PX = 320;
+const MAX_WIDTH_VW = 0.9;     // up to 90% of viewport
+// Below this viewport width the @media query in styles.css forces the
+// panel full-width; the JS constant exists only as documentation of
+// the breakpoint the CSS applies — referenced from comments above.
+
+function loadStoredWidth(): number {
+  try {
+    const v = parseInt(localStorage.getItem(LS_WIDTH_KEY) ?? "", 10);
+    if (Number.isFinite(v) && v >= MIN_WIDTH_PX) return v;
+  } catch {}
+  return DEFAULT_WIDTH_PX;
+}
+
+function saveStoredWidth(px: number): void {
+  try { localStorage.setItem(LS_WIDTH_KEY, String(Math.round(px))); } catch {}
+}
 
 type FsEntry =
   | { name: string; type: "dir" }
@@ -65,13 +93,58 @@ export interface OpenFilePanelOptions {
 }
 
 export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = {}): void {
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.setAttribute("role", "dialog");
-  overlay.setAttribute("aria-label", "Files");
+  const shell = document.createElement("div");
+  shell.className = "file-panel-shell";
+  shell.setAttribute("role", "dialog");
+  shell.setAttribute("aria-label", "Files");
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "file-panel-shell__backdrop";
 
   const sheet = document.createElement("div");
-  sheet.className = "modal__sheet file-panel";
+  sheet.className = "file-panel-shell__sheet file-panel";
+  // Apply remembered width inline; the CSS @media query overrides this
+  // on narrow viewports so the panel still goes full-screen on mobile.
+  const startWidth = Math.min(loadStoredWidth(),
+                               Math.floor(window.innerWidth * MAX_WIDTH_VW));
+  sheet.style.width = `${startWidth}px`;
+
+  // Drag handle on the LEFT edge — desktop only via CSS.
+  const resize = document.createElement("div");
+  resize.className = "file-panel-shell__resize";
+  resize.setAttribute("aria-label", "Resize file panel");
+  resize.setAttribute("role", "separator");
+  resize.setAttribute("aria-orientation", "vertical");
+  sheet.append(resize);
+
+  // Wire pointer-driven resize. Each drag clamps to [MIN_WIDTH_PX, 90vw]
+  // and writes the final value to localStorage on pointerup. We use
+  // pointer capture so the drag survives the cursor sliding off the
+  // 8px handle strip.
+  let dragStartX = 0;
+  let dragStartWidth = 0;
+  resize.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    dragStartX = e.clientX;
+    dragStartWidth = sheet.getBoundingClientRect().width;
+    resize.setPointerCapture(e.pointerId);
+    document.body.classList.add("file-panel-resizing");
+  });
+  resize.addEventListener("pointermove", (e) => {
+    if (!resize.hasPointerCapture(e.pointerId)) return;
+    const delta = dragStartX - e.clientX;            // drag-left = wider
+    const max = Math.floor(window.innerWidth * MAX_WIDTH_VW);
+    const next = Math.max(MIN_WIDTH_PX, Math.min(max, dragStartWidth + delta));
+    sheet.style.width = `${next}px`;
+  });
+  const endDrag = (e: PointerEvent) => {
+    if (!resize.hasPointerCapture(e.pointerId)) return;
+    resize.releasePointerCapture(e.pointerId);
+    document.body.classList.remove("file-panel-resizing");
+    saveStoredWidth(sheet.getBoundingClientRect().width);
+  };
+  resize.addEventListener("pointerup", endDrag);
+  resize.addEventListener("pointercancel", endDrag);
 
   // ── Header ──────────────────────────────────────────────────────────
   const head = document.createElement("div");
@@ -134,8 +207,8 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   list.className = "file-panel__list";
 
   sheet.append(head, pathBar, toolbar, list);
-  overlay.append(sheet);
-  parent.append(overlay);
+  shell.append(backdrop, sheet);
+  parent.append(shell);
 
   // ── State ─────────────────────────────────────────────────────────
   let currentPath = opts.initialPath ?? "/home";
@@ -147,7 +220,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   };
 
   const dismiss = () => {
-    overlay.remove();
+    shell.remove();
     document.removeEventListener("keydown", onKey);
     opts.onClose?.();
   };
@@ -407,9 +480,10 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   });
 
   closeBtn.addEventListener("click", dismiss);
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) dismiss();
-  });
+  // Click the dimmed area outside the sheet → dismiss. Backdrop's
+  // pointer-events: auto in CSS makes it capture clicks; the sheet
+  // itself blocks its own clicks via pointer-events: auto as well.
+  backdrop.addEventListener("click", dismiss);
   // Outside-click closes any open kebab menu.
   document.addEventListener("click", (e) => {
     list.querySelectorAll<HTMLElement>(".session-row__menu:not([hidden])")

@@ -1063,7 +1063,85 @@ a:hover { color: var(--fg); }
 
 /* ─── File panel (upload/download/edit) ────────────────────────────── */
 
-.file-panel { font-family: var(--font-mono); max-width: 42rem; }
+/* Adaptive shell:
+   - ≥ SIDE_BREAKPOINT_PX (600px): anchored to the right edge, full
+     height, drag-resizable on the left. Width set inline by JS from
+     localStorage; clamped via min/max in CSS too.
+   - < 600px: full-screen overlay (mobile).
+*/
+.file-panel-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;       /* let click-through behind the panel */
+  animation: frame-in var(--dur-med) var(--ease-out);
+}
+.file-panel-shell__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(13, 12, 8, 0.32);
+  pointer-events: auto;
+}
+.file-panel-shell__sheet {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  min-width: 320px;
+  max-width: 90vw;
+  background: var(--bg);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -16px 0 36px rgba(0,0,0,0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  pointer-events: auto;       /* the panel itself eats clicks */
+  font-family: var(--font-mono);
+}
+.file-panel-shell__resize {
+  position: absolute;
+  left: -4px;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  z-index: 1;
+  touch-action: none;
+}
+.file-panel-shell__resize::before {
+  /* Thin visible affordance — invisible at rest, amber on hover. */
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.file-panel-shell__resize:hover::before,
+body.file-panel-resizing .file-panel-shell__resize::before {
+  background: var(--accent);
+}
+body.file-panel-resizing {
+  cursor: ew-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+@media (max-width: 600px) {
+  .file-panel-shell__backdrop { background: rgba(13, 12, 8, 0.78); }
+  .file-panel-shell__sheet {
+    width: 100% !important;     /* override the inline px width */
+    min-width: 0;
+    max-width: 100%;
+    border-left: none;
+    box-shadow: none;
+  }
+  .file-panel-shell__resize { display: none; }
+}
+
+.file-panel { /* legacy hook still used by inner classes */ }
 .file-panel__head {
   display: flex;
   justify-content: space-between;
