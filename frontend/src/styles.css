@@ -180,24 +180,34 @@ a:hover { color: var(--fg); }
   max-width: 560px;
 }
 
+/* Grid with named areas keeps the gear pinned to the top-right at
+   every breakpoint. The previous flex/`column` override stacked the
+   gear at the BOTTOM on mobile, which made it look misplaced. */
 .frame__head {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas: "wordmark tagline gear";
   align-items: baseline;
-  justify-content: space-between;
   gap: var(--s-4);
   margin-bottom: var(--s-5);
   padding-bottom: var(--s-3);
   border-bottom: 1px solid var(--border);
 }
+.frame__head .wordmark { grid-area: wordmark; }
 .frame__head .tagline {
+  grid-area: tagline;
   color: var(--fg-muted);
   font-size: var(--t-xs);
   text-transform: uppercase;
   letter-spacing: 0.18em;
-  flex: 1;
   text-align: right;
   margin-right: var(--s-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.frame__gear { grid-area: gear; }
 .frame__gear {
   display: inline-grid;
   place-items: center;
@@ -1328,6 +1338,15 @@ body.file-panel-resizing {
   flex-direction: column;
   resize: both;
   overflow: hidden;
+  /* Anchor to top-left of the overlay cell so the bottom-right
+     native resize handle grows the editor naturally without the grid
+     re-centring fighting the drag — the previous `center` alignment
+     on either axis caused the handle to move out from under the
+     cursor as the element grew, which felt like "can't resize wider".
+     Both dimensions now respond cleanly to the corner drag. The
+     overlay's own padding gives margin so the editor isn't flush
+     against the viewport edge. */
+  place-self: start start;
 }
 .file-editor[data-maximised="true"] {
   width: 98vw !important;
@@ -1711,7 +1730,17 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   .statusbar__state { display: none; }
   .frame { padding: var(--s-4); }
   .wordmark.huge { font-size: var(--t-2xl); }
-  .frame__head { flex-direction: column; align-items: flex-start; gap: var(--s-1); }
+  /* Two-row grid on mobile — wordmark + gear share the top row so
+     the cog stays top-right (matching desktop); the tagline drops to
+     a second row underneath, full-width. */
+  .frame__head {
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas:
+      "wordmark .       gear"
+      "tagline  tagline tagline";
+    row-gap: var(--s-2);
+  }
+  .frame__head .tagline { text-align: left; margin-right: 0; }
 }
 
 /* xterm.js needs to inherit our font for cohesion in places its
