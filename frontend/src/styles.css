@@ -1312,12 +1312,27 @@ body.file-panel-resizing {
 }
 .file-panel__row__actions { position: relative; }
 
-/* Inline editor sheet. */
+/* Inline editor sheet — adaptive to viewport, drag-resizable, and
+   maximisable via the header toggle. Default sits at 90% of the
+   viewport so on any screen the user gets a roomy editing surface.
+   The native `resize: both` gives a corner drag handle for fine
+   tuning; ResizeObserver persists the chosen size to localStorage. */
 .file-editor {
-  max-width: 56rem;
-  height: 80vh;
+  width: min(90vw, 1200px);
+  height: 90vh;
+  max-width: 98vw;
+  max-height: 98vh;
+  min-width: 480px;
+  min-height: 320px;
   display: flex;
   flex-direction: column;
+  resize: both;
+  overflow: hidden;
+}
+.file-editor[data-maximised="true"] {
+  width: 98vw !important;
+  height: 98vh !important;
+  resize: none;
 }
 .file-editor__area {
   flex: 1;
@@ -1340,8 +1355,14 @@ body.file-panel-resizing {
   padding: var(--s-3) var(--s-4);
   border-top: 1px solid var(--border);
 }
-@media (max-width: 480px) {
-  .file-editor { height: 100vh; }
+@media (max-width: 600px) {
+  .file-editor {
+    width: 100% !important;
+    height: 100vh !important;
+    min-width: 0;
+    min-height: 0;
+    resize: none;
+  }
 }
 
 @media (max-width: 640px) {

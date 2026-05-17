@@ -526,6 +526,33 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
 // ─── Inline editor ──────────────────────────────────────────────────
 
+const LS_EDITOR_SIZE = "ccpipe.editorSize";
+const LS_EDITOR_MAX  = "ccpipe.editorMaximised";
+
+interface EditorSize { w: number; h: number; }
+
+function loadEditorSize(): EditorSize | null {
+  try {
+    const raw = localStorage.getItem(LS_EDITOR_SIZE);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (typeof v?.w === "number" && typeof v?.h === "number") return v as EditorSize;
+  } catch {}
+  return null;
+}
+
+function saveEditorSize(s: EditorSize): void {
+  try { localStorage.setItem(LS_EDITOR_SIZE, JSON.stringify(s)); } catch {}
+}
+
+function loadEditorMaximised(): boolean {
+  try { return localStorage.getItem(LS_EDITOR_MAX) === "1"; } catch { return false; }
+}
+
+function saveEditorMaximised(v: boolean): void {
+  try { localStorage.setItem(LS_EDITOR_MAX, v ? "1" : "0"); } catch {}
+}
+
 function openEditor(path: string): void {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -533,6 +560,15 @@ function openEditor(path: string): void {
 
   const sheet = document.createElement("div");
   sheet.className = "modal__sheet file-editor";
+  // Apply persisted size. The CSS resize:both on .file-editor lets
+  // the user drag the bottom-right corner; we observe the resulting
+  // dimensions and save them so the next open restores the same shape.
+  const stored = loadEditorSize();
+  if (stored) {
+    sheet.style.width  = `${stored.w}px`;
+    sheet.style.height = `${stored.h}px`;
+  }
+  if (loadEditorMaximised()) sheet.dataset.maximised = "true";
 
   const head = document.createElement("div");
   head.className = "file-panel__head";
@@ -540,11 +576,31 @@ function openEditor(path: string): void {
   title.className = "file-panel__title";
   title.textContent = path;
   title.title = path;
+  // Maximise / restore toggle. Two clicks to a full-viewport editor
+  // when the user wants the most room, then click again to drop back
+  // to the remembered size.
+  const maxBtn = document.createElement("button");
+  maxBtn.type = "button";
+  maxBtn.className = "btn btn--ghost btn--icon";
+  maxBtn.title = "Toggle maximise";
+  const updateMaxIcon = () => {
+    const on = sheet.dataset.maximised === "true";
+    maxBtn.innerHTML = on
+      ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>`
+      : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h7v7H3z"/><path d="M14 3h7v7h-7z"/><path d="M14 14h7v7h-7z"/><path d="M3 14h7v7H3z"/></svg>`;
+  };
+  updateMaxIcon();
+  maxBtn.addEventListener("click", () => {
+    const on = sheet.dataset.maximised === "true";
+    sheet.dataset.maximised = on ? "false" : "true";
+    saveEditorMaximised(!on);
+    updateMaxIcon();
+  });
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "btn btn--ghost btn--icon";
   closeBtn.innerHTML = CLOSE_SVG;
-  head.append(title, closeBtn);
+  head.append(title, maxBtn, closeBtn);
 
   const textarea = document.createElement("textarea");
   textarea.className = "file-editor__area";
@@ -570,7 +626,24 @@ function openEditor(path: string): void {
     status.classList.toggle("file-panel__status--error", error);
   };
 
-  const dismiss = () => overlay.remove();
+  // ResizeObserver tracks the user dragging the bottom-right resize
+  // handle (CSS resize:both); we debounce and persist the result so
+  // re-opening the editor lands at the same shape.
+  let saveTimer: number | null = null;
+  const ro = new ResizeObserver((entries) => {
+    if (sheet.dataset.maximised === "true") return;
+    const cr = entries[0].contentRect;
+    if (saveTimer !== null) clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+      saveEditorSize({ w: Math.round(cr.width), h: Math.round(cr.height) });
+    }, 250);
+  });
+  ro.observe(sheet);
+
+  const dismiss = () => {
+    try { ro.disconnect(); } catch {}
+    overlay.remove();
+  };
 
   // Load
   void apiJson<{ content: string; size: number }>(
