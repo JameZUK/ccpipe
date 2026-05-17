@@ -1,0 +1,1669 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   ccpipe — engineer's notebook
+   warm-dark · all-mono · parchment-on-charcoal · one signal accent
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: dark;
+
+  /* Type stacks */
+  --font-display: 'Major Mono Display', ui-monospace, monospace;
+  --font-mono: 'DM Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Type scale (modular, 1.2 ratio) */
+  --t-xs: 0.72rem;
+  --t-sm: 0.82rem;
+  --t-md: 0.95rem;
+  --t-lg: 1.14rem;
+  --t-xl: 1.40rem;
+  --t-2xl: 1.84rem;
+  --t-3xl: 2.60rem;
+
+  /* Spacing (4px base, ASCII-character relations) */
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.5rem;
+  --s-6: 2rem;
+  --s-7: 3rem;
+  --s-8: 4.5rem;
+
+  /* Palette — warm charcoal → parchment, single amber accent */
+  --bg: #0d0c08;
+  --bg-elev: #161410;
+  --bg-input: #1d1a14;
+  --bg-overlay: rgba(13, 12, 8, 0.85);
+  --border: #2a2620;
+  --border-strong: #3a3528;
+
+  --fg: #e8dfc8;
+  --fg-dim: #b2a99a;
+  --fg-muted: #6e6759;
+  --fg-faint: #44402f;
+
+  --accent: #f5a524;
+  --accent-soft: #c9871a;
+  --accent-bg: rgba(245, 165, 36, 0.10);
+
+  --critical: #e95141;
+  --critical-soft: #c64634;
+  --critical-bg: rgba(233, 81, 65, 0.12);
+
+  --ok: #8eb874;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-snap: cubic-bezier(0.4, 0.0, 0.0, 1);
+  --dur-fast: 120ms;
+  --dur-med: 240ms;
+  --dur-slow: 420ms;
+
+  /* Layout */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --shadow-1: 0 2px 12px rgba(0, 0, 0, 0.45);
+  --shadow-2: 0 10px 40px rgba(0, 0, 0, 0.55);
+}
+
+* { box-sizing: border-box; }
+*::selection { background: var(--accent); color: var(--bg); }
+
+/* The HTML `hidden` attribute is supposed to set `display: none`, but any
+   more-specific rule (e.g. `.picker__resume { display: flex }`) wins on
+   specificity and the element stays visible. Force the override here so
+   `element.hidden = true` from JS actually works across the app —
+   without this, row dropdown menus and the resume panel render even
+   when toggled off. */
+[hidden] { display: none !important; }
+
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-feature-settings: 'ss01', 'zero', 'cv05';
+  overflow: hidden;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Background atmosphere: subtle warm noise + corner vignette */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 90% 60% at 50% 0%, rgba(245, 165, 36, 0.03), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 100% 100%, rgba(233, 81, 65, 0.025), transparent 65%);
+}
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/></svg>");
+}
+
+#app {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+a:hover { color: var(--fg); }
+
+/* ─── Wordmark ─────────────────────────────────────────────────────────── */
+
+.wordmark {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  text-transform: lowercase;
+  color: var(--fg);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.wordmark .dot {
+  display: inline-block;
+  width: 0.32em;
+  height: 0.32em;
+  background: var(--accent);
+  margin: 0 0.18em 0.18em 0.04em;
+  vertical-align: middle;
+  border-radius: 1px;
+}
+.wordmark.huge   { font-size: var(--t-3xl); }
+.wordmark.large  { font-size: var(--t-2xl); }
+.wordmark.medium { font-size: var(--t-lg); }
+.wordmark.small  { font-size: var(--t-md); letter-spacing: 0.22em; }
+
+/* ─── Centered Frames (login + picker) ─────────────────────────────────── */
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  width: 100%;
+  padding: var(--s-6) var(--s-4);
+  animation: frame-in var(--dur-slow) var(--ease-out);
+}
+@keyframes frame-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.frame__inner {
+  width: 100%;
+  max-width: 560px;
+}
+
+.frame__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-4);
+  margin-bottom: var(--s-5);
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--border);
+}
+.frame__head .tagline {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  flex: 1;
+  text-align: right;
+  margin-right: var(--s-3);
+}
+.frame__gear {
+  display: inline-grid;
+  place-items: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+}
+.frame__gear svg { width: 1rem; height: 1rem; }
+.frame__gear:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ─── Login ────────────────────────────────────────────────────────────── */
+
+.login {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+.login__legend {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  margin-top: var(--s-2);
+}
+.login__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+.login__form input {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--t-md);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.login__submit {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--s-1);
+}
+.login__submit .btn { min-width: 7rem; }
+.login__form input:focus {
+  border-color: var(--accent);
+  background: var(--bg-elev);
+}
+.login__form input::placeholder { color: var(--fg-faint); }
+
+.login__hint {
+  color: var(--fg-faint);
+  font-size: var(--t-xs);
+  margin-top: var(--s-4);
+  line-height: 1.6;
+}
+.login__hint::before {
+  content: '// ';
+  color: var(--accent-soft);
+}
+
+/* ─── Buttons ──────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn--primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+.btn--primary:hover:not(:disabled) {
+  background: var(--fg);
+  border-color: var(--fg);
+  color: var(--bg);
+}
+
+.btn--ghost { background: transparent; }
+
+/* ─── Session Picker ───────────────────────────────────────────────────── */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.picker__list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--radius-sm);
+  /* overflow:hidden used to live here for crisp rounded corners, but it
+     clipped the kebab dropdown on the last row. The corner radius is
+     small enough (2px) that row hover-bg poking past it isn't visible
+     on the dark backdrop, and we get menu-pop-out for free. */
+}
+.picker__list:empty { display: none; }
+
+.session-row {
+  /* dot · body · actions  — chevron dropped; the kebab carries the right-side
+     visual weight now, and hover state on the row signals "this is clickable". */
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-left: 2px solid transparent;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-left-color var(--dur-fast) var(--ease-out);
+  text-align: left;
+  width: 100%;
+  position: relative;
+  cursor: pointer;
+  outline: none;
+}
+.session-row:last-child { border-bottom: none; }
+.session-row:hover,
+.session-row:focus-visible {
+  background: var(--bg-input);
+  border-left-color: var(--accent);
+}
+.session-row:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.session-row__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  border: 1px solid var(--fg-muted);
+}
+.session-row__dot.attached {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.session-row__body {
+  min-width: 0;
+}
+.session-row__name {
+  color: var(--fg);
+  font-size: var(--t-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-row__meta {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  margin-top: var(--s-1);
+  display: flex;
+  gap: var(--s-2);
+}
+.session-row__meta span + span::before {
+  content: '·';
+  color: var(--fg-faint);
+  margin-right: var(--s-2);
+}
+
+/* Inline rename input inside the row. */
+.session-row__rename {
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  padding: 0.15rem var(--s-2);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-md);
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Right-side actions. Kebab is the only persistent control; it's quiet
+   at rest, gains a faint border on row hover, and goes accent on its
+   own hover. */
+.session-row__actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.session-row__kebab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-faint);
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.session-row__kebab svg { width: 1rem; height: 1rem; display: block; }
+.session-row:hover .session-row__kebab,
+.session-row:focus-visible .session-row__kebab {
+  color: var(--fg-muted);
+  border-color: var(--border);
+}
+.session-row__kebab:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.session-row__menu {
+  position: absolute;
+  top: calc(100% + var(--s-1));
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 10rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.45);
+  overflow: hidden;
+}
+/* When the row is near the bottom of the viewport, JS flips the menu
+   upward so it doesn't render off-screen / below the fold. */
+.session-row__menu--up {
+  top: auto;
+  bottom: calc(100% + var(--s-1));
+}
+.session-row__menu__item {
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  text-align: left;
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+.session-row__menu__item:hover { background: var(--bg-input); }
+.session-row__menu__item.danger { color: var(--critical); }
+.session-row__menu__item.danger:hover { background: rgba(233, 81, 65, 0.12); }
+.session-row__menu__item.armed {
+  background: rgba(233, 81, 65, 0.22);
+  color: var(--critical);
+  animation: pulse-danger 1.5s infinite;
+}
+@keyframes pulse-danger {
+  0%, 100% { background: rgba(233, 81, 65, 0.18); }
+  50%      { background: rgba(233, 81, 65, 0.32); }
+}
+
+.picker__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-6) var(--s-5);
+  text-align: center;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--t-sm);
+  line-height: 1.6;
+}
+.picker__empty__icon {
+  font-size: var(--t-3xl);
+  color: var(--accent);
+  opacity: 0.85;
+  line-height: 1;
+}
+.picker__empty__title {
+  color: var(--fg);
+  font-family: var(--font-display);
+  font-size: var(--t-lg);
+  letter-spacing: 0.18em;
+  text-transform: lowercase;
+  margin-top: var(--s-2);
+}
+.picker__empty__hint {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  max-width: 24rem;
+  line-height: 1.7;
+}
+
+/* New-session panel — matches the existing-list card so the two sit
+   on the same visual rhythm. The heading replaces the old inline label
+   so the panel reads as a section, not a stray form below the list. */
+.picker__create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  padding: var(--s-4);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.picker__create__label {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--s-3);
+  margin-bottom: 0;
+}
+.picker__create input {
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-md);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out);
+  width: 100%;
+  box-sizing: border-box;
+}
+.picker__create input:focus { border-color: var(--accent); }
+.picker__create input::placeholder { color: var(--fg-faint); }
+
+.error {
+  color: var(--critical);
+  font-size: var(--t-xs);
+  padding-top: var(--s-2);
+  min-height: 1.2em;
+}
+.error:not(:empty)::before {
+  content: '! ';
+  color: var(--critical);
+  font-weight: 500;
+}
+
+/* ─── Terminal screen ──────────────────────────────────────────────────── */
+
+.terminal-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-4);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--t-xs);
+  flex-shrink: 0;
+}
+.statusbar__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.statusbar__brand:hover .wordmark { color: var(--accent); }
+
+.statusbar__divider {
+  width: 1px;
+  height: 1rem;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+
+.statusbar__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex-shrink: 0;
+  transition: background var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+.statusbar__dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(142, 184, 116, 0.18);
+}
+.statusbar__dot.warn {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+  animation: pulse-warn 1.4s var(--ease-out) infinite;
+}
+.statusbar__dot.err {
+  background: var(--critical);
+  box-shadow: 0 0 0 3px var(--critical-bg);
+}
+@keyframes pulse-warn {
+  0%, 100% { box-shadow: 0 0 0 3px var(--accent-bg); }
+  50%      { box-shadow: 0 0 0 6px rgba(245, 165, 36, 0.04); }
+}
+
+.statusbar__state {
+  color: var(--fg);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.statusbar__session {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.statusbar__session .key { color: var(--fg-faint); }
+
+.statusbar__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+#terminal {
+  flex: 1;
+  min-height: 0;
+  padding: var(--s-3) var(--s-3) 0 var(--s-3);
+  position: relative;     /* anchor for the .live-pill */
+  /* pan-y so the browser permits vertical scroll/pan gestures; our
+     PointerEvent handler in terminal.ts drives the actual scrollTop. */
+  touch-action: pan-y;
+}
+
+/* Search overlay — anchored inside #terminal at top-right. */
+.term-search {
+  position: absolute;
+  top: var(--s-3);
+  right: var(--s-3);
+  z-index: 12;
+  display: flex;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-2);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  font-family: var(--font-mono);
+}
+.term-search input {
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem var(--s-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  outline: none;
+  width: 14rem;
+}
+.term-search input:focus { border-color: var(--accent); }
+.term-search__btn {
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 0.25rem var(--s-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+.term-search__btn:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+/* "↓ live" pill — appears when scrolled away from the live tail, taps to
+   jump back to the bottom. Floats at the bottom-right of the terminal area
+   so it never overlaps the scrollback content the user is reading. */
+.live-pill {
+  position: absolute;
+  right: var(--s-3);
+  bottom: var(--s-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.7rem 0.32rem 0.6rem;
+  background: var(--accent);
+  color: var(--bg);
+  border: 0;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  z-index: 10;
+  transition: transform var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+  animation: live-pill-in var(--dur-med) var(--ease-out);
+}
+.live-pill:hover { background: var(--fg); transform: translateY(-1px); }
+.live-pill svg { width: 0.85rem; height: 0.85rem; }
+.live-pill[hidden] { display: none; }
+@keyframes live-pill-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (max-width: 768px) {
+  .live-pill { right: var(--s-2); bottom: var(--s-2); }
+}
+
+/* ─── Status pill controls (TTS / etc.) ────────────────────────────────── */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-3);
+  background: transparent;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-out);
+}
+.pill:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pill[aria-pressed="true"] {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pill[aria-pressed="false"] {
+  /* Muted state. Previously used --fg-faint which is so close to the
+     statusbar background that the pill effectively vanished. Bump to
+     --fg-muted + a visible border so "muted" reads as "off" rather
+     than "missing". */
+  color: var(--fg-muted);
+  border-color: var(--border-strong);
+  background: var(--bg-input);
+}
+/* Inline SVG icons inside any .pill default-render at 300x150 (browser
+   default for inline SVG without width/height attrs), which makes the
+   button comically large and can push siblings off the line. Constrain
+   here so any future pill that drops in an SVG looks right. */
+.pill svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex-shrink: 0;
+}
+.pill__icon {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.pill--icon {
+  padding: var(--s-1) var(--s-2);
+}
+.pill--icon svg {
+  width: 1rem;
+  height: 1rem;
+  display: block;
+}
+
+/* ─── Settings modal ───────────────────────────────────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 12, 8, 0.78);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  padding: var(--s-4);
+  z-index: 100;
+  animation: frame-in var(--dur-med) var(--ease-out);
+}
+.modal {
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+}
+.modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s-4) var(--s-4) var(--s-3);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  z-index: 1;
+}
+.modal__title {
+  font-family: var(--font-display);
+  font-size: var(--t-lg);
+  letter-spacing: 0.18em;
+  color: var(--fg);
+  text-transform: lowercase;
+}
+.modal__close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: color var(--dur-fast), border-color var(--dur-fast);
+}
+.modal__close svg { width: 0.95rem; height: 0.95rem; }
+.modal__close:hover { color: var(--accent); border-color: var(--accent); }
+
+.modal__section {
+  padding: var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.modal__section:last-of-type { border-bottom: none; }
+.modal__section-title {
+  font-family: var(--font-display);
+  font-size: var(--t-sm);
+  letter-spacing: 0.22em;
+  color: var(--fg-muted);
+  text-transform: lowercase;
+  margin: 0 0 var(--s-3) 0;
+  font-weight: 400;
+}
+
+.modal__rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.row {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  gap: var(--s-3);
+  align-items: center;
+}
+.row__label {
+  font-size: var(--t-sm);
+  color: var(--fg-dim);
+  display: flex;
+  flex-direction: column;
+}
+.row__hint {
+  font-size: var(--t-xs);
+  color: var(--fg-faint);
+  margin-top: 0.1rem;
+  font-variant-numeric: tabular-nums;
+}
+.row__control { width: 100%; }
+.row__control--inline {
+  display: flex;
+  gap: var(--s-2);
+  align-items: center;
+}
+.row__control--inline .select { flex: 1; }
+
+.input, .select {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--s-2) var(--s-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  outline: none;
+  transition: border-color var(--dur-fast);
+}
+.input:focus, .select:focus { border-color: var(--accent); }
+
+.slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.checkbox {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+  justify-self: start;
+}
+
+.modal__row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+  justify-content: flex-end;
+}
+.modal__status {
+  flex: 1;
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
+.modal__status--error { color: var(--critical); }
+
+.btn--ghost.btn--icon {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-2) var(--s-3);
+}
+.btn--ghost.btn--icon svg { width: 0.9rem; height: 0.9rem; }
+
+.modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s-3) var(--s-4);
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+.modal__footer-meta {
+  color: var(--fg-faint);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+}
+
+@media (max-width: 640px) {
+  .row { grid-template-columns: 1fr; gap: var(--s-1); }
+  .row__control--inline { flex-wrap: wrap; }
+  .modal__row-actions { flex-wrap: wrap; }
+}
+
+/* Small live waveform shown beside the TTS pill while audio is playing.
+   Honest feedback that sound is actually leaving the speakers — pulses
+   stay quiet if the system volume is muted, unlike a CSS-only animation. */
+.tts-wave {
+  width: 4rem;
+  height: 1.4rem;
+  display: block;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-bg);
+  flex-shrink: 0;
+}
+.tts-wave[hidden] { display: none; }
+@media (max-width: 768px) {
+  .tts-wave { width: 3rem; height: 1.2rem; }
+}
+
+/* ─── Mic FAB ──────────────────────────────────────────────────────────── */
+
+.mic-fab {
+  position: fixed;
+  right: var(--s-4);
+  bottom: var(--s-4);
+  width: 3.6rem;
+  height: 3.6rem;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  box-shadow: var(--shadow-1);
+  z-index: 20;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: transform var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+.mic-fab svg { width: 1.4rem; height: 1.4rem; }
+.mic-fab:hover {
+  transform: scale(1.04);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.mic-fab.recording {
+  background: var(--critical);
+  border-color: var(--critical);
+  color: var(--bg);
+  box-shadow: 0 0 0 0.4rem var(--critical-bg), var(--shadow-1);
+  animation: recording 1.2s var(--ease-out) infinite;
+}
+@keyframes recording {
+  0%, 100% { box-shadow: 0 0 0 0.4rem rgba(233, 81, 65, 0.18), var(--shadow-1); }
+  50%      { box-shadow: 0 0 0 0.7rem rgba(233, 81, 65, 0.06), var(--shadow-1); }
+}
+
+/* ─── Composer + modifier row (mobile) ─────────────────────────────────── */
+
+.composer {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;   /* attach · input · mic · send */
+  align-items: end;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.composer__attach {
+  width: 2.4rem;
+  height: 2.4rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--fg-muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.composer__attach svg { width: 1.05rem; height: 1.05rem; }
+.composer__attach:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.composer__inputbox {
+  position: relative;
+  min-width: 0;
+}
+
+.composer__input {
+  width: 100%;
+  resize: none;
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--s-3) var(--s-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-md);
+  line-height: 1.4;
+  max-height: 9rem;
+  min-height: 2.4rem;
+  outline: none;
+  display: block;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              opacity var(--dur-fast) var(--ease-out);
+}
+.composer__input:focus { border-color: var(--accent); }
+.composer__input::placeholder { color: var(--fg-faint); }
+.composer__input:disabled { cursor: default; opacity: 0.55; }
+.composer.offline { opacity: 0.7; }
+.composer.offline .composer__input { border-color: var(--critical); }
+.composer.offline .composer__input::placeholder { color: var(--critical); }
+.composer__mic:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Slash-command palette — surfaces when the composer input starts with
+   "/". Floats above the inputbox so it doesn't shift the layout open. */
+.slash-palette {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + var(--s-1));
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 -6px 18px rgba(0,0,0,0.45);
+  z-index: 11;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.slash-palette__row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--s-3);
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg);
+}
+.slash-palette__row:last-child { border-bottom: none; }
+.slash-palette__row:hover { background: var(--bg-input); }
+.slash-palette__cmd { color: var(--accent); font-weight: 500; }
+.slash-palette__hint { color: var(--fg-muted); font-size: var(--t-xs); }
+
+.composer__wave {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  display: none;
+  box-shadow: 0 0 0 2px rgba(245, 165, 36, 0.08) inset;
+}
+.composer.recording .composer__wave { display: block; }
+.composer.recording .composer__input { visibility: hidden; }
+
+/* Square 2.4rem icon buttons in the composer row */
+.composer__mic, .composer__send {
+  width: 2.4rem;
+  height: 2.4rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--fg);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.composer__mic svg, .composer__send svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+.composer__send {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+.composer__send:hover:not(:disabled) {
+  background: var(--fg);
+  border-color: var(--fg);
+}
+.composer__send:disabled {
+  background: var(--bg-input);
+  color: var(--fg-faint);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+.composer__mic:hover:not(.recording) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.composer__mic.recording {
+  background: var(--critical);
+  color: var(--bg);
+  border-color: var(--critical);
+  box-shadow: 0 0 0 0.25rem var(--critical-bg);
+  animation: composer-mic-pulse 1.4s var(--ease-out) infinite;
+}
+@keyframes composer-mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0.25rem rgba(233, 81, 65, 0.20); }
+  50%      { box-shadow: 0 0 0 0.45rem rgba(233, 81, 65, 0.06); }
+}
+
+.modifier-row {
+  display: flex;
+  gap: var(--s-1);
+  padding: var(--s-2) var(--s-3);
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.modifier-row::-webkit-scrollbar { display: none; }
+.modifier-row button {
+  flex: 0 0 auto;
+  min-width: 2.6rem;
+  padding: var(--s-2) var(--s-3);
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-out);
+}
+.modifier-row button:active,
+.modifier-row button.armed {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* ─── Banners (warning / info above the terminal) ──────────────────────── */
+
+.banner {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--t-sm);
+  flex-shrink: 0;
+  animation: frame-in var(--dur-med) var(--ease-out);
+}
+.banner--warn {
+  background: rgba(245, 165, 36, 0.06);
+  border-left: 2px solid var(--accent);
+  color: var(--fg-dim);
+}
+.banner--offline {
+  background: rgba(233, 81, 65, 0.06);
+  border-left: 2px solid var(--critical);
+  color: var(--fg-dim);
+}
+.banner--offline .banner__icon { color: var(--critical); }
+.banner--offline .btn--ghost {
+  border-color: var(--critical);
+  color: var(--critical);
+}
+.banner--offline .btn--ghost:hover {
+  background: var(--critical);
+  color: var(--bg);
+}
+.banner__icon {
+  color: var(--accent);
+  font-size: var(--t-lg);
+  line-height: 1;
+}
+.banner__body strong {
+  color: var(--fg);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--t-xs);
+  font-weight: 500;
+  display: block;
+  margin-bottom: var(--s-1);
+}
+.banner__body div {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+}
+.banner__close {
+  background: transparent;
+  color: var(--fg-muted);
+  border: none;
+  padding: var(--s-1) var(--s-2);
+  cursor: pointer;
+  font-size: var(--t-sm);
+  border-radius: var(--radius-sm);
+  transition: color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.banner__close:hover { color: var(--fg); background: var(--bg-input); }
+
+/* ─── Mobile adjustments ───────────────────────────────────────────────── */
+
+body.mobile #terminal { padding: var(--s-2) var(--s-2) 0 var(--s-2); }
+/* On mobile, the floating mic FAB is replaced by the in-composer mic
+   button (see .composer__mic) so the soft keyboard can't shove it
+   out from under the user's finger. */
+body.mobile .mic-fab { display: none; }
+body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) var(--s-2); }
+
+@media (max-width: 768px) {
+  .statusbar { padding: var(--s-2) var(--s-3); gap: var(--s-2); }
+  .statusbar__state { display: none; }
+  .frame { padding: var(--s-4); }
+  .wordmark.huge { font-size: var(--t-2xl); }
+  .frame__head { flex-direction: column; align-items: flex-start; gap: var(--s-1); }
+}
+
+/* xterm.js needs to inherit our font for cohesion in places its
+   default would leak. We don't override its monospace cell font itself. */
+.xterm-viewport::-webkit-scrollbar { width: 6px; }
+.xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+.xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--fg-muted); }
+
+/* Make touch drags scroll the xterm viewport on mobile.
+   xterm renders an interactive overlay (.xterm-screen) on top of its
+   scrollable viewport and binds touch events there for selection /
+   cursor positioning. Without an explicit touch-action hint the browser
+   never gets a chance to translate vertical drags into scroll. */
+@media (pointer: coarse) {
+  .xterm,
+  .xterm-screen,
+  .xterm-helper-textarea {
+    touch-action: pan-y !important;
+  }
+  .xterm-viewport {
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+}
+
+/* ─── New-session panel: cwd browser, recent chips, resume list ───── */
+
+.picker__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.picker__field label {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+
+/* cwd input + browse button share a row. The button matches the input
+   height by inheriting the same vertical padding rather than a fixed
+   height — keeps the alignment crisp if the typography ever scales. */
+.picker__cwd-row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: stretch;
+}
+.picker__cwd-row input {
+  flex: 1;
+  min-width: 0;
+}
+.picker__cwd-row .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  white-space: nowrap;
+  padding: var(--s-3) var(--s-4);
+}
+.picker__cwd-row .btn svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex-shrink: 0;
+}
+
+/* Recent dirs: a horizontal scroll-row of chips. No "recent:" label
+   text — the chip styling already reads as auxiliary. */
+.picker__recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: center;
+}
+.picker__recent__label {
+  color: var(--fg-faint);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  margin-right: var(--s-1);
+}
+.chip {
+  background: var(--bg);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  padding: 0.2rem var(--s-3);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* Resume list is an inset panel inside the create card (using bg, not
+   bg-elev, so it reads as nested). Rows mirror the session-row hover
+   treatment so existing sessions and resumable sessions feel like
+   first-class citizens of the same picker, not two different widgets. */
+.picker__resume {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.picker__resume__label {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+.picker__resume__hint {
+  color: var(--fg-faint);
+  font-size: var(--t-xs);
+}
+.resume-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.resume-row:hover {
+  border-color: var(--border);
+  border-left-color: var(--accent);
+  background: var(--bg-input);
+}
+.resume-row.selected {
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-bg);
+}
+.resume-row__preview {
+  font-size: var(--t-sm);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resume-row__meta {
+  color: var(--fg-faint);
+  font-size: var(--t-xs);
+}
+
+/* Wraps the resume row + its export button on a single line. The row
+   is the click target for "select to resume"; the export anchor is a
+   sibling so its click doesn't bubble into the row's selection logic. */
+.resume-row-wrap {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s-2);
+  align-items: stretch;
+}
+.resume-row-wrap > .resume-row { width: 100%; }
+.resume-row__export {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  background: transparent;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.resume-row__export svg { width: 1rem; height: 1rem; display: block; }
+.resume-row__export:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* Action row hugs the bottom of the create card with a divider above. */
+.picker__create__actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--border);
+}
+.picker__create__actions .btn--primary {
+  min-width: 12rem;
+}
+@media (max-width: 480px) {
+  .picker__create__actions .btn--primary { width: 100%; min-width: 0; }
+  .picker__cwd-row { flex-wrap: wrap; }
+  .picker__cwd-row .btn { width: 100%; justify-content: center; }
+}
+
+/* ─── Modal directory browser ──────────────────────────────────────── */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: var(--s-4);
+}
+.modal__sheet {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 18px 48px rgba(0,0,0,0.55);
+  width: 100%;
+  max-width: 32rem;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dir-browser {
+  font-family: var(--font-mono);
+}
+.dir-browser__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.dir-browser__title {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+.dir-browser__pathbar {
+  display: flex;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--border);
+}
+.dir-browser__up {
+  width: 2.4rem;
+  flex-shrink: 0;
+}
+.dir-browser__input {
+  flex: 1;
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  outline: none;
+  min-width: 0;
+}
+.dir-browser__input:focus { border-color: var(--accent); }
+.dir-browser__go { flex-shrink: 0; }
+.dir-browser__list {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  -webkit-overflow-scrolling: touch;
+}
+.dir-browser__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-2) var(--s-4);
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.dir-browser__row:hover { background: var(--bg-input); }
+.dir-browser__row:last-child { border-bottom: none; }
+.dir-browser__icon { color: var(--accent); width: 0.7rem; flex-shrink: 0; }
+.dir-browser__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dir-browser__empty {
+  padding: var(--s-4);
+  color: var(--fg-faint);
+  text-align: center;
+  font-size: var(--t-sm);
+}
+.dir-browser__foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-top: 1px solid var(--border);
+}
+.dir-browser__status {
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.dir-browser__status.error { color: var(--critical); }
+
+@media (max-width: 480px) {
+  .modal { padding: 0; }
+  .modal__sheet {
+    max-width: 100%;
+    max-height: 100vh;
+    height: 100vh;
+    border-radius: 0;
+    border: none;
+  }
+}

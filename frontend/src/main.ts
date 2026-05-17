@@ -1,0 +1,633 @@
+import "./styles.css";
+import { fetchAuthStatus, isSecureContext, renderLogin } from "./auth";
+import {
+  clearLastSession,
+  loadDisplayPrefs,
+  loadLastSession,
+  onDisplayPrefsChange,
+  saveLastSession,
+} from "./display-prefs";
+import { GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
+import { isMobileLayout, mountMobileUI } from "./mobile";
+import * as notifications from "./notifications";
+import { renderSessionPicker } from "./session-picker";
+import { openSettings } from "./settings";
+import { TerminalSocket } from "./ws";
+// Heavy chunks (xterm, audio) loaded lazily when the user opens a session.
+import type { MicStreamer as MicStreamerType } from "./mic";
+import type { TtsPlayer as TtsPlayerType } from "./tts";
+import * as wakeLock from "./wake-lock";
+
+const app = document.getElementById("app")!;
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+// PWA share_target: when the user shares text/URL/title from another
+// app into ccpipe, the launch URL is /?text=…&url=…&title=…. Snag
+// those values once into sessionStorage so the composer can pre-fill
+// them after the user picks a session, and scrub the query so a refresh
+// doesn't re-trigger.
+function _capturePendingShare(): void {
+  try {
+    const params = new URLSearchParams(location.search);
+    const parts: string[] = [];
+    for (const key of ["title", "text", "url"]) {
+      const v = params.get(key);
+      if (v) parts.push(v);
+    }
+    if (parts.length === 0) return;
+    sessionStorage.setItem("ccpipe.pendingShare", parts.join("\n"));
+    history.replaceState({}, "", location.pathname);
+  } catch {}
+}
+_capturePendingShare();
+
+/** Reads the pending shared text (if any) and clears it. */
+export function consumePendingShare(): string | null {
+  try {
+    const v = sessionStorage.getItem("ccpipe.pendingShare");
+    if (v) sessionStorage.removeItem("ccpipe.pendingShare");
+    return v;
+  } catch { return null; }
+}
+
+function wsUrlFor(session: string, isReconnect: boolean): string {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  // On reconnect, ask the backend NOT to replay tmux history — xterm's
+  // buffer already holds it from the first open, and replaying would
+  // append a duplicate copy on top of the live content.
+  const skip = isReconnect ? "&skip_history=1" : "";
+  return `${proto}//${location.host}/ws?session=${encodeURIComponent(session)}${skip}`;
+}
+
+let authRequired = false;
+
+// ─── Terminal view ──────────────────────────────────────────────────────
+
+async function attachTerminal(session: string): Promise<void> {
+  // Remember it so a refresh / reconnect on flaky network lands back in
+  // the same session instead of bouncing to the picker.
+  saveLastSession(session);
+
+  app.innerHTML = "";
+  const mobile = isMobileLayout();
+  document.body.classList.toggle("mobile", mobile);
+
+  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }] =
+    await Promise.all([
+      import("./terminal"),
+      import("./mic"),
+      import("./tts"),
+      import("./waveform"),
+    ]);
+
+  const view = document.createElement("div");
+  view.className = "terminal-view";
+
+  // ─── Status bar ───────────────────────────────────────────────────────
+  const statusbar = document.createElement("div");
+  statusbar.className = "statusbar";
+
+  const brand = document.createElement("button");
+  brand.className = "statusbar__brand";
+  brand.title = "Back to sessions";
+  brand.innerHTML = `<span class="wordmark small">cc<span class="dot"></span>pipe</span>`;
+  brand.onclick = () => {
+    // Manual return to picker — explicitly clear lastSession so a
+    // subsequent refresh doesn't bounce back into the current session.
+    // Close the WS first so its reconnect loop doesn't survive the
+    // re-render and quietly hold an authenticated connection open.
+    clearLastSession();
+    socket.close();
+    bootstrap();
+  };
+
+  const divider1 = document.createElement("div");
+  divider1.className = "statusbar__divider";
+
+  const dot = document.createElement("div");
+  dot.className = "statusbar__dot";
+
+  const stateLabel = document.createElement("div");
+  stateLabel.className = "statusbar__state";
+  stateLabel.textContent = "connecting";
+
+  const sessionLabel = document.createElement("div");
+  sessionLabel.className = "statusbar__session";
+  sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(session)}`;
+
+  const controls = document.createElement("div");
+  controls.className = "statusbar__controls";
+
+  const ttsWaveCanvas = document.createElement("canvas");
+  ttsWaveCanvas.className = "tts-wave";
+  ttsWaveCanvas.hidden = true;
+  ttsWaveCanvas.title = "TTS playback indicator";
+
+  const ttsBtn = document.createElement("button");
+  ttsBtn.className = "pill";
+  ttsBtn.dataset.role = "tts";
+  ttsBtn.title = "Toggle voice output";
+  ttsBtn.setAttribute("aria-pressed", "true");
+  // Default visible — TTS is essentially always wired up in this app, and
+  // before the global [hidden]{display:none!important} rule landed, the
+  // `.pill { display: inline-flex }` rule was masking a bug here: the
+  // initial hidden=true had no effect, so the button always showed. Now
+  // that hidden actually hides, only flip to true if onHello explicitly
+  // tells us the server has TTS disabled.
+
+  // Replay pill — re-speaks the last assistant turn on demand. Hidden
+  // until at least one TTS utterance has been seen this session.
+  const replayBtn = document.createElement("button");
+  replayBtn.className = "pill pill--icon";
+  replayBtn.dataset.role = "replay";
+  replayBtn.title = "Repeat last response";
+  replayBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>`;
+  replayBtn.hidden = true;
+  const updateReplayBtn = () => {
+    replayBtn.hidden = !lastSpokenText;
+  };
+  replayBtn.addEventListener("click", () => {
+    if (!lastSpokenText) return;
+    void tts.playText(lastSpokenText);
+  });
+
+  const settingsBtn = document.createElement("button");
+  settingsBtn.className = "pill pill--icon";
+  settingsBtn.title = "Settings";
+  settingsBtn.innerHTML = GEAR_SVG;
+  settingsBtn.onclick = () => openSettings({
+    authRequired,
+    onDisplayPrefsChange: (p) => terminalApi?.applyPrefs(p),
+    onSessionInvalidated: () => { socket.close(); bootstrap(); },
+  });
+
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, settingsBtn);
+  statusbar.append(brand, divider1, dot, stateLabel, sessionLabel, controls);
+
+  // ─── Terminal ─────────────────────────────────────────────────────────
+  const terminalContainer = document.createElement("div");
+  terminalContainer.id = "terminal";
+
+  view.append(statusbar, terminalContainer);
+  app.append(view);
+
+  // ─── Desktop mic FAB (mobile uses the composer mic instead) ───────────
+  const micFab = document.createElement("button");
+  micFab.className = "mic-fab";
+  micFab.title = "Tap to start dictation, tap again to stop";
+  micFab.innerHTML = MIC_SVG;
+  micFab.hidden = true;
+  if (!mobile) app.append(micFab);
+
+  // ─── Connection-status subscribers ────────────────────────────────────
+  // Several UI bits (mobile composer, offline banner) need to know
+  // whether the WS is currently open. We fan out via this pub-sub so
+  // each can subscribe + receive an immediate cb with the current state.
+  let lastConnected = false;
+  const connSubs: Array<(c: boolean) => void> = [];
+  const setConnected = (c: boolean): void => {
+    lastConnected = c;
+    for (const cb of connSubs) {
+      try { cb(c); } catch (e) { console.warn("conn sub failed:", e); }
+    }
+  };
+  const onConnectionChange = (cb: (c: boolean) => void): (() => void) => {
+    connSubs.push(cb);
+    cb(lastConnected);
+    return () => {
+      const idx = connSubs.indexOf(cb);
+      if (idx >= 0) connSubs.splice(idx, 1);
+    };
+  };
+
+  // ─── Offline banner ──────────────────────────────────────────────────
+  // Appears when reconnecting for > 10s. Shows "retrying in Ns" countdown
+  // and a manual "Retry now" button that resets backoff.
+  let offlineBanner: HTMLDivElement | null = null;
+  let offlineTimer: number | null = null;
+  let bannerCountdownTimer: number | null = null;
+  let lastRetryInfo: { attempt: number; nextRetryMs?: number } | null = null;
+  // Wall-clock deadline at which the next retry is scheduled to fire.
+  // The interval ticks every second and computes remaining = deadline -
+  // now, so the banner actually counts down rather than displaying the
+  // same nextRetryMs every tick until the next status event arrives.
+  let retryDeadlineMs = 0;
+
+  const clearOfflineTimers = () => {
+    if (offlineTimer !== null) { clearTimeout(offlineTimer); offlineTimer = null; }
+    if (bannerCountdownTimer !== null) {
+      clearInterval(bannerCountdownTimer);
+      bannerCountdownTimer = null;
+    }
+  };
+
+  const hideOfflineBanner = () => {
+    clearOfflineTimers();
+    retryDeadlineMs = 0;
+    if (offlineBanner) {
+      offlineBanner.remove();
+      offlineBanner = null;
+    }
+  };
+
+  const renderOfflineBanner = () => {
+    if (!offlineBanner) {
+      offlineBanner = document.createElement("div");
+      offlineBanner.className = "banner banner--offline";
+      offlineBanner.innerHTML = `
+        <div class="banner__icon">⌬</div>
+        <div class="banner__body">
+          <strong>offline</strong>
+          <div data-role="msg">trying to reconnect…</div>
+        </div>
+        <button class="btn btn--ghost btn--icon" data-role="retry">retry now</button>
+      `;
+      offlineBanner.querySelector<HTMLButtonElement>("[data-role=retry]")!
+        .addEventListener("click", () => socket.reconnectNow(true));
+      view.insertBefore(offlineBanner, terminalContainer);
+    }
+    const msg = offlineBanner.querySelector<HTMLDivElement>("[data-role=msg]")!;
+    if (retryDeadlineMs > 0) {
+      const remainingMs = Math.max(0, retryDeadlineMs - Date.now());
+      const s = Math.ceil(remainingMs / 1000);
+      msg.textContent = `retrying in ${s}s (attempt ${lastRetryInfo?.attempt ?? "?"})`;
+    } else if (lastRetryInfo?.attempt) {
+      msg.textContent = `retrying… (attempt ${lastRetryInfo.attempt})`;
+    } else {
+      msg.textContent = `trying to reconnect…`;
+    }
+  };
+
+  // HTTPS warning shown when the server has the pipe but the browser
+  // is in plain-HTTP mode and getUserMedia will refuse.
+  let httpsBanner: HTMLDivElement | null = null;
+  const showHttpsBanner = () => {
+    if (httpsBanner) return;
+    httpsBanner = document.createElement("div");
+    httpsBanner.className = "banner banner--warn";
+    httpsBanner.innerHTML = `
+      <div class="banner__icon">!</div>
+      <div class="banner__body">
+        <strong>voice needs https</strong>
+        <div>this page is plain http; browsers won't grant mic access. text + tts playback still work.</div>
+      </div>
+      <button class="banner__close" aria-label="dismiss">&#x2715;</button>
+    `;
+    httpsBanner.querySelector(".banner__close")?.addEventListener("click", () => {
+      httpsBanner?.remove();
+      httpsBanner = null;
+    });
+    view.insertBefore(httpsBanner, terminalContainer);
+  };
+
+  let writeToTerm: ((d: Uint8Array | string) => void) | null = null;
+  let mic: MicStreamerType | null = null;
+  // Pass the session name so mute state is scoped per-session — muting
+  // one conversation no longer silences a sibling tab.
+  const tts: TtsPlayerType = new TtsPlayer(session);
+  // Caches the most recent assistant text so the "replay" pill can ask
+  // the backend to re-synthesize it. Updated on each tts_start.
+  let lastSpokenText = "";
+
+  // ─── Mic-availability pub-sub ────────────────────────────────────────
+  // micAvailable is `true` once the server's hello says voice is wired up
+  // AND the browser is in a secure context (getUserMedia requires that).
+  // The mobile composer mic and the desktop FAB both subscribe so they
+  // appear/disappear consistently when the hello eventually arrives —
+  // without this, the mobile mic was set hidden at mount time before any
+  // hello had landed and never updated.
+  let micAvailable = false;
+  const availSubs: Array<(a: boolean) => void> = [];
+  const setMicAvailable = (a: boolean): void => {
+    if (micAvailable === a) return;
+    micAvailable = a;
+    for (const cb of availSubs) {
+      try { cb(a); } catch (e) { console.warn("avail sub failed:", e); }
+    }
+  };
+  const onMicAvailabilityChange = (cb: (a: boolean) => void): (() => void) => {
+    availSubs.push(cb);
+    cb(micAvailable);
+    return () => {
+      const idx = availSubs.indexOf(cb);
+      if (idx >= 0) availSubs.splice(idx, 1);
+    };
+  };
+
+  // TTS playback visualiser: a small scope in the statusbar that runs
+  // only while audio is actually leaving the speakers. Honest "yes you
+  // can hear me" feedback so the user can tell mute / system-vol issues
+  // apart from "Claude hasn't replied yet".
+  let ttsWaveform: import("./waveform").Waveform | null = null;
+  tts.onPlaybackStart = () => {
+    const an = tts.getAnalyser();
+    if (an) {
+      ttsWaveCanvas.hidden = false;
+      if (!ttsWaveform) ttsWaveform = new Waveform(ttsWaveCanvas, an);
+      ttsWaveform.start();
+    }
+    // Keep the screen awake while claude is speaking — otherwise a long
+    // response on mobile gets cut off when the display dims and the WS
+    // drops with it.
+    void wakeLock.acquire();
+  };
+  tts.onPlaybackEnd = () => {
+    ttsWaveform?.stop();
+    ttsWaveCanvas.hidden = true;
+    void wakeLock.release();
+  };
+
+  const updateTtsBtn = () => {
+    const muted = tts.isMuted;
+    ttsBtn.setAttribute("aria-pressed", muted ? "false" : "true");
+    ttsBtn.innerHTML = `${muted ? TTS_MUTED_SVG : TTS_SVG} <span>${muted ? "muted" : "voice"}</span>`;
+  };
+  updateTtsBtn();
+
+  // ─── Recording state (single source of truth, both UIs subscribe) ─────
+  const VOICE_TRIGGER = "\x1bk";          // matches the meta+k keybinding
+  const TRIGGER_TO_AUDIO_DELAY_MS = 60;   // give /voice a tick to arm before PCM arrives
+
+  let recording = false;
+  const stateSubs: Array<(r: boolean) => void> = [];
+  const setRecording = (r: boolean): void => {
+    if (recording === r) return;
+    recording = r;
+    for (const cb of stateSubs) {
+      try { cb(r); } catch (e) { console.warn("rec sub failed:", e); }
+    }
+  };
+
+  // Tracks whether the in-flight recording was started via PTT hold
+  // (so we know whether to auto-stop on hold-end vs leave it running
+  // because it was tap-toggled on).
+  let pttHoldActive = false;
+
+  const handleMicEvent = async (
+    kind: "tap" | "hold-start" | "hold-end",
+  ): Promise<void> => {
+    if (!micAvailable) return;
+    if (kind === "tap") {
+      pttHoldActive = false;
+      await toggleMic();
+      return;
+    }
+    if (kind === "hold-start") {
+      pttHoldActive = true;
+      if (!recording) await toggleMic();
+      return;
+    }
+    if (kind === "hold-end") {
+      if (!pttHoldActive) return;          // wasn't a PTT-initiated recording
+      pttHoldActive = false;
+      if (recording) await toggleMic();
+    }
+  };
+
+  const toggleMic = async (): Promise<void> => {
+    if (!micAvailable) return;
+    if (recording) {
+      // Stop: tear down browser mic, then tell /voice (second tap → submit).
+      setRecording(false);
+      try { await mic?.stop(); } catch {}
+      socket.send({ type: "input", data: VOICE_TRIGGER });
+      void wakeLock.release();
+    } else {
+      setRecording(true);
+      socket.send({ type: "input", data: VOICE_TRIGGER });
+      void wakeLock.acquire();
+      await new Promise((r) => setTimeout(r, TRIGGER_TO_AUDIO_DELAY_MS));
+      if (!recording) { void wakeLock.release(); return; }
+      try {
+        await mic?.start();
+        // Auto-stop when the user goes silent for ~1.5s. This makes the
+        // mic behave like a sensible voice assistant rather than
+        // streaming forever until manually stopped.
+        if (mic) mic.onSilence = () => { void toggleMic(); };
+      } catch (err) {
+        console.warn("mic start failed:", err);
+        setRecording(false);
+        socket.send({ type: "input", data: VOICE_TRIGGER });  // unwind /voice
+        void wakeLock.release();
+      }
+    }
+  };
+
+  const socket = new TerminalSocket((isReconnect) => wsUrlFor(session, isReconnect), {
+    onStatus(status, info) {
+      dot.className = "statusbar__dot " + (
+        status === "open" ? "ok"
+        : status === "closed" ? "err"
+        : "warn"
+      );
+      if (status === "reconnecting") {
+        stateLabel.textContent = info?.nextRetryMs
+          ? `retrying in ${Math.ceil(info.nextRetryMs / 1000)}s (${info.attempt})`
+          : `retrying (${info?.attempt ?? "?"})`;
+        lastRetryInfo = info ?? null;
+        retryDeadlineMs = info?.nextRetryMs ? Date.now() + info.nextRetryMs : 0;
+        // After 10s of failed retries, escalate to a banner with a
+        // manual retry button. If the banner is already showing, refresh
+        // its countdown text immediately.
+        if (offlineBanner) {
+          renderOfflineBanner();
+        } else if (offlineTimer === null) {
+          offlineTimer = window.setTimeout(() => {
+            offlineTimer = null;
+            renderOfflineBanner();
+            // Tick the countdown each second so the user sees progress.
+            bannerCountdownTimer = window.setInterval(renderOfflineBanner, 1000);
+          }, 10_000);
+        }
+      } else if (status === "connecting") {
+        stateLabel.textContent = "connecting";
+      } else if (status === "open") {
+        stateLabel.textContent = "open";
+        hideOfflineBanner();
+      } else {
+        stateLabel.textContent = "closed";
+        hideOfflineBanner();
+      }
+      // Any non-open status means mic frames are no longer being
+      // delivered. Drop recording state + tear the device down so a
+      // dropped WS in the middle of dictation doesn't leave the UI
+      // believing it's still capturing (and silently dropping frames
+      // into a closed sendBinary).
+      if (status !== "open" && recording) {
+        setRecording(false);
+        try { mic?.stop(); } catch {}
+      }
+      setConnected(status === "open");
+    },
+    onHello(msg) {
+      sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(msg.session)}`;
+      const secure = isSecureContext();
+      setMicAvailable(!!(msg.voice && secure));
+      if (msg.voice && !secure) showHttpsBanner();
+
+      if (micAvailable && !mic) mic = new MicStreamer(socket);
+      if (!mobile) {
+        // Desktop FAB updates here. Mobile composer subscribes to
+        // setMicAvailable via the adapter and updates itself.
+        micFab.hidden = !micAvailable;
+      }
+      ttsBtn.hidden = !msg.tts;
+      updateTtsBtn();
+    },
+    onSessionEvent(msg) {
+      const noisy = new Set([
+        "client-attached", "client-detached",
+        "window-renamed", "session-renamed",
+      ]);
+      if (noisy.has(msg.event)) flashState(stateLabel, msg.event);
+    },
+    onSessionGone(msg) {
+      flashState(stateLabel, `${msg.session} closed`, 4000);
+      socket.close();
+      setTimeout(bootstrap, 1200);
+    },
+    onTtsStart(msg) {
+      tts.onStart();
+      lastSpokenText = msg.text || "";
+      updateReplayBtn();
+      // Claude is now speaking back, which means /voice has already
+      // finished and transcribed. If the UI still thinks it's recording
+      // (auto-stop on silence, etc.), reconcile.
+      if (recording) {
+        setRecording(false);
+        try { mic?.stop(); } catch {}
+      }
+    },
+    onTtsAudio(chunk) { tts.onChunk(chunk); },
+    onTtsEnd() {
+      tts.onEnd();
+      // Notify if the tab is backgrounded (user opted in via settings).
+      notifications.fireResponseReady(lastSpokenText, session);
+    },
+    onOutput(data) { writeToTerm?.(data); },
+  });
+
+  const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session);
+  writeToTerm = terminalApi.writeToTerm;
+
+  // Cross-tab pref sync: if another tab changes display settings, mirror them here.
+  const unsubPrefs = onDisplayPrefsChange((p) => terminalApi.applyPrefs(p));
+  view.addEventListener("ccpipe:dispose", () => {
+    unsubPrefs();
+    // Close the socket FIRST so its lifecycle hooks (online /
+    // visibilitychange) stop firing and a zombie reconnect can't add a
+    // second subscription on the backend — which the user hears as
+    // duplicated TTS audio. Every other dispose path (brand click,
+    // session_gone, settings invalidate) already closes the socket;
+    // doing it here too means a forgotten-cleanup bug in a new path
+    // can't reintroduce the duplication.
+    try { socket.close(); } catch {}
+    try { tts.dispose(); } catch (e) { console.warn("tts dispose failed:", e); }
+    try { mic?.stop(); } catch {}
+    try { terminalApi.dispose(); } catch (e) { console.warn("terminal dispose failed:", e); }
+  }, { once: true });
+
+  // ─── Wire the mic controller into both UIs ────────────────────────────
+  if (mobile) {
+    mountMobileUI(view, socket, {
+      get available() { return micAvailable; },
+      onMicEvent: (kind) => { void handleMicEvent(kind); },
+      onStateChange: (cb) => {
+        stateSubs.push(cb);
+        return () => {
+          const idx = stateSubs.indexOf(cb);
+          if (idx >= 0) stateSubs.splice(idx, 1);
+        };
+      },
+      attachWaveform: (canvas) => {
+        const analyser = mic?.getAnalyser();
+        if (!analyser) return null;
+        return new Waveform(canvas, analyser);
+      },
+      onConnectionChange,
+      onAvailabilityChange: onMicAvailabilityChange,
+    });
+  } else {
+    // Desktop FAB: same tap-to-toggle behaviour
+    micFab.addEventListener("click", () => { void toggleMic(); });
+    stateSubs.push((r) => micFab.classList.toggle("recording", r));
+  }
+
+  // TTS toggle
+  ttsBtn.addEventListener("click", () => {
+    tts.setMuted(!tts.isMuted);
+    updateTtsBtn();
+  });
+
+  socket.connect();
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────
+
+function flashState(el: HTMLElement, msg: string, ms: number = 2200): void {
+  const prev = el.textContent ?? "";
+  el.textContent = msg;
+  el.dataset.flashing = "true";
+  setTimeout(() => {
+    if (el.dataset.flashing === "true" && el.textContent === msg) {
+      el.textContent = prev;
+    }
+    delete el.dataset.flashing;
+  }, ms);
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!
+  ));
+}
+
+// ─── Boot ───────────────────────────────────────────────────────────────
+
+async function bootstrap(): Promise<void> {
+  // Dispatch a tear-down event so any pending key listeners cleanly detach.
+  app.querySelector(".terminal-view")?.dispatchEvent(new CustomEvent("ccpipe:dispose"));
+  try {
+    const status = await fetchAuthStatus();
+    authRequired = status.required;
+    if (status.required && !status.authenticated) {
+      // If auth was lost, the stored session is meaningless — clear it
+      // so the user doesn't auto-attach right back after re-login.
+      clearLastSession();
+      renderLogin(app, () => bootstrap());
+      return;
+    }
+  } catch (e) {
+    console.warn("auth status failed; proceeding without auth check:", e);
+  }
+
+  // Auto-attach to the last session if it still exists. A short
+  // verification round-trip ensures we don't silently spin up a new
+  // session if the user's last one has died.
+  const last = loadLastSession();
+  if (last) {
+    try {
+      const res = await fetch("/api/sessions", { credentials: "same-origin" });
+      if (res.ok) {
+        const sessions = await res.json() as Array<{ name: string }>;
+        if (sessions.some(s => s.name === last)) {
+          void attachTerminal(last);
+          return;
+        }
+      }
+      // Last session no longer exists; clear so we don't loop here.
+      clearLastSession();
+    } catch {
+      clearLastSession();
+    }
+  }
+
+  renderSessionPicker(app, attachTerminal);
+}
+
+export function isAuthRequired(): boolean { return authRequired; }
+
+bootstrap();

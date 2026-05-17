@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.cache/
+
+# Env / secrets — never commit these
+.env
+.env.local
+*.local
+
+# State / credentials produced by ccpipe at runtime
+state/
+credentials
+session_secret
+*.credentials
+*.session_secret
+
+# Editor + OS detritus
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Ad-hoc screenshots & scratch files
+Screenshot*
+scratch/
+tmp/
+
+# Claude Code workspace state (not part of ccpipe itself)
+.claude/

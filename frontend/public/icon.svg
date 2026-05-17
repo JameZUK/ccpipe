@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0d0c08"/>
+  <text x="50%" y="50%"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-family="'Major Mono Display', ui-monospace, monospace"
+        font-size="140"
+        letter-spacing="14"
+        fill="#e8dfc8">
+    cc<tspan dx="0" dy="0" fill="#f5a524">·</tspan>p
+  </text>
+</svg>

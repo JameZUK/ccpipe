@@ -1,0 +1,39 @@
+[Unit]
+Description=ccpipe — Claude Code remote web interface
+After=default.target ccpipe-virtual-mic.service
+# Soft dep: try to bring up the virtual mic so /voice works. If it can't
+# (e.g. Pulse not running), ccpipe still starts — text + TTS playback
+# don't depend on it.
+Wants=ccpipe-virtual-mic.service
+
+[Service]
+Type=exec
+WorkingDirectory=%h/Projects/ccpipe/backend
+ExecStart=%h/Projects/ccpipe/backend/.venv/bin/uvicorn ccpipe.main:app --host 0.0.0.0 --port 8080
+
+# Frontend bundle served by FastAPI when this exists
+Environment=CCPIPE_FRONTEND_DIST=%h/Projects/ccpipe/frontend/dist
+
+# TTS (set CCPIPE_TTS=off to disable)
+Environment=CCPIPE_TTS=kokoro
+Environment=CCPIPE_KOKORO_URL=http://localhost:8880
+Environment=CCPIPE_TTS_VOICE=bf_emma
+
+# Authentication
+#   Set CCPIPE_AUTH_PASSWORD to require a login. If unset, the UI is open
+#   (LAN-internal only is the assumption). Prefer setting it via a drop-in
+#   file with mode 0600, NOT here in version-controlled config:
+#     mkdir -p ~/.config/systemd/user/ccpipe.service.d/
+#     printf "[Service]\nEnvironment=CCPIPE_AUTH_PASSWORD=hunter2\n" \
+#         > ~/.config/systemd/user/ccpipe.service.d/auth.conf
+#     chmod 600 ~/.config/systemd/user/ccpipe.service.d/auth.conf
+#     systemctl --user daemon-reload && systemctl --user restart ccpipe
+
+Restart=on-failure
+RestartSec=3
+
+# StandardOutput/Error go to journal by default; view with:
+#   journalctl --user -u ccpipe -f
+
+[Install]
+WantedBy=default.target

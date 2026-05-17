@@ -1,0 +1,23 @@
+[Unit]
+Description=ccpipe — virtual mic (PulseAudio pipe-source for /voice)
+# We want the user's audio stack (PipeWire-pulse on modern distros,
+# PulseAudio on older ones) to be ready before pactl runs. Wants= is a
+# soft dep: if neither service is installed, this unit still tries.
+Wants=pipewire-pulse.service pipewire.service
+After=pipewire-pulse.service pipewire.service pulseaudio.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/Projects/ccpipe/scripts/setup-virtual-mic.sh up
+ExecStop=%h/Projects/ccpipe/scripts/setup-virtual-mic.sh down
+# If Pulse isn't actually up (rare on a logged-in graphical session, but
+# possible during cold boot), pactl will exit non-zero. Don't take down
+# ccpipe over that — voice just won't be available.
+SuccessExitStatus=0 1
+# StandardOutput / Error → journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
