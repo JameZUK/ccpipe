@@ -17,6 +17,7 @@
 // download + rename + delete + mkdir. Inline editor is a plain
 // <textarea> for v1 (UTF-8, ≤1 MB enforced server-side).
 
+import { apiJson } from "./api";
 import { CLOSE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
 
 const LS_WIDTH_KEY = "ccpipe.filePanelWidth";
@@ -49,22 +50,7 @@ type FsListResponse = {
   entries: FsEntry[];
 };
 
-async function apiJson<T>(input: RequestInfo, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(input, {
-    credentials: "same-origin",
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Requested-By": "ccpipe",
-      ...(init.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}));
-    throw new Error((detail as { detail?: string }).detail || `status ${res.status}`);
-  }
-  return (await res.json()) as T;
-}
+// apiJson moved to ./api.ts (shared with session-picker, settings, etc.)
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -250,6 +236,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   const dismiss = () => {
     shell.remove();
     document.removeEventListener("keydown", onKey);
+    document.removeEventListener("click", onDocClick);
     opts.onClose?.();
   };
   const onKey = (e: KeyboardEvent) => {
@@ -512,14 +499,18 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   // pointer-events: auto in CSS makes it capture clicks; the sheet
   // itself blocks its own clicks via pointer-events: auto as well.
   backdrop.addEventListener("click", dismiss);
-  // Outside-click closes any open kebab menu.
-  document.addEventListener("click", (e) => {
+  // Outside-click closes any open kebab menu. Captured in a const so
+  // the dismiss() path can detach it — without this every open/close
+  // cycle of the file panel adds a fresh document listener that
+  // outlives the panel and fires on every click for the page's life.
+  const onDocClick = (e: MouseEvent) => {
     list.querySelectorAll<HTMLElement>(".session-row__menu:not([hidden])")
       .forEach((m) => {
         const actions = m.parentElement;
         if (!actions || !actions.contains(e.target as Node)) m.hidden = true;
       });
-  });
+  };
+  document.addEventListener("click", onDocClick);
 
   void reload();
 }
@@ -559,7 +550,11 @@ function openEditor(path: string): void {
   overlay.setAttribute("role", "dialog");
 
   const sheet = document.createElement("div");
-  sheet.className = "modal__sheet file-editor";
+  // No modal__sheet class — that class caps max-width at 32rem and
+  // max-height at 80vh (later in the stylesheet, same specificity),
+  // which silently overrode .file-editor's own max-width: 98vw and
+  // made the right-edge / corner drag handles look broken.
+  sheet.className = "file-editor";
   // Apply persisted size. The CSS resize:both on .file-editor lets
   // the user drag the bottom-right corner; we observe the resulting
   // dimensions and save them so the next open restores the same shape.

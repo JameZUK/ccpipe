@@ -362,16 +362,56 @@ export function mountMobileUI(parent: HTMLElement,
     { label: "←", key: "left", bytes: "\x1b[D" },
     { label: "→", key: "right", bytes: "\x1b[C" },
   ];
+  // Hold-to-repeat: a press-and-hold on Esc/arrows/Tab/Enter/"/" should
+  // behave like a physical key — one tap fires once, holding it down
+  // repeats at xterm-ish cadence (400ms initial delay, then 30ms steps).
+  // Ctrl is a modifier toggle and explicitly opt-OUT of repeat. We
+  // implement via pointer events rather than `click` so we own the
+  // gesture from press to release; that also lets us cancel cleanly
+  // if the finger slides off (pointercancel) or the OS reclaims focus.
+  const REPEAT_DELAY_MS = 400;
+  const REPEAT_INTERVAL_MS = 30;
   for (const k of KEYS) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = k.label;
     btn.dataset.key = k.key;
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      if (k.key === "ctrl") { setCtrl(!ctrlArmed); return; }
+    if (k.key === "ctrl") {
+      // Ctrl arms the next regular key; no repeat semantics.
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        setCtrl(!ctrlArmed);
+      });
+      modifierRow.append(btn);
+      continue;
+    }
+    let initialTimer: number | null = null;
+    let repeatTimer: number | null = null;
+    const fire = () => {
       socket.send({ type: "input", data: k.bytes ?? "" });
+    };
+    const stop = () => {
+      if (initialTimer !== null) { clearTimeout(initialTimer); initialTimer = null; }
+      if (repeatTimer !== null) { clearInterval(repeatTimer); repeatTimer = null; }
+    };
+    btn.addEventListener("pointerdown", (e) => {
+      // Primary button only. Mouse right-click and touch-secondary
+      // shouldn't fire.
+      if (e.button !== 0 && e.pointerType !== "touch") return;
+      e.preventDefault();
+      try { btn.setPointerCapture(e.pointerId); } catch {}
+      fire();
+      initialTimer = window.setTimeout(() => {
+        repeatTimer = window.setInterval(fire, REPEAT_INTERVAL_MS);
+      }, REPEAT_DELAY_MS);
     });
+    btn.addEventListener("pointerup", () => { stop(); });
+    btn.addEventListener("pointercancel", () => { stop(); });
+    btn.addEventListener("pointerleave", () => { stop(); });
+    // Defence in depth: if the page is hidden mid-press (lock screen,
+    // app switch), kill the repeat so we don't stream characters into
+    // a backgrounded tab.
+    btn.addEventListener("lostpointercapture", () => { stop(); });
     modifierRow.append(btn);
   }
   textarea.addEventListener("keypress", (e) => {

@@ -38,7 +38,10 @@ export type ServerMessage =
 export type ClientMessage =
   | { type: "input"; data: string }
   | { type: "resize"; cols: number; rows: number }
-  | { type: "ping" };
+  | { type: "ping" }
+  // Mirror of the client mute state. Server skips the Kokoro round-trip
+  // and TTS audio fan-out for any subscription whose `muted` is true.
+  | { type: "tts_mute"; value: boolean };
 
 // Binary frame type prefixes (must match backend ws.py). Every binary
 // frame is now tagged so a PTY byte that happens to look like a TTS
@@ -303,6 +306,14 @@ export class TerminalSocket {
 
   sendBinary(frameType: number, payload: Uint8Array): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // Mic frames arrive at ~50 fps; if the uplink stalls, the browser's
+    // own send buffer can balloon to seconds of audio that all dump on
+    // reconnect and trample the server's mic-rate budget. Drop new
+    // frames while we have >256 KiB queued — the next AnalyserNode
+    // frame will repeat in 20ms anyway.
+    if (frameType === FRAME_MIC_PCM && this.ws.bufferedAmount > 256 * 1024) {
+      return;
+    }
     const out = new Uint8Array(payload.length + 1);
     out[0] = frameType;
     out.set(payload, 1);

@@ -1,9 +1,13 @@
-// Settings modal. Three sections (Voice, Account, Display) plus an About
-// footer. Modal overlay; Esc and click-outside both dismiss.
+// Settings modal. Three tabs (Display, Voice, Account — with two-factor
+// nested under Account) plus an About footer. Modal overlay; Esc and
+// click-outside both dismiss.
 //
 // Voice + TTS settings are persisted server-side via /api/tts/config so
 // they apply across devices. Display preferences are local to this
 // browser via localStorage (see display-prefs.ts).
+//
+// The last-visited tab is remembered in localStorage so re-opening the
+// modal lands on the same tab the user was on.
 //
 // To open the modal, call openSettings({...}) from anywhere with access
 // to the helpers it needs.
@@ -23,6 +27,22 @@ const ICONS = {
 };
 
 const VERSION = "0.1.0";
+
+type TabId = "display" | "voice" | "account";
+const LS_LAST_TAB = "ccpipe.settings.tab";
+const DEFAULT_TAB: TabId = "display";
+
+function loadLastTab(): TabId {
+  try {
+    const v = localStorage.getItem(LS_LAST_TAB);
+    if (v === "display" || v === "voice" || v === "account") return v;
+  } catch {}
+  return DEFAULT_TAB;
+}
+
+function saveLastTab(t: TabId): void {
+  try { localStorage.setItem(LS_LAST_TAB, t); } catch {}
+}
 
 type TtsScope = "full" | "last_paragraph" | "last_sentence" | "last_question" | "off";
 type TtsServerConfig = {
@@ -63,18 +83,42 @@ export function openSettings(opts: SettingsOpts): void {
   modal.setAttribute("aria-modal", "true");
   modal.setAttribute("aria-label", "Settings");
 
-  // Logical grouping: identity first (account + 2FA), then runtime
-  // preferences (voice, display). Two-factor lives in its own section
-  // rather than nested under Account so the enroll flow has room to
-  // breathe (the QR + confirmation steps want vertical space).
-  modal.append(
-    buildHeader(),
-    buildAccountSection(opts),
-    buildTwoFactorSection(),
-    buildVoiceSection(),
-    buildDisplaySection(opts),
-    buildAboutFooter(),
-  );
+  // Tab structure: Display (local browser), Voice (server-side TTS),
+  // Account (credentials + two-factor). Each tab panel hosts one or two
+  // <section> blocks. Two-factor lives inside the Account panel so the
+  // identity-related controls are co-located.
+  const displayPanel = document.createElement("div");
+  displayPanel.className = "modal__panel";
+  displayPanel.dataset.tab = "display";
+  displayPanel.append(buildDisplaySection(opts));
+
+  const voicePanel = document.createElement("div");
+  voicePanel.className = "modal__panel";
+  voicePanel.dataset.tab = "voice";
+  voicePanel.append(buildVoiceSection());
+
+  const accountPanel = document.createElement("div");
+  accountPanel.className = "modal__panel";
+  accountPanel.dataset.tab = "account";
+  accountPanel.append(buildAccountSection(opts), buildTwoFactorSection());
+
+  const panels: Record<TabId, HTMLElement> = {
+    display: displayPanel,
+    voice: voicePanel,
+    account: accountPanel,
+  };
+
+  const initial = loadLastTab();
+  saveLastTab(initial);
+  const tabs = buildTabs(initial, (next) => {
+    for (const id of Object.keys(panels) as TabId[]) {
+      panels[id].classList.toggle("modal__panel--active", id === next);
+    }
+    saveLastTab(next);
+  });
+  panels[initial].classList.add("modal__panel--active");
+
+  modal.append(buildHeader(), tabs, displayPanel, voicePanel, accountPanel, buildAboutFooter());
 
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
@@ -117,6 +161,55 @@ function buildHeader(): HTMLElement {
   `;
   head.querySelector<HTMLButtonElement>(".modal__close")!.onclick = closeSettings;
   return head;
+}
+
+// ─── Tab bar ────────────────────────────────────────────────────────────
+
+function buildTabs(initial: TabId, onChange: (next: TabId) => void): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "modal__tabs";
+  bar.setAttribute("role", "tablist");
+  const items: Array<{ id: TabId; label: string }> = [
+    { id: "display", label: "display" },
+    { id: "voice",   label: "voice"   },
+    { id: "account", label: "account" },
+  ];
+  const buttons: HTMLButtonElement[] = [];
+  for (const it of items) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "modal__tab";
+    btn.textContent = it.label;
+    btn.dataset.tab = it.id;
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("aria-selected", it.id === initial ? "true" : "false");
+    btn.tabIndex = it.id === initial ? 0 : -1;
+    if (it.id === initial) btn.classList.add("modal__tab--active");
+    btn.addEventListener("click", () => activate(it.id));
+    bar.append(btn);
+    buttons.push(btn);
+  }
+  const activate = (next: TabId) => {
+    for (const b of buttons) {
+      const on = b.dataset.tab === next;
+      b.classList.toggle("modal__tab--active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+      b.tabIndex = on ? 0 : -1;
+    }
+    onChange(next);
+  };
+  // Arrow-key navigation between tabs for keyboard users.
+  bar.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const cur = buttons.findIndex((b) => b.getAttribute("aria-selected") === "true");
+    const delta = e.key === "ArrowRight" ? 1 : -1;
+    const next = (cur + delta + buttons.length) % buttons.length;
+    const nextId = buttons[next].dataset.tab as TabId;
+    activate(nextId);
+    buttons[next].focus();
+    e.preventDefault();
+  });
+  return bar;
 }
 
 // ─── Voice section ──────────────────────────────────────────────────────
@@ -401,7 +494,15 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
     </div>
   `;
 
+  // Mutable working copy. We seeded it once from loadDisplayPrefs() at
+  // section build (above); slider/select handlers mutate it in place and
+  // then persist. Without this cache, each `input` event re-parses the
+  // localStorage JSON, which on a fast drag fires dozens of times a
+  // second per slider.
+  const working: DisplayPrefs = { ...prefs };
+
   const apply = (current: DisplayPrefs) => {
+    Object.assign(working, current);
     saveDisplayPrefs(current);
     opts.onDisplayPrefsChange(current);
   };
@@ -410,7 +511,7 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
     const input = sec.querySelector<HTMLInputElement>(`input[name=${name}]`)!;
     const label = sec.querySelector<HTMLElement>(`[data-role=${name}-value]`)!;
     input.addEventListener("input", () => {
-      const next = { ...loadDisplayPrefs(), [name]: parseFloat(input.value) };
+      const next = { ...working, [name]: parseFloat(input.value) };
       label.textContent = fmt(next[name] as number);
       apply(next as DisplayPrefs);
     });
@@ -421,11 +522,11 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
 
   sec.querySelector<HTMLSelectElement>("select[name=cursorStyle]")!
     .addEventListener("change", (e) => {
-      apply({ ...loadDisplayPrefs(), cursorStyle: (e.target as HTMLSelectElement).value as any });
+      apply({ ...working, cursorStyle: (e.target as HTMLSelectElement).value as any });
     });
   sec.querySelector<HTMLInputElement>("input[name=cursorBlink]")!
     .addEventListener("change", (e) => {
-      apply({ ...loadDisplayPrefs(), cursorBlink: (e.target as HTMLInputElement).checked });
+      apply({ ...working, cursorBlink: (e.target as HTMLInputElement).checked });
     });
 
   sec.querySelector<HTMLButtonElement>("[data-role=reset]")!

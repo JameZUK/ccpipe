@@ -901,6 +901,23 @@ a:hover { color: var(--fg); }
   display: block;
 }
 
+/* Mic pill recording state. The desktop mic lives in the statusbar
+   toolbar (the floating FAB was moved here in PR9); without a waveform
+   to show "audio is leaving the laptop right now", we lean on a
+   pulsing red tint to give the user honest visual feedback. */
+.pill--mic.recording {
+  color: var(--critical);
+  border-color: var(--critical);
+  background: rgba(220, 60, 60, 0.10);
+  animation: mic-pulse 1s ease-in-out infinite;
+}
+.pill--mic.recording svg { color: var(--critical); }
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 60, 60, 0.40); }
+  50%      { box-shadow: 0 0 0 6px rgba(220, 60, 60, 0.00); }
+}
+
 /* ─── Settings modal ───────────────────────────────────────────────────── */
 
 .modal-overlay {
@@ -959,10 +976,52 @@ a:hover { color: var(--fg); }
 .modal__close svg { width: 0.95rem; height: 0.95rem; }
 .modal__close:hover { color: var(--accent); border-color: var(--accent); }
 
+/* Tab bar sits below the sticky header. Buttons share the display
+   font + letter-spacing of section titles so the bar reads like a row
+   of mini headings. Active tab gets accent-coloured text and a 2px
+   underline; inactive tabs are dimmed. */
+.modal__tabs {
+  display: flex;
+  gap: var(--s-1);
+  padding: 0 var(--s-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.modal__tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-faint);
+  font-family: var(--font-display);
+  font-size: var(--t-sm);
+  letter-spacing: 0.22em;
+  text-transform: lowercase;
+  padding: var(--s-3) var(--s-3);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+}
+.modal__tab:hover { color: var(--fg-dim); }
+.modal__tab:focus-visible {
+  outline: none;
+  color: var(--fg);
+}
+.modal__tab--active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Tab panels: only the active one is visible. */
+.modal__panel { display: none; }
+.modal__panel--active { display: block; }
+
 .modal__section {
   padding: var(--s-4);
   border-bottom: 1px solid var(--border);
 }
+/* Inside a panel, the last section shouldn't draw a divider below
+   itself — the panel boundary already handles that visually. */
+.modal__panel > .modal__section:last-child { border-bottom: none; }
 .modal__section:last-of-type { border-bottom: none; }
 .modal__section-title {
   font-family: var(--font-display);
@@ -1338,6 +1397,10 @@ body.file-panel-resizing {
   flex-direction: column;
   overflow: hidden;
   position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 18px 48px rgba(0,0,0,0.55);
   /* Anchored top-left of the overlay's grid cell so the resize
      handle below can drag both dimensions outward without the grid
      re-centring fighting the drag. The overlay's own padding gives
@@ -1472,49 +1535,11 @@ body.file-editor-resizing {
   .tts-wave { width: 3rem; height: 1.2rem; }
 }
 
-/* ─── Mic FAB ──────────────────────────────────────────────────────────── */
-
-.mic-fab {
-  position: fixed;
-  right: var(--s-4);
-  bottom: var(--s-4);
-  width: 3.6rem;
-  height: 3.6rem;
-  border-radius: 50%;
-  background: var(--bg-elev);
-  color: var(--fg);
-  border: 1px solid var(--border-strong);
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  box-shadow: var(--shadow-1);
-  z-index: 20;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  transition: transform var(--dur-fast) var(--ease-out),
-              background var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out),
-              box-shadow var(--dur-fast) var(--ease-out);
-}
-.mic-fab svg { width: 1.4rem; height: 1.4rem; }
-.mic-fab:hover {
-  transform: scale(1.04);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.mic-fab.recording {
-  background: var(--critical);
-  border-color: var(--critical);
-  color: var(--bg);
-  box-shadow: 0 0 0 0.4rem var(--critical-bg), var(--shadow-1);
-  animation: recording 1.2s var(--ease-out) infinite;
-}
-@keyframes recording {
-  0%, 100% { box-shadow: 0 0 0 0.4rem rgba(233, 81, 65, 0.18), var(--shadow-1); }
-  50%      { box-shadow: 0 0 0 0.7rem rgba(233, 81, 65, 0.06), var(--shadow-1); }
-}
+/* The desktop mic used to be a floating FAB (.mic-fab) anchored to the
+   viewport. PR9 moved it into the statusbar toolbar — see the
+   .pill--mic.recording rules earlier in this file. The old FAB rules
+   were removed at the same time to avoid styling a non-existent
+   element. */
 
 /* ─── Composer + modifier row (mobile) ─────────────────────────────────── */
 
@@ -1709,6 +1734,14 @@ body.file-editor-resizing {
   font-size: var(--t-sm);
   cursor: pointer;
   transition: all var(--dur-fast) var(--ease-out);
+  /* Hold-to-repeat: without these, a long-press selects the button's
+     label text and pops the iOS magnifier instead of firing the key
+     repeatedly. touch-action: manipulation also kills the 300ms tap
+     delay so the first press is responsive. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
 }
 .modifier-row button:active,
 .modifier-row button.armed {

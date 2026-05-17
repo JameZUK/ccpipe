@@ -7,14 +7,14 @@ import {
   onDisplayPrefsChange,
   saveLastSession,
 } from "./display-prefs";
-import { openFilePanel } from "./file-panel";
 import { FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI } from "./mobile";
 import * as notifications from "./notifications";
-import { renderSessionPicker } from "./session-picker";
-import { openSettings } from "./settings";
 import { TerminalSocket } from "./ws";
-// Heavy chunks (xterm, audio) loaded lazily when the user opens a session.
+// Heavy chunks loaded lazily on user gesture:
+//   - settings / file-panel / session-picker are large (758 + 752 + 629
+//     LOC) and gated behind a button or a no-last-session bootstrap.
+//   - xterm, mic, tts, waveform are loaded when a terminal view attaches.
 import type { MicStreamer as MicStreamerType } from "./mic";
 import type { TtsPlayer as TtsPlayerType } from "./tts";
 import * as wakeLock from "./wake-lock";
@@ -170,7 +170,8 @@ async function attachTerminal(session: string): Promise<void> {
   filesBtn.className = "pill pill--icon";
   filesBtn.title = "Files";
   filesBtn.innerHTML = FOLDER_SVG;
-  filesBtn.addEventListener("click", () => {
+  filesBtn.addEventListener("click", async () => {
+    const { openFilePanel } = await import("./file-panel");
     openFilePanel(document.body, { initialPath: "/home" });
   });
 
@@ -178,13 +179,27 @@ async function attachTerminal(session: string): Promise<void> {
   settingsBtn.className = "pill pill--icon";
   settingsBtn.title = "Settings";
   settingsBtn.innerHTML = GEAR_SVG;
-  settingsBtn.onclick = () => openSettings({
-    authRequired,
-    onDisplayPrefsChange: (p) => terminalApi?.applyPrefs(p),
-    onSessionInvalidated: () => { socket.close(); bootstrap(); },
-  });
+  settingsBtn.onclick = async () => {
+    const { openSettings } = await import("./settings");
+    openSettings({
+      authRequired,
+      onDisplayPrefsChange: (p) => terminalApi?.applyPrefs(p),
+      onSessionInvalidated: () => { socket.close(); bootstrap(); },
+    });
+  };
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, filesBtn, settingsBtn);
+  // Desktop mic lives in the statusbar between TTS and Files. Mobile
+  // uses the composer mic in mobile.ts; on desktop the floating FAB
+  // was visually disconnected from the rest of the toolbar, so we
+  // surface it here as a sibling pill matching the TTS button shape.
+  const micBtn = document.createElement("button");
+  micBtn.className = "pill pill--icon pill--mic";
+  micBtn.dataset.role = "mic";
+  micBtn.title = "Tap to start dictation, tap again to stop";
+  micBtn.innerHTML = MIC_SVG;
+  micBtn.hidden = true;
+
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, filesBtn, settingsBtn);
   statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────
@@ -194,13 +209,10 @@ async function attachTerminal(session: string): Promise<void> {
   view.append(statusbar, terminalContainer);
   app.append(view);
 
-  // ─── Desktop mic FAB (mobile uses the composer mic instead) ───────────
-  const micFab = document.createElement("button");
-  micFab.className = "mic-fab";
-  micFab.title = "Tap to start dictation, tap again to stop";
-  micFab.innerHTML = MIC_SVG;
-  micFab.hidden = true;
-  if (!mobile) app.append(micFab);
+  // Mic button (desktop only — mobile uses the composer mic). Constructed
+  // earlier so it lives in the statusbar; alias for the rest of this
+  // function which still uses the old name.
+  const micFab = micBtn;
 
   // ─── Connection-status subscribers ────────────────────────────────────
   // Several UI bits (mobile composer, offline banner) need to know
@@ -308,6 +320,12 @@ async function attachTerminal(session: string): Promise<void> {
   // Pass the session name so mute state is scoped per-session — muting
   // one conversation no longer silences a sibling tab.
   const tts: TtsPlayerType = new TtsPlayer(session);
+  // Mirror the mute toggle to the server so it can skip the Kokoro
+  // round-trip while we're not listening. Fire-and-forget; the server
+  // re-reads on the next message if the send is silently dropped.
+  tts.onMutedChange = (muted) => {
+    socket.send({ type: "tts_mute", value: muted });
+  };
   // Caches the most recent assistant text so the "replay" pill can ask
   // the backend to re-synthesize it. Updated on each tts_start.
   let lastSpokenText = "";
@@ -492,6 +510,14 @@ async function attachTerminal(session: string): Promise<void> {
         try { mic?.stop(); } catch {}
       }
       setConnected(status === "open");
+      // On every fresh connection, push the current mute state so the
+      // server starts in agreement. setMuted's onMutedChange only fires
+      // on transitions, so a session that was already muted before
+      // attach would otherwise leave the server thinking we're
+      // listening and synthesising for nothing.
+      if (status === "open") {
+        socket.send({ type: "tts_mute", value: tts.isMuted });
+      }
     },
     onHello(msg) {
       sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(msg.session)}`;
@@ -666,6 +692,7 @@ async function bootstrap(): Promise<void> {
     }
   }
 
+  const { renderSessionPicker } = await import("./session-picker");
   renderSessionPicker(app, attachTerminal);
 }
 

@@ -1,8 +1,10 @@
+import { apiJson } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
 import { clearLastSession } from "./display-prefs";
 import { FOLDER_SVG, GEAR_SVG, KEBAB_SVG } from "./icons";
 import { loadRecentDirs, pushRecentDir } from "./recent-dirs";
-import { openSettings } from "./settings";
+// `./settings` is dynamically imported in the gear click handler so it
+// stays out of the session-picker chunk.
 
 type SessionInfo = {
   name: string;
@@ -43,22 +45,7 @@ function homeRelative(path: string): string {
   return "~" + (m[1] ?? "");
 }
 
-async function apiJson<T>(input: RequestInfo, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(input, {
-    credentials: "same-origin",
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Requested-By": "ccpipe",
-      ...(init.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}));
-    throw new Error((detail as { detail?: string }).detail || `status ${res.status}`);
-  }
-  return (await res.json()) as T;
-}
+// apiJson moved to ./api.ts
 
 export function renderSessionPicker(
   root: HTMLElement,
@@ -85,15 +72,18 @@ export function renderSessionPicker(
   gear.className = "frame__gear";
   gear.title = "Settings";
   gear.innerHTML = GEAR_SVG;
-  gear.addEventListener("click", () => openSettings({
-    authRequired: true,
-    onDisplayPrefsChange: () => {},
-    onSessionInvalidated: () => {
-      clearLastSession();
-      root.innerHTML = "";
-      location.reload();
-    },
-  }));
+  gear.addEventListener("click", async () => {
+    const { openSettings } = await import("./settings");
+    openSettings({
+      authRequired: true,
+      onDisplayPrefsChange: () => {},
+      onSessionInvalidated: () => {
+        clearLastSession();
+        root.innerHTML = "";
+        location.reload();
+      },
+    });
+  });
   head.append(word, tagline, gear);
 
   const picker = document.createElement("div");

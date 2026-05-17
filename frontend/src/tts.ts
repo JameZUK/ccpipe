@@ -62,6 +62,10 @@ export class TtsPlayer {
   // ends. Consumers use these to drive UI affordances like a visualiser.
   onPlaybackStart: (() => void) | null = null;
   onPlaybackEnd: (() => void) | null = null;
+  // Fired when the user toggles mute. The shell wires this to a
+  // ``tts_mute`` WS message so the server can skip the Kokoro round-
+  // trip while nobody's listening.
+  onMutedChange: ((muted: boolean) => void) | null = null;
 
   constructor(session?: string) {
     this.session = session;
@@ -76,6 +80,7 @@ export class TtsPlayer {
   get isMuted(): boolean { return this.muted; }
 
   setMuted(muted: boolean): void {
+    if (this.muted === muted) return;
     this.muted = muted;
     saveTtsMuted(muted, this.session);
     if (muted) {
@@ -91,6 +96,7 @@ export class TtsPlayer {
         this.handlePlaybackEnd();
       }
     }
+    try { this.onMutedChange?.(muted); } catch {}
   }
 
   onStart(): void {
