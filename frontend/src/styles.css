@@ -642,6 +642,26 @@ a:hover { color: var(--fg); }
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
+.statusbar__latency {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  padding: 0.05rem var(--s-2);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.statusbar__latency--ok    { color: var(--ok); border-color: var(--ok); }
+.statusbar__latency--warn  { color: var(--accent); border-color: var(--accent); }
+.statusbar__latency--bad   { color: var(--critical); border-color: var(--critical); }
+@media (max-width: 768px) {
+  /* On phones the statusbar is tight; hide the latency badge so the
+     session label has room. The colour of the connection dot still
+     conveys health. */
+  .statusbar__latency { display: none; }
+}
 .statusbar__session {
   color: var(--fg-muted);
   font-size: var(--t-xs);
@@ -973,6 +993,77 @@ a:hover { color: var(--fg); }
   color: var(--fg-faint);
   font-size: var(--t-xs);
   letter-spacing: 0.08em;
+}
+
+/* Two-factor sub-section inside Account. */
+.modal__subsection {
+  margin-top: var(--s-4);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.modal__subsection-title {
+  font-family: var(--font-display);
+  font-size: var(--t-sm);
+  letter-spacing: 0.22em;
+  color: var(--fg-muted);
+  text-transform: lowercase;
+}
+.modal__subsection-status {
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+}
+.modal__subsection-status--on { color: var(--ok); }
+
+.totp-enroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.totp-enroll__row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+.totp-enroll__row .input { flex: 1; min-width: 12rem; }
+.totp-enroll__qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.totp-enroll__qr-image {
+  background: #fff;
+  padding: var(--s-2);
+  border-radius: var(--radius-sm);
+  display: inline-block;
+}
+.totp-enroll__qr-image svg {
+  width: 200px;
+  height: 200px;
+  display: block;
+}
+.totp-enroll__secret {
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+  text-align: center;
+  word-break: break-all;
+}
+.totp-enroll__secret code {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  padding: 0.1rem var(--s-1);
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  color: var(--fg);
+  letter-spacing: 0.04em;
 }
 
 @media (max-width: 640px) {

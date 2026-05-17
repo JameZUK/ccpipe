@@ -464,9 +464,11 @@ export function renderSessionPicker(
       e.stopPropagation();
       if (menu.hidden) openMenu(); else closeMenu();
     });
-    document.addEventListener("click", (e) => {
-      if (!actions.contains(e.target as Node)) closeMenu();
-    });
+    // Document-level outside-click handling is installed ONCE by the
+    // outer renderSessionPicker via _bindOutsideClickClose, not per
+    // row — otherwise refresh() each time the user kills a session
+    // leaked one document listener per remaining row, growing without
+    // bound.
 
     // ── Rename inline ──
     renameItem.addEventListener("click", (e) => {
@@ -560,6 +562,26 @@ export function renderSessionPicker(
     });
     input.addEventListener("blur", () => void commit());
   };
+
+  // Single outside-click handler for every row's overflow menu. Closes
+  // any open menu when the click target sits outside the row's actions
+  // column. Bound once here rather than per-row to avoid leaking
+  // listeners across refresh().
+  const onOutsideClick = (e: MouseEvent) => {
+    const target = e.target as Element | null;
+    if (!target) return;
+    list.querySelectorAll<HTMLElement>(".session-row__menu:not([hidden])")
+      .forEach((m) => {
+        const actions = m.parentElement;
+        if (!actions || !actions.contains(target)) m.hidden = true;
+      });
+  };
+  document.addEventListener("click", onOutsideClick);
+  // Cleanup when the picker is replaced (caller wipes innerHTML; we
+  // can't observe that directly, but bootstrap dispatches no event
+  // for the picker view today — accept a single listener over the
+  // tab's lifetime, which is what we had post-fix and is fine for
+  // a long-lived SPA).
 
   // First render
   renderRecent();

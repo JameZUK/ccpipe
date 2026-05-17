@@ -40,9 +40,12 @@ export type ClientMessage =
   | { type: "resize"; cols: number; rows: number }
   | { type: "ping" };
 
-// Binary frame type prefixes (must match backend ws.py)
-export const FRAME_MIC_PCM = 0x01;     // client → server
-export const FRAME_TTS_AUDIO = 0x02;   // server → client
+// Binary frame type prefixes (must match backend ws.py). Every binary
+// frame is now tagged so a PTY byte that happens to look like a TTS
+// chunk's leading byte can't be misclassified.
+export const FRAME_MIC_PCM    = 0x01;  // client → server
+export const FRAME_TTS_AUDIO  = 0x02;  // server → client
+export const FRAME_PTY_OUTPUT = 0x00;  // server → client
 
 export interface TerminalSocketHandlers {
   // PTY output now arrives as binary (Uint8Array view over a raw UTF-8
@@ -57,6 +60,11 @@ export interface TerminalSocketHandlers {
   onTtsEnd?: () => void;
   onStatus: (status: "connecting" | "open" | "closed" | "reconnecting",
              info?: { attempt: number; nextRetryMs?: number }) => void;
+  /** Fires whenever a server frame arrives in response to one of our
+   * keepalive pings — `ms` is the round-trip in milliseconds. The UI
+   * surfaces this as the statusbar's latency indicator so the user
+   * can see at a glance whether the connection is healthy. */
+  onLatency?: (ms: number) => void;
 }
 
 export class TerminalSocket {
@@ -80,6 +88,12 @@ export class TerminalSocket {
   private lastReceivedAt = 0;
   private static readonly STALE_AFTER_MS = 45_000;
   private staleCheckTimer: number | null = null;
+  // Timestamp of the most recent ping we sent. Subtracting from the
+  // matching pong's arrival time gives us RTT. We only track a single
+  // in-flight ping because the keepalive interval is much longer than
+  // any realistic RTT, so the next ping always arrives well after the
+  // previous pong.
+  private lastPingSentAt = 0;
   // Pending retry handle so reconnectNow() can cancel an in-flight backoff
   // and dial immediately when the network/tab comes back.
   private pendingRetry: number | null = null;
@@ -161,22 +175,36 @@ export class TerminalSocket {
             case "session_gone": this.handlers.onSessionGone?.(parsed as unknown as ServerSessionGone); return;
             case "tts_start": this.handlers.onTtsStart?.(parsed as unknown as ServerTtsStart); return;
             case "tts_end": this.handlers.onTtsEnd?.(); return;
-            case "pong": return;  // staleness probe response — already tracked above
+            case "pong":
+              // Surface round-trip latency so the statusbar can show
+              // it next to the connection dot. lastPingSentAt is 0 if
+              // we never sent the matching ping (e.g. the server sent
+              // an unsolicited pong); skip in that case.
+              if (this.lastPingSentAt) {
+                const rtt = Date.now() - this.lastPingSentAt;
+                this.handlers.onLatency?.(rtt);
+              }
+              return;
           }
         } catch {
           // ignore non-JSON text frames
         }
         return;
       }
-      // Binary frame: either raw PTY output (no prefix) or a tagged audio
-      // chunk (FRAME_TTS_AUDIO prefix). PTY output is the hot path so we
-      // dispatch it first with a single allocation.
+      // Binary frame: first byte is the channel tag, rest is payload.
+      // Unknown tags are dropped silently so a server-side feature added
+      // before a client refresh doesn't corrupt the terminal buffer.
       const buf = new Uint8Array(ev.data as ArrayBuffer);
       if (buf.length === 0) return;
-      if (buf[0] === FRAME_TTS_AUDIO) {
-        this.handlers.onTtsAudio?.(buf.subarray(1));
-      } else {
-        this.handlers.onOutput(buf);
+      switch (buf[0]) {
+        case FRAME_PTY_OUTPUT:
+          this.handlers.onOutput(buf.subarray(1));
+          return;
+        case FRAME_TTS_AUDIO:
+          this.handlers.onTtsAudio?.(buf.subarray(1));
+          return;
+        default:
+          return;  // unknown frame tag — ignore
       }
     };
 
@@ -222,11 +250,18 @@ export class TerminalSocket {
 
   private startKeepalive(): void {
     this.stopKeepalive();
-    this.keepaliveTimer = window.setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: "ping" }));
-      }
-    }, this.keepaliveIntervalMs);
+    // Send an immediate ping so the latency indicator settles on a
+    // real value within a few hundred ms of connect, rather than
+    // sitting blank for 30 seconds until the first interval tick.
+    this.sendPing();
+    this.keepaliveTimer = window.setInterval(() => this.sendPing(),
+                                              this.keepaliveIntervalMs);
+  }
+
+  private sendPing(): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.lastPingSentAt = Date.now();
+    this.ws.send(JSON.stringify({ type: "ping" }));
   }
 
   private stopKeepalive(): void {

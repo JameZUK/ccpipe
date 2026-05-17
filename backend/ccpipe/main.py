@@ -33,14 +33,28 @@ from .auth import (
     is_session_authed,
     load_or_create_secret,
     session_username,
+    set_totp_secret,
+    totp_enrolled,
+    totp_generate_secret,
+    totp_provisioning_uri,
+    totp_verify,
     update_credential,
     verify_credential,
 )
 from .settings_patch import patch_keybindings_safe, patch_settings_safe, should_apply
-from .tmux_control import control_client
+from .tmux_control import CONTROL_SESSION_NAME, control_client
 from .tmux_setup import apply_server_defaults
 from .tts import tts_service
 from .ws import handle_terminal_ws
+
+
+def _reject_control_session(name: str) -> None:
+    """Block external callers from touching the hidden control-mode
+    session ccpipe maintains for its tmux event channel. Wiping or
+    renaming it would force a backend supervisor restart and leave the
+    browser blind to session-list changes until it reconnects."""
+    if name == CONTROL_SESSION_NAME:
+        raise HTTPException(status_code=404, detail="session not found")
 
 FRONTEND_DIST = Path(os.environ.get("CCPIPE_FRONTEND_DIST", "/app/frontend"))
 
@@ -268,26 +282,176 @@ async def auth_status(request: Request) -> AuthStatus:
         required=is_auth_enabled(),
         authenticated=authed,
         username=session_username(request.session) if authed else None,
+        otp_enrolled=totp_enrolled(),
     )
+
+
+# Per-client-IP login rate limiter. Per-IP rather than global so a
+# distributed brute-force across the LAN gets one attempt budget per
+# source, and a legitimate user retrying their password doesn't lock
+# out the whole tenant. Bucket = 5 attempts per minute, window slides.
+_LOGIN_BUCKET_MAX = 5
+_LOGIN_BUCKET_WINDOW_S = 60.0
+_login_attempts: dict[str, list[float]] = {}
+
+
+def _login_throttle_ok(ip: str) -> bool:
+    import time
+    now = time.monotonic()
+    cutoff = now - _LOGIN_BUCKET_WINDOW_S
+    bucket = _login_attempts.setdefault(ip, [])
+    # Drop expired entries.
+    while bucket and bucket[0] < cutoff:
+        bucket.pop(0)
+    if len(bucket) >= _LOGIN_BUCKET_MAX:
+        return False
+    bucket.append(now)
+    return True
 
 
 @app.post("/api/auth/login", response_model=AuthStatus, dependencies=[CsrfDep])
 async def auth_login(body: LoginBody, request: Request) -> AuthStatus:
+    client_ip = (request.client.host if request.client else "") or "unknown"
+    if not _login_throttle_ok(client_ip):
+        # 429 with Retry-After hint. Slight async delay so even a
+        # successful 429 costs time on the attacker side.
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=429,
+                            detail="too many attempts; try again in a minute",
+                            headers={"Retry-After": str(int(_LOGIN_BUCKET_WINDOW_S))})
     if not verify_credential(body.username, body.password):
+        # Sleep on failures to slow online brute-force regardless of
+        # whether the throttle window has elapsed.
+        await asyncio.sleep(1.0)
         raise HTTPException(status_code=401, detail="invalid credentials")
     cred = get_credential()
+    # Two-factor gate. When TOTP is enrolled we don't grant a session
+    # until the client resubmits with a valid 6-digit code. The
+    # password-step response signals `otp_required=true` so the
+    # frontend can switch to the code-entry view.
+    if cred.totp_secret:
+        if not body.code:
+            return AuthStatus(
+                required=True,
+                authenticated=False,
+                username=None,
+                otp_required=True,
+                otp_enrolled=True,
+            )
+        if not totp_verify(body.code):
+            await asyncio.sleep(1.0)
+            raise HTTPException(status_code=401, detail="invalid code")
     request.session["authed"] = True
     request.session["username"] = cred.username
     # Stamp the version so a later credential change can invalidate this
     # session even though its signed cookie still verifies cleanly.
     request.session["cred_version"] = cred.version
-    return AuthStatus(required=True, authenticated=True, username=cred.username)
+    return AuthStatus(
+        required=True,
+        authenticated=True,
+        username=cred.username,
+        otp_enrolled=bool(cred.totp_secret),
+    )
 
 
 @app.post("/api/auth/logout", response_model=AuthStatus, dependencies=[CsrfDep])
 async def auth_logout(request: Request) -> AuthStatus:
     request.session.clear()
     return AuthStatus(required=True, authenticated=False, username=None)
+
+
+# ─── TOTP (two-factor) enrollment ──────────────────────────────────────
+
+class TotpEnrollBody(BaseModel):
+    currentPassword: str
+
+
+class TotpConfirmBody(BaseModel):
+    secret: str
+    code: str
+
+
+class TotpDisableBody(BaseModel):
+    currentPassword: str
+    code: str
+
+
+@app.post("/api/auth/totp/enroll", dependencies=[AuthDep, CsrfDep])
+async def totp_enroll(body: TotpEnrollBody) -> dict[str, str]:
+    """Generate a fresh TOTP secret and return it along with the
+    otpauth:// provisioning URI for QR rendering. The secret is NOT
+    persisted yet — the client must round-trip it back through
+    /api/auth/totp/confirm with a working code first, which proves the
+    user actually scanned the QR and their authenticator is in sync.
+    Requires the current password as a defence against an XSS-injected
+    enrollment that bypasses the authenticator.
+    """
+    cred = get_credential()
+    # _ct_eq lives in auth.py and isn't exported — replicate the
+    # constant-time check via verify_credential, which already does
+    # both username and password.
+    if not verify_credential(cred.username, body.currentPassword):
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=401, detail="current password is wrong")
+    secret = totp_generate_secret()
+    uri = totp_provisioning_uri(secret, cred.username)
+    # Render the QR server-side as an SVG so the TOTP secret never
+    # leaves this process — a third-party QR API would necessarily
+    # see the otpauth:// URI (which embeds the secret).
+    import qrcode
+    import qrcode.image.svg
+    import io
+    buf = io.BytesIO()
+    qrcode.make(uri, image_factory=qrcode.image.svg.SvgImage).save(buf)
+    qr_svg = buf.getvalue().decode("utf-8")
+    return {"secret": secret, "otpauth_uri": uri, "qr_svg": qr_svg}
+
+
+@app.post("/api/auth/totp/confirm", dependencies=[AuthDep, CsrfDep])
+async def totp_confirm_endpoint(body: TotpConfirmBody) -> dict[str, bool]:
+    """Validate a 6-digit code against the provided candidate secret
+    BEFORE persisting it — if the user's authenticator app drifted or
+    they scanned the wrong QR, we want to fail loudly here instead of
+    locking them out on the next login."""
+    import pyotp
+    secret = (body.secret or "").strip()
+    code = (body.code or "").strip()
+    # Sanity-check the secret looks like base32 of the expected length.
+    if not secret or len(secret) < 16 or len(secret) > 64:
+        raise HTTPException(status_code=400, detail="invalid secret")
+    if not code.isdigit() or len(code) not in (6, 7, 8):
+        raise HTTPException(status_code=400, detail="invalid code")
+    try:
+        ok = pyotp.TOTP(secret).verify(code, valid_window=1)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid secret")
+    if not ok:
+        raise HTTPException(status_code=401, detail="code did not verify")
+    saved, msg = set_totp_secret(secret)
+    if not saved:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"enrolled": True}
+
+
+@app.post("/api/auth/totp/disable", dependencies=[AuthDep, CsrfDep])
+async def totp_disable_endpoint(body: TotpDisableBody) -> dict[str, bool]:
+    """Disable TOTP. Requires BOTH the current password AND a valid
+    current code, so a stolen session cookie alone can't unenroll
+    two-factor protection (which would then let the attacker keep
+    using the stolen password indefinitely)."""
+    cred = get_credential()
+    if not cred.totp_secret:
+        return {"enrolled": False}
+    if not verify_credential(cred.username, body.currentPassword):
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=401, detail="current password is wrong")
+    if not totp_verify(body.code):
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=401, detail="invalid code")
+    saved, msg = set_totp_secret(None)
+    if not saved:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"enrolled": False}
 
 
 class ChangeCredentialBody(BaseModel):
@@ -385,6 +549,12 @@ async def tts_speak(body: SpeakBody) -> StreamingResponse:
     /api/tts/preview (small text cap, voice-test path) — this is the
     "repeat last response" endpoint used by the statusbar replay pill.
     Voice defaults to the configured one when the body omits it.
+
+    Implementation: open the upstream stream BEFORE constructing the
+    FastAPI ``StreamingResponse`` so a Kokoro 5xx surfaces as our own
+    502 with proper headers (a raise inside the generator would land
+    after headers were sent → the client gets a truncated MP3 with no
+    error indication).
     """
     cfg = app_config.load()
     voice = (body.voice or cfg.tts.voice or "").strip()
@@ -401,18 +571,28 @@ async def tts_speak(body: SpeakBody) -> StreamingResponse:
         "response_format": "mp3",
     }
 
+    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=2.0, read=60.0,
+                                                      write=10.0, pool=2.0))
+    try:
+        stream_cm = client.stream("POST", f"{_kokoro_url()}/v1/audio/speech",
+                                    json=payload)
+        resp = await stream_cm.__aenter__()
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"kokoro unreachable: {exc}")
+    if resp.status_code != 200:
+        await stream_cm.__aexit__(None, None, None)
+        await client.aclose()
+        raise HTTPException(status_code=502, detail="kokoro error")
+
     async def stream():
-        client = httpx.AsyncClient(timeout=httpx.Timeout(connect=2.0, read=60.0,
-                                                          write=10.0, pool=2.0))
         try:
-            async with client.stream("POST", f"{_kokoro_url()}/v1/audio/speech",
-                                      json=payload) as resp:
-                if resp.status_code != 200:
-                    raise HTTPException(status_code=502, detail="kokoro error")
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        yield chunk
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    yield chunk
         finally:
+            try: await stream_cm.__aexit__(None, None, None)
+            except Exception: pass
             await client.aclose()
 
     return StreamingResponse(stream(), media_type="audio/mpeg")
@@ -449,18 +629,30 @@ async def tts_preview(request: Request, voice: str,
         "response_format": "mp3",
     }
 
+    # Same open-before-stream pattern as /api/tts/speak so a Kokoro
+    # failure becomes a proper 502 instead of a truncated MP3.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=2.0, read=60.0,
+                                                      write=10.0, pool=2.0))
+    try:
+        stream_cm = client.stream("POST", f"{_kokoro_url()}/v1/audio/speech",
+                                    json=body)
+        resp = await stream_cm.__aenter__()
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"kokoro unreachable: {exc}")
+    if resp.status_code != 200:
+        await stream_cm.__aexit__(None, None, None)
+        await client.aclose()
+        raise HTTPException(status_code=502, detail="kokoro error")
+
     async def stream():
-        client = httpx.AsyncClient(timeout=httpx.Timeout(connect=2.0, read=60.0,
-                                                          write=10.0, pool=2.0))
         try:
-            async with client.stream("POST", f"{_kokoro_url()}/v1/audio/speech",
-                                      json=body) as resp:
-                if resp.status_code != 200:
-                    raise HTTPException(status_code=502, detail="kokoro error")
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        yield chunk
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    yield chunk
         finally:
+            try: await stream_cm.__aexit__(None, None, None)
+            except Exception: pass
             await client.aclose()
 
     return StreamingResponse(stream(), media_type="audio/mpeg")
@@ -479,6 +671,7 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
         name = tmux.safe_name(body.name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    _reject_control_session(name)
     if await tmux.session_exists(name):
         raise HTTPException(status_code=409, detail="session already exists")
 
@@ -519,6 +712,8 @@ async def rename_session_endpoint(name: str, body: RenameSessionBody) -> Session
         new_name = tmux.safe_name(body.newName)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    _reject_control_session(name)
+    _reject_control_session(new_name)
     if not await tmux.session_exists(name):
         raise HTTPException(status_code=404, detail="session not found")
     if name != new_name:
@@ -538,6 +733,7 @@ async def delete_session_endpoint(name: str) -> dict[str, bool]:
         name = tmux.safe_name(name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    _reject_control_session(name)
     if not await tmux.session_exists(name):
         raise HTTPException(status_code=404, detail="session not found")
     if not await tmux.kill_session(name):
@@ -587,42 +783,46 @@ async def fs_list(path: str, show_hidden: int = 0) -> dict[str, Any]:
     }
 
 
-def _render_jsonl_as_markdown(path: Path) -> str:
-    """Walk a claude-code JSONL transcript and render it as a clean
-    markdown document. Skips framework caveats (``<local-command-…>``
-    tags), tool-use / tool-result records, and any non-text content
-    blocks — what remains is the user/assistant conversation.
-
-    Long transcripts can be megabytes, but the streaming write at the
-    endpoint level keeps memory bounded; this returns a single string
-    because the loop is fast enough for personal-scale transcripts."""
-    parts: list[str] = []
+def _iter_jsonl_as_markdown(path: Path):
+    """Yield UTF-8 markdown chunks for a claude-code JSONL transcript
+    without materialising the full document in memory. Skips framework
+    caveats (``<local-command-…>``), tool-use / tool-result records,
+    and any non-text content blocks. Used by the export endpoint as
+    a true streaming response body."""
     try:
-        with path.open("rb") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                rtype = obj.get("type")
-                msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-                content = msg.get("content")
-                if rtype == "user":
-                    text = _stringify_content(content)
-                    if not text or text.lstrip().startswith("<"):
-                        continue
-                    parts.append(f"## User\n\n{text.strip()}\n")
-                elif rtype == "assistant":
-                    text = _stringify_content(content)
-                    if not text:
-                        continue
-                    parts.append(f"## Claude\n\n{text.strip()}\n")
-                # silently ignore other record types
+        f = path.open("rb")
     except OSError:
-        return ""
-    return "\n".join(parts)
+        return
+    try:
+        first = True
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rtype = obj.get("type")
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            content = msg.get("content")
+            if rtype == "user":
+                text = _stringify_content(content)
+                if not text or text.lstrip().startswith("<"):
+                    continue
+                header = "## User"
+            elif rtype == "assistant":
+                text = _stringify_content(content)
+                if not text:
+                    continue
+                header = "## Claude"
+            else:
+                continue
+            sep = "" if first else "\n"
+            first = False
+            yield f"{sep}{header}\n\n{text.strip()}\n".encode("utf-8")
+    finally:
+        try: f.close()
+        except OSError: pass
 
 
 def _stringify_content(content: Any) -> str:
@@ -670,12 +870,22 @@ async def claude_session_export(session_id: str, cwd: str) -> StreamingResponse:
         target.relative_to(projects_dir.resolve())
     except (OSError, ValueError):
         raise HTTPException(status_code=404, detail="session not found")
-    body = await asyncio.to_thread(_render_jsonl_as_markdown, target)
-    if not body:
+    # Probe by reading the first chunk so we can return 404 cleanly
+    # rather than serving an empty 200 for an unreadable transcript.
+    def _probe() -> bytes | None:
+        for chunk in _iter_jsonl_as_markdown(target):
+            return chunk
+        return None
+    first_chunk = await asyncio.to_thread(_probe)
+    if not first_chunk:
         raise HTTPException(status_code=404, detail="empty or unreadable transcript")
+
+    # Streaming body — re-iterates the file from the top. Cheap given
+    # the probe was just one record; avoids leaking the probe's fd
+    # into the response generator.
     filename = f"ccpipe-{session_id[:8]}.md"
     return StreamingResponse(
-        iter([body.encode("utf-8")]),
+        _iter_jsonl_as_markdown(target),
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
@@ -732,6 +942,12 @@ async def ws(websocket: WebSocket, session: str, skip_history: int = 0) -> None:
         name = tmux.safe_name(session)
     except ValueError:
         await websocket.close(code=1008, reason="invalid session name")
+        return
+    # Refuse to attach a user PTY to the hidden control-mode session;
+    # tmux would allow it but the resulting client would just shovel
+    # control protocol bytes into xterm.
+    if name == CONTROL_SESSION_NAME:
+        await websocket.close(code=1008, reason="reserved session name")
         return
     await handle_terminal_ws(websocket, name, skip_history=bool(skip_history))
 

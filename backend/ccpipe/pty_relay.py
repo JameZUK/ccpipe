@@ -43,6 +43,10 @@ class PtyProcess:
         # task that waits on the master fd becoming writable.
         self._write_buffer: bytearray = bytearray()
         self._drain_task: asyncio.Task[None] | None = None
+        # Signalled by write() whenever it enqueues bytes the drain
+        # task needs to push. asyncio.Event.set() is loop-thread-safe
+        # so write() can call it directly from the receive loop.
+        self._drain_signal: asyncio.Event = asyncio.Event()
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -155,6 +159,7 @@ class PtyProcess:
                             len(self._write_buffer), len(data))
                 return
             self._write_buffer.extend(data)
+            self._drain_signal.set()
             return
         try:
             n = os.write(fd, data)
@@ -165,21 +170,30 @@ class PtyProcess:
             return
         if n < len(data):
             self._write_buffer.extend(data[n:])
+            self._drain_signal.set()
 
     async def _drain_writes(self) -> None:
         """Push queued bytes through the PTY master as it becomes
-        writable. Uses ``loop.add_writer`` for edge-triggered wake-ups
-        so the polling cost is zero when the buffer is empty."""
+        writable. Edge-triggered: idles on an asyncio.Event when the
+        buffer is empty, wakes via ``loop.add_writer`` when the FD is
+        full. No timer-poll overhead.
+
+        FD reuse safety: capture self._master_fd at the top of each
+        iteration AND re-check after every await — terminate() may
+        have cleared it while we were parked, and the same numeric
+        fd could legally be returned by `os.open` for an unrelated
+        socket before our next `os.write`.
+        """
         loop = asyncio.get_running_loop()
-        while self._master_fd is not None:
-            if not self._write_buffer:
-                # Nothing to do; yield until write() pushes data in.
-                # Cheap polling — write() runs synchronously so we can't
-                # use an asyncio.Event without thread-safety concerns,
-                # but a 50 ms idle poll is invisible at this scale.
-                await asyncio.sleep(0.05)
-                continue
+        while True:
             fd = self._master_fd
+            if fd is None:
+                return
+            if not self._write_buffer:
+                self._drain_signal.clear()
+                await self._drain_signal.wait()
+                # After waking, the fd may have been swapped/cleared.
+                continue
             try:
                 n = os.write(fd, bytes(self._write_buffer))
             except BlockingIOError:
@@ -192,8 +206,9 @@ class PtyProcess:
                 del self._write_buffer[:n]
                 if not self._write_buffer:
                     continue
-            # FD wasn't ready or we still have a tail — wait for it
-            # to become writable via the event loop.
+            # FD wasn't ready (or has a tail) — wait for writable via
+            # the event loop. Re-check fd identity after the await to
+            # be safe against terminate() recycling the descriptor.
             fut: asyncio.Future[None] = loop.create_future()
             def _on_writable() -> None:
                 if not fut.done():
@@ -205,12 +220,14 @@ class PtyProcess:
             try:
                 await asyncio.wait_for(fut, timeout=5.0)
             except asyncio.TimeoutError:
-                # Defensive: if the FD never becomes writable in 5s,
-                # poll again next iteration.
                 pass
             finally:
                 try: loop.remove_writer(fd)
                 except Exception: pass
+            if self._master_fd is not fd:
+                # terminate() flipped under us — bail before the next
+                # os.write lands on a recycled fd.
+                return
 
     async def wait(self) -> None:
         await self._exit_event.wait()
@@ -257,18 +274,29 @@ class PtyProcess:
                     log.error("pty child pid %s still alive after SIGKILL",
                               self._pid)
 
-        # 4. Stop the write drain so it doesn't keep trying os.write
-        #    on a closing FD.
+        # 4. Stop the write drain. Clear _master_fd FIRST so the drain
+        #    loop sees the change on its next wake and bails before
+        #    issuing another os.write — without this, terminate() can
+        #    race the kernel re-issuing the same numeric fd to an
+        #    unrelated socket between cancel() and our close() below.
+        self._master_fd = None
+        self._drain_signal.set()
         if self._drain_task is not None:
             self._drain_task.cancel()
             try:
                 await self._drain_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
+                # Re-raise if this terminate() was itself cancelled —
+                # otherwise we'd silently absorb the caller's cancel.
+                if asyncio.current_task() is not None and \
+                   asyncio.current_task().cancelling():
+                    raise
+            except Exception:
                 pass
             self._drain_task = None
 
         # 5. Close the master FD.
-        if fd is not None and self._master_fd is fd:
+        if fd is not None and self._master_fd is None:
             try:
                 os.close(fd)
             except OSError:

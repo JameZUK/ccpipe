@@ -306,6 +306,11 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
       <button type="button" class="btn btn--ghost" data-role="signout">${ICONS.logout}<span>sign out</span></button>
       <button type="button" class="btn btn--primary" data-role="save">Save credentials</button>
     </div>
+    <div class="modal__subsection" data-role="totp-subsection">
+      <div class="modal__subsection-title">Two-factor (TOTP)</div>
+      <div class="modal__subsection-status" data-role="totp-status-text">loading…</div>
+      <div data-role="totp-actions"></div>
+    </div>
   `;
 
   const status = sec.querySelector<HTMLElement>("[data-role=account-status]")!;
@@ -314,6 +319,9 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
   const newPw = sec.querySelector<HTMLInputElement>("input[name=newPassword]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
   const signOutBtn = sec.querySelector<HTMLButtonElement>("[data-role=signout]")!;
+  const totpStatusText = sec.querySelector<HTMLElement>("[data-role=totp-status-text]")!;
+  const totpActions = sec.querySelector<HTMLElement>("[data-role=totp-actions]")!;
+  _wireTotpUi(totpStatusText, totpActions);
 
   saveBtn.addEventListener("click", async () => {
     status.classList.remove("modal__status--error");
@@ -432,6 +440,203 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
     });
 
   return sec;
+}
+
+// ─── TOTP enrollment + disable (Account → Two-factor) ──────────────────
+
+async function _wireTotpUi(statusEl: HTMLElement, actions: HTMLElement): Promise<void> {
+  const refresh = async () => {
+    actions.innerHTML = "";
+    let s: { otp_enrolled?: boolean };
+    try {
+      const r = await fetch("/api/auth/status", { credentials: "same-origin" });
+      s = await r.json();
+    } catch {
+      statusEl.textContent = "could not query 2FA status";
+      return;
+    }
+    if (s.otp_enrolled) {
+      statusEl.textContent = "enrolled — required at next login";
+      statusEl.className = "modal__subsection-status modal__subsection-status--on";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn--ghost";
+      btn.textContent = "Disable two-factor";
+      btn.addEventListener("click", () => _renderDisableForm(actions, refresh));
+      actions.append(btn);
+    } else {
+      statusEl.textContent = "disabled — password-only login";
+      statusEl.className = "modal__subsection-status";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn--primary";
+      btn.textContent = "Set up two-factor";
+      btn.addEventListener("click", () => _renderEnrollForm(actions, refresh));
+      actions.append(btn);
+    }
+  };
+  await refresh();
+}
+
+/** Step 1 of enrollment: ask for the current password, fetch a fresh
+ * secret + provisioning URI, render the QR + confirmation input. */
+function _renderEnrollForm(host: HTMLElement, done: () => void): void {
+  host.innerHTML = "";
+  const form = document.createElement("div");
+  form.className = "totp-enroll";
+  form.innerHTML = `
+    <div class="totp-enroll__row">
+      <input type="password" class="input" placeholder="current password" data-role="cur"/>
+      <button type="button" class="btn btn--primary" data-role="gen">Generate code</button>
+    </div>
+    <div class="totp-enroll__qr" data-role="qr" hidden></div>
+    <div class="totp-enroll__row" data-role="confirm-row" hidden>
+      <input type="text" class="input" placeholder="6-digit code from authenticator" inputmode="numeric" maxlength="8" data-role="code"/>
+      <button type="button" class="btn btn--primary" data-role="confirm">Enable</button>
+    </div>
+    <div class="modal__status" data-role="enroll-status"></div>
+  `;
+  host.append(form);
+
+  const cur = form.querySelector<HTMLInputElement>("[data-role=cur]")!;
+  const gen = form.querySelector<HTMLButtonElement>("[data-role=gen]")!;
+  const qr = form.querySelector<HTMLElement>("[data-role=qr]")!;
+  const confirmRow = form.querySelector<HTMLElement>("[data-role=confirm-row]")!;
+  const code = form.querySelector<HTMLInputElement>("[data-role=code]")!;
+  const confirm = form.querySelector<HTMLButtonElement>("[data-role=confirm]")!;
+  const stat = form.querySelector<HTMLElement>("[data-role=enroll-status]")!;
+
+  let pendingSecret = "";
+
+  gen.addEventListener("click", async () => {
+    stat.textContent = "";
+    stat.classList.remove("modal__status--error");
+    if (!cur.value) {
+      stat.textContent = "current password required";
+      stat.classList.add("modal__status--error");
+      return;
+    }
+    gen.disabled = true;
+    try {
+      const res = await fetch("/api/auth/totp/enroll", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Requested-By": "ccpipe" },
+        body: JSON.stringify({ currentPassword: cur.value }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `status ${res.status}`);
+      }
+      const data = await res.json();
+      pendingSecret = data.secret;
+      // QR is rendered server-side as SVG so the otpauth:// URI
+      // (which embeds the secret) never reaches a third party.
+      qr.innerHTML = "";
+      const qrWrap = document.createElement("div");
+      qrWrap.className = "totp-enroll__qr-image";
+      qrWrap.innerHTML = data.qr_svg ?? "";
+      qr.append(qrWrap);
+      const fallback = document.createElement("div");
+      fallback.className = "totp-enroll__secret";
+      fallback.textContent = "or enter manually: ";
+      const codeEl = document.createElement("code");
+      codeEl.textContent = data.secret;
+      fallback.append(codeEl);
+      qr.append(fallback);
+      qr.hidden = false;
+      confirmRow.hidden = false;
+      code.focus();
+    } catch (e) {
+      stat.textContent = (e as Error).message;
+      stat.classList.add("modal__status--error");
+    } finally {
+      gen.disabled = false;
+    }
+  });
+
+  confirm.addEventListener("click", async () => {
+    stat.textContent = "";
+    stat.classList.remove("modal__status--error");
+    if (!pendingSecret) {
+      stat.textContent = "generate a code first";
+      stat.classList.add("modal__status--error");
+      return;
+    }
+    if (!/^[0-9]{6,8}$/.test(code.value)) {
+      stat.textContent = "code must be 6 digits";
+      stat.classList.add("modal__status--error");
+      return;
+    }
+    confirm.disabled = true;
+    try {
+      const res = await fetch("/api/auth/totp/confirm", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Requested-By": "ccpipe" },
+        body: JSON.stringify({ secret: pendingSecret, code: code.value }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `status ${res.status}`);
+      }
+      stat.textContent = "two-factor enabled";
+      setTimeout(done, 600);
+    } catch (e) {
+      stat.textContent = (e as Error).message;
+      stat.classList.add("modal__status--error");
+    } finally {
+      confirm.disabled = false;
+    }
+  });
+}
+
+function _renderDisableForm(host: HTMLElement, done: () => void): void {
+  host.innerHTML = "";
+  const form = document.createElement("div");
+  form.className = "totp-enroll";
+  form.innerHTML = `
+    <div class="totp-enroll__row">
+      <input type="password" class="input" placeholder="current password" data-role="cur"/>
+      <input type="text" class="input" placeholder="current 6-digit code" inputmode="numeric" maxlength="8" data-role="code"/>
+      <button type="button" class="btn btn--ghost" data-role="disable">Disable</button>
+    </div>
+    <div class="modal__status" data-role="dis-status"></div>
+  `;
+  host.append(form);
+  const cur = form.querySelector<HTMLInputElement>("[data-role=cur]")!;
+  const code = form.querySelector<HTMLInputElement>("[data-role=code]")!;
+  const btn = form.querySelector<HTMLButtonElement>("[data-role=disable]")!;
+  const stat = form.querySelector<HTMLElement>("[data-role=dis-status]")!;
+  btn.addEventListener("click", async () => {
+    stat.textContent = "";
+    stat.classList.remove("modal__status--error");
+    if (!cur.value || !/^[0-9]{6,8}$/.test(code.value)) {
+      stat.textContent = "password and code required";
+      stat.classList.add("modal__status--error");
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const res = await fetch("/api/auth/totp/disable", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Requested-By": "ccpipe" },
+        body: JSON.stringify({ currentPassword: cur.value, code: code.value }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `status ${res.status}`);
+      }
+      stat.textContent = "two-factor disabled";
+      setTimeout(done, 600);
+    } catch (e) {
+      stat.textContent = (e as Error).message;
+      stat.classList.add("modal__status--error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 // ─── About footer ───────────────────────────────────────────────────────

@@ -24,7 +24,9 @@ import pwd
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+import pyotp
 from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from starlette.websockets import WebSocket
@@ -107,6 +109,10 @@ class Credential:
     # under; mismatched versions invalidate the session even though the
     # cookie's signature still validates.
     version: int = 0
+    # Optional TOTP (RFC 6238) shared secret in base32. None = TOTP
+    # disabled for this account. Enrolled via /api/auth/totp/* —
+    # never returned to the client after the initial enroll exchange.
+    totp_secret: str | None = None
 
 
 def _system_username() -> str:
@@ -133,10 +139,14 @@ def _load_credentials_file(path: Path) -> Credential | None:
             version = max(0, int(raw_version))
         except (TypeError, ValueError):
             version = 0
+        totp = data.get("totp_secret")
+        if not (isinstance(totp, str) and totp.strip()):
+            totp = None
         return Credential(
             username=str(data["username"]),
             password=str(data["password"]),
             version=version,
+            totp_secret=totp,
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         log.warning("ignoring malformed credentials file %s: %s", path, exc)
@@ -160,15 +170,15 @@ def _write_credentials_file(path: Path, cred: Credential) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     # Atomic 0600 create — closes the "world-readable for a microsecond" window.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    payload: dict[str, Any] = {
+        "username": cred.username,
+        "password": cred.password,
+        "version": cred.version,
+    }
+    if cred.totp_secret:
+        payload["totp_secret"] = cred.totp_secret
     try:
-        os.write(fd, json.dumps(
-            {
-                "username": cred.username,
-                "password": cred.password,
-                "version": cred.version,
-            },
-            indent=2,
-        ).encode() + b"\n")
+        os.write(fd, json.dumps(payload, indent=2).encode() + b"\n")
     finally:
         os.close(fd)
     os.replace(tmp, path)
@@ -192,15 +202,20 @@ def _log_generated_banner(cred: Credential, path: Path) -> None:
 def _resolve_credential() -> Credential:
     env_user = os.environ.get(USERNAME_ENV, "").strip() or None
     env_pass = os.environ.get(PASSWORD_ENV, "").strip() or None
+    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    # TOTP enrollment is always file-backed even when username/password
+    # come from the environment — otherwise CCPIPE_AUTH_PASSWORD would
+    # silently disable any TOTP secret the user enrolled via the UI.
+    file_cred = _load_credentials_file(path)
+    file_totp = file_cred.totp_secret if file_cred else None
     if env_pass:
         return Credential(
             username=env_user or _system_username(),
             password=env_pass,
+            totp_secret=file_totp,
         )
-    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    cred = _load_credentials_file(path)
-    if cred:
-        return cred
+    if file_cred:
+        return file_cred
     cred = Credential(
         username=env_user or _system_username(),
         password=_generate_password(),
@@ -249,6 +264,66 @@ def verify_credential(username: str, password: str) -> bool:
     # username enumeration. `bool & bool` short-circuits at the Python level
     # only after both sides are evaluated; safe.
     return user_ok and pass_ok
+
+
+# ─── TOTP ──────────────────────────────────────────────────────────────────
+
+TOTP_ISSUER = "ccpipe"
+
+
+def totp_enrolled() -> bool:
+    return bool(get_credential().totp_secret)
+
+
+def totp_verify(code: str) -> bool:
+    """Constant-time-ish verify a 6-digit TOTP code against the
+    enrolled secret. Accepts the previous and next 30-second window
+    to tolerate clock drift between the server and the user's phone."""
+    cred = get_credential()
+    if not cred.totp_secret:
+        return False
+    if not isinstance(code, str):
+        return False
+    code = code.strip()
+    if not code.isdigit() or len(code) not in (6, 7, 8):
+        return False
+    try:
+        return pyotp.TOTP(cred.totp_secret).verify(code, valid_window=1)
+    except Exception:
+        return False
+
+
+def totp_generate_secret() -> str:
+    """Pyotp's helper returns a 32-char base32 string (160 bits)."""
+    return pyotp.random_base32()
+
+
+def totp_provisioning_uri(secret: str, username: str) -> str:
+    """`otpauth://totp/...` URI suitable for QR-code rendering. The
+    label includes the issuer + username so the user's authenticator
+    app shows "ccpipe (alice)" rather than just "ccpipe"."""
+    return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=TOTP_ISSUER)
+
+
+def set_totp_secret(secret: str | None) -> tuple[bool, str]:
+    """Persist a TOTP secret (or clear it). Bumps the credential
+    version so any existing session is invalidated — we want a
+    just-enrolled user to log back in fresh, and a just-disabled
+    user to lose any pending-OTP session they might be carrying."""
+    cred = get_credential()
+    new_cred = Credential(
+        username=cred.username,
+        password=cred.password,
+        version=cred.version + 1,
+        totp_secret=secret if secret else None,
+    )
+    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    try:
+        _write_credentials_file(path, new_cred)
+    except OSError as exc:
+        return False, f"failed to write credentials: {exc}"
+    reset_cached_credential()
+    return True, "updated"
 
 
 def update_credential(*, current_password: str,
@@ -301,12 +376,25 @@ def update_credential(*, current_password: str,
 class LoginBody(BaseModel):
     username: str
     password: str
+    # Optional second-factor code. When the user has TOTP enrolled, a
+    # password-only login returns AuthStatus(otp_required=True) without
+    # setting the session, and the client resubmits with the same body
+    # plus a six-digit code in this field.
+    code: str | None = None
 
 
 class AuthStatus(BaseModel):
     required: bool
     authenticated: bool
     username: str | None = None
+    # `True` when the server expects an additional TOTP code before
+    # granting the session. Clients render the code-entry step in
+    # response. Always False on a fully-authenticated response.
+    otp_required: bool = False
+    # Whether the account has TOTP enrolled. Surfaced so the Settings
+    # UI can show "two-factor: enrolled / disabled" without exposing
+    # the secret itself.
+    otp_enrolled: bool = False
 
 
 def is_auth_enabled() -> bool:

@@ -114,6 +114,15 @@ async function attachTerminal(session: string): Promise<void> {
   stateLabel.className = "statusbar__state";
   stateLabel.textContent = "connecting";
 
+  // Latency pip — sits next to the connection dot, shows the most
+  // recent ping→pong RTT. Colour-coded so a glance tells you whether
+  // the connection is comfortable, draggy, or about to wobble.
+  const latencyLabel = document.createElement("div");
+  latencyLabel.className = "statusbar__latency";
+  latencyLabel.title = "Most recent ping round-trip";
+  latencyLabel.textContent = "";
+  latencyLabel.hidden = true;
+
   const sessionLabel = document.createElement("div");
   sessionLabel.className = "statusbar__session";
   sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(session)}`;
@@ -165,7 +174,7 @@ async function attachTerminal(session: string): Promise<void> {
   });
 
   controls.append(ttsWaveCanvas, replayBtn, ttsBtn, settingsBtn);
-  statusbar.append(brand, divider1, dot, stateLabel, sessionLabel, controls);
+  statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────
   const terminalContainer = document.createElement("div");
@@ -322,6 +331,11 @@ async function attachTerminal(session: string): Promise<void> {
   // can hear me" feedback so the user can tell mute / system-vol issues
   // apart from "Claude hasn't replied yet".
   let ttsWaveform: import("./waveform").Waveform | null = null;
+  // Wake-lock during TTS playback is now owned by TtsPlayer itself
+  // (see tts.ts), which acquires before play() and releases on every
+  // exit path including play() rejection — without that, a failed
+  // play() acquired the lock but never released it, leaking refcount
+  // for the tab's lifetime.
   tts.onPlaybackStart = () => {
     const an = tts.getAnalyser();
     if (an) {
@@ -329,15 +343,10 @@ async function attachTerminal(session: string): Promise<void> {
       if (!ttsWaveform) ttsWaveform = new Waveform(ttsWaveCanvas, an);
       ttsWaveform.start();
     }
-    // Keep the screen awake while claude is speaking — otherwise a long
-    // response on mobile gets cut off when the display dims and the WS
-    // drops with it.
-    void wakeLock.acquire();
   };
   tts.onPlaybackEnd = () => {
     ttsWaveform?.stop();
     ttsWaveCanvas.hidden = true;
-    void wakeLock.release();
   };
 
   const updateTtsBtn = () => {
@@ -365,26 +374,32 @@ async function attachTerminal(session: string): Promise<void> {
   // (so we know whether to auto-stop on hold-end vs leave it running
   // because it was tap-toggled on).
   let pttHoldActive = false;
+  // Serializer: queue mic-events so a fast press/release can't race an
+  // in-flight toggleMic(). Without this, hold-end runs while
+  // toggleMic's await mic.start() is still pending — recording is
+  // still false, hold-end returns no-op, then toggleMic resolves with
+  // the stream running and no event left to stop it.
+  let micEventQueue: Promise<void> = Promise.resolve();
 
-  const handleMicEvent = async (
-    kind: "tap" | "hold-start" | "hold-end",
-  ): Promise<void> => {
-    if (!micAvailable) return;
-    if (kind === "tap") {
-      pttHoldActive = false;
-      await toggleMic();
-      return;
-    }
-    if (kind === "hold-start") {
-      pttHoldActive = true;
-      if (!recording) await toggleMic();
-      return;
-    }
-    if (kind === "hold-end") {
-      if (!pttHoldActive) return;          // wasn't a PTT-initiated recording
-      pttHoldActive = false;
-      if (recording) await toggleMic();
-    }
+  const handleMicEvent = (kind: "tap" | "hold-start" | "hold-end"): void => {
+    micEventQueue = micEventQueue.then(async () => {
+      if (!micAvailable) return;
+      if (kind === "tap") {
+        pttHoldActive = false;
+        await toggleMic();
+        return;
+      }
+      if (kind === "hold-start") {
+        pttHoldActive = true;
+        if (!recording) await toggleMic();
+        return;
+      }
+      if (kind === "hold-end") {
+        if (!pttHoldActive) return;        // wasn't a PTT-initiated recording
+        pttHoldActive = false;
+        if (recording) await toggleMic();
+      }
+    }).catch((e) => { console.warn("mic event failed:", e); });
   };
 
   const toggleMic = async (): Promise<void> => {
@@ -405,8 +420,10 @@ async function attachTerminal(session: string): Promise<void> {
         await mic?.start();
         // Auto-stop when the user goes silent for ~1.5s. This makes the
         // mic behave like a sensible voice assistant rather than
-        // streaming forever until manually stopped.
-        if (mic) mic.onSilence = () => { void toggleMic(); };
+        // streaming forever until manually stopped. Route through
+        // handleMicEvent("tap") so the PTT state machine (pttHoldActive)
+        // is reset in the same place a manual stop would reset it.
+        if (mic) mic.onSilence = () => { handleMicEvent("tap"); };
       } catch (err) {
         console.warn("mic start failed:", err);
         setRecording(false);
@@ -451,6 +468,9 @@ async function attachTerminal(session: string): Promise<void> {
         stateLabel.textContent = "closed";
         hideOfflineBanner();
       }
+      // Latency reading goes stale once the WS isn't open; hide it
+      // rather than letting "423 ms" linger over a closed connection.
+      if (status !== "open") latencyLabel.hidden = true;
       // Any non-open status means mic frames are no longer being
       // delivered. Drop recording state + tear the device down so a
       // dropped WS in the middle of dictation doesn't leave the UI
@@ -508,6 +528,16 @@ async function attachTerminal(session: string): Promise<void> {
       notifications.fireResponseReady(lastSpokenText, session);
     },
     onOutput(data) { writeToTerm?.(data); },
+    onLatency(ms) {
+      // Bucket the number so the UI reads as "fine / busy / janky"
+      // without me having to read the digits. Hide the label when no
+      // measurement yet so it doesn't flash garbage at connect time.
+      latencyLabel.hidden = false;
+      latencyLabel.textContent = `${ms} ms`;
+      latencyLabel.classList.toggle("statusbar__latency--ok", ms < 100);
+      latencyLabel.classList.toggle("statusbar__latency--warn", ms >= 100 && ms < 300);
+      latencyLabel.classList.toggle("statusbar__latency--bad", ms >= 300);
+    },
   });
 
   const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session);
@@ -534,7 +564,7 @@ async function attachTerminal(session: string): Promise<void> {
   if (mobile) {
     mountMobileUI(view, socket, {
       get available() { return micAvailable; },
-      onMicEvent: (kind) => { void handleMicEvent(kind); },
+      onMicEvent: (kind) => handleMicEvent(kind),
       onStateChange: (cb) => {
         stateSubs.push(cb);
         return () => {

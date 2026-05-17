@@ -121,16 +121,6 @@ def _sync_rename_session(old: str, new: str) -> bool:
     except LibTmuxException:
         return False
     return True
-    # Apply ccpipe defaults via the raw tmux command interface — libtmux's
-    # set_option signature has shifted between releases.
-    s = server.sessions.get(session_name=name)
-    if s is not None:
-        try:
-            s.cmd("set-option", "history-limit", "50000")
-            s.cmd("set-option", "aggressive-resize", "on")
-            s.cmd("set-option", "window-size", "latest")
-        except LibTmuxException as exc:
-            log.warning("setting tmux options on %s failed: %s", name, exc)
 
 
 async def list_sessions() -> list[TmuxSession]:

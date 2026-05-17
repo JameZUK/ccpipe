@@ -36,6 +36,25 @@ ccpipe runs as a `systemd --user` service on the host. No Docker — the backend
 
 ## Install
 
+The recommended path is the bundled installer — it creates a
+self-contained Python venv under `backend/.venv`, installs the
+frontend deps, builds the bundle, and wires up the two `systemd
+--user` units in one command. Idempotent: re-run to upgrade.
+
+```bash
+scripts/install.sh
+```
+
+If you'd rather just touch the venv + frontend without the
+systemd step (e.g. for a dev box where you'll run `uvicorn --reload`
+manually):
+
+```bash
+scripts/install.sh --skip-units
+```
+
+### Manual install (if you don't want to use the script)
+
 ```bash
 # 1. Build the frontend
 cd frontend

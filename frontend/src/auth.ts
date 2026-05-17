@@ -1,9 +1,14 @@
-// Cookie-based auth client.
+// Cookie-based auth client. Two-step flow when TOTP is enrolled:
+//   1. POST {username, password}      → if otp_required, switch UI to
+//                                        the code-entry step.
+//   2. POST {username, password, code} → grants the session on success.
 
 export interface AuthStatus {
   required: boolean;
   authenticated: boolean;
   username?: string | null;
+  otp_required?: boolean;
+  otp_enrolled?: boolean;
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
@@ -12,15 +17,23 @@ export async function fetchAuthStatus(): Promise<AuthStatus> {
   return res.json();
 }
 
-export async function login(username: string, password: string): Promise<AuthStatus> {
+export async function login(
+  username: string, password: string, code?: string,
+): Promise<AuthStatus & { error?: string }> {
+  const body: Record<string, string> = { username, password };
+  if (code) body.code = code;
   const res = await fetch("/api/auth/login", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", "X-Requested-By": "ccpipe" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify(body),
   });
   if (res.status === 401) {
-    return { required: true, authenticated: false };
+    const detail = await res.json().catch(() => ({}));
+    return { required: true, authenticated: false, error: detail.detail || "invalid credentials" };
+  }
+  if (res.status === 429) {
+    return { required: true, authenticated: false, error: "too many attempts, try again in a minute" };
   }
   if (!res.ok) throw new Error(`login: ${res.status}`);
   return res.json();
@@ -83,6 +96,7 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   legend.className = "login__legend";
   legend.textContent = "Sign in";
 
+  // ── Step 1: username + password ─────────────────────────────────
   const form = document.createElement("form");
   form.className = "login__form";
 
@@ -113,20 +127,53 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
 
   form.append(userInput, passInput, submitRow);
 
+  // ── Step 2: TOTP code ───────────────────────────────────────────
+  // Hidden until the password step indicates otp_required.
+  const otpForm = document.createElement("form");
+  otpForm.className = "login__form";
+  otpForm.hidden = true;
+
+  const otpInput = document.createElement("input");
+  otpInput.type = "text";
+  otpInput.name = "code";
+  otpInput.placeholder = "6-digit code";
+  otpInput.autocomplete = "one-time-code";
+  otpInput.spellcheck = false;
+  otpInput.autocapitalize = "none";
+  otpInput.inputMode = "numeric";
+  otpInput.maxLength = 8;
+  otpInput.pattern = "[0-9]*";
+  otpInput.required = true;
+
+  const otpSubmitRow = document.createElement("div");
+  otpSubmitRow.className = "login__submit";
+  const otpBtn = document.createElement("button");
+  otpBtn.type = "submit";
+  otpBtn.className = "btn btn--primary";
+  otpBtn.textContent = "Verify";
+  const otpBackBtn = document.createElement("button");
+  otpBackBtn.type = "button";
+  otpBackBtn.className = "btn btn--ghost";
+  otpBackBtn.textContent = "back";
+  otpSubmitRow.append(otpBackBtn, otpBtn);
+
+  otpForm.append(otpInput, otpSubmitRow);
+
   const err = document.createElement("div");
   err.className = "error";
 
   const hint = document.createElement("div");
   hint.className = "login__hint";
-  hint.textContent = "first run? credentials are at ~/.local/state/ccpipe/credentials";
+  hint.textContent = "first run? credentials are in ~/.local/state/ccpipe/credentials";
 
-  wrap.append(legend, form, err, hint);
+  wrap.append(legend, form, otpForm, err, hint);
   inner.append(head, wrap);
   frame.append(inner);
   root.append(frame);
 
   setTimeout(() => userInput.focus(), 50);
 
+  // Step 1 submit — password.
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     err.textContent = "";
@@ -135,14 +182,54 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
       const status = await login(userInput.value, passInput.value);
       if (status.authenticated) {
         onSuccess();
-      } else {
-        err.textContent = "invalid credentials";
-        passInput.select();
+        return;
       }
+      if (status.otp_required) {
+        // Switch to step 2.
+        form.hidden = true;
+        otpForm.hidden = false;
+        legend.textContent = "Enter the 6-digit code";
+        hint.textContent = "from your authenticator app";
+        setTimeout(() => otpInput.focus(), 50);
+        return;
+      }
+      err.textContent = status.error || "invalid credentials";
+      passInput.select();
     } catch (e) {
       err.textContent = (e as Error).message;
     } finally {
       btn.disabled = false;
     }
+  });
+
+  // Step 2 submit — TOTP code (re-submits username+password+code).
+  otpForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    otpBtn.disabled = true;
+    try {
+      const status = await login(userInput.value, passInput.value, otpInput.value);
+      if (status.authenticated) {
+        onSuccess();
+        return;
+      }
+      err.textContent = status.error || "invalid code";
+      otpInput.select();
+    } catch (e) {
+      err.textContent = (e as Error).message;
+    } finally {
+      otpBtn.disabled = false;
+    }
+  });
+
+  // Back button returns to step 1.
+  otpBackBtn.addEventListener("click", () => {
+    otpForm.hidden = true;
+    form.hidden = false;
+    legend.textContent = "Sign in";
+    hint.textContent = "first run? credentials are in ~/.local/state/ccpipe/credentials";
+    err.textContent = "";
+    otpInput.value = "";
+    setTimeout(() => userInput.focus(), 50);
   });
 }

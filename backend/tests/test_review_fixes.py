@@ -201,6 +201,122 @@ async def test_tts_filter_sessionid_isolation(tmp_path, monkeypatch):
                     "timestamp": "2099-01-01T00:00:00Z"}) is False
 
 
+# ── TOTP two-factor flow ─────────────────────────────────────────────────
+
+def test_login_no_totp_returns_authenticated(authed_client):
+    """Pristine accounts (no TOTP enrolled) must complete in one step."""
+    # The authed_client fixture already logs in to verify password flow;
+    # here we just check the response shape on a clean fresh post.
+    authed_client.post("/api/auth/logout",
+                        headers={"X-Requested-By": "ccpipe"})
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is True
+    assert body.get("otp_required", False) is False
+
+
+def test_totp_enroll_then_login_requires_code(authed_client):
+    """End-to-end enrollment + two-step login. Uses the actual server
+    pyotp instance, so a code generated here is valid."""
+    import pyotp
+    # 1. Enroll.
+    r = authed_client.post("/api/auth/totp/enroll",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein"})
+    assert r.status_code == 200, r.text
+    enroll = r.json()
+    secret = enroll["secret"]
+    assert "qr_svg" in enroll and enroll["qr_svg"].startswith("<?xml")
+    # 2. Confirm with a fresh code.
+    code = pyotp.TOTP(secret).now()
+    r = authed_client.post("/api/auth/totp/confirm",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"secret": secret, "code": code})
+    assert r.status_code == 200
+    # 3. Log out, then try password-only login — should signal otp_required.
+    authed_client.post("/api/auth/logout",
+                       headers={"X-Requested-By": "ccpipe"})
+    r = authed_client.post("/api/auth/login",
+                           headers={"X-Requested-By": "ccpipe"},
+                           json={"username": "alice", "password": "letmein"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is False
+    assert body["otp_required"] is True
+    # 4. Submit with a valid code → authenticated.
+    code = pyotp.TOTP(secret).now()
+    r = authed_client.post("/api/auth/login",
+                           headers={"X-Requested-By": "ccpipe"},
+                           json={"username": "alice", "password": "letmein",
+                                 "code": code})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is True
+
+
+def test_totp_enroll_rejects_wrong_current_password(authed_client):
+    r = authed_client.post("/api/auth/totp/enroll",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "wrong"})
+    assert r.status_code == 401
+
+
+def test_totp_confirm_rejects_bad_code(authed_client):
+    import pyotp
+    secret = pyotp.random_base32()
+    r = authed_client.post("/api/auth/totp/confirm",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"secret": secret, "code": "000000"})
+    assert r.status_code == 401
+
+
+# ── Login rate-limit ────────────────────────────────────────────────────
+
+def test_login_rate_limit(authed_client):
+    """After N consecutive failures the limiter must 429."""
+    # Logout first so we're on a fresh authenticator session; the
+    # client fixture's IP is constant so the limiter applies.
+    authed_client.post("/api/auth/logout",
+                       headers={"X-Requested-By": "ccpipe"})
+    # The test_review_fixes.py module hasn't tripped the bucket yet,
+    # but other tests in this module do log in successfully; reset
+    # the in-memory bucket so this test is order-independent.
+    import ccpipe.main as m
+    m._login_attempts.clear()
+    # 5 attempts is the cap.
+    for i in range(5):
+        r = authed_client.post("/api/auth/login",
+                                headers={"X-Requested-By": "ccpipe"},
+                                json={"username": "alice", "password": "wrong"})
+        assert r.status_code == 401, f"attempt {i}: {r.status_code}"
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "wrong"})
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
+
+
+# ── Control-session protection ──────────────────────────────────────────
+
+def test_control_session_delete_returns_404(authed_client):
+    """The hidden tmux control session is reserved; DELETE must
+    refuse rather than wiping ccpipe's event channel."""
+    r = authed_client.delete("/api/sessions/__ccpipe_ctrl",
+                              headers={"X-Requested-By": "ccpipe"})
+    assert r.status_code == 404
+
+
+def test_control_session_rename_target_rejected(authed_client):
+    """Renaming TO the control session name is also blocked."""
+    r = authed_client.patch("/api/sessions/something",
+                             headers={"X-Requested-By": "ccpipe"},
+                             json={"newName": "__ccpipe_ctrl"})
+    assert r.status_code == 404
+
+
 # ── #R5/#R18 Resize clamps ───────────────────────────────────────────────
 
 def test_resize_clamp_rejects_huge_dims():

@@ -19,6 +19,7 @@
 // counts as one).
 
 import { loadTtsMuted, saveTtsMuted } from "./display-prefs";
+import * as wakeLock from "./wake-lock";
 
 export class TtsPlayer {
   // Per-utterance chunk buffer (between onStart and onEnd).
@@ -177,7 +178,26 @@ export class TtsPlayer {
       URL.revokeObjectURL(this.playingUrl);
       this.playingUrl = null;
     }
+    void this._releaseWakeLock();
     try { this.onPlaybackEnd?.(); } catch (e) { console.warn(e); }
+  }
+
+  // True between a wakeLock.acquire we issued and its paired release.
+  // Tracking it here lets us release on every play() exit path
+  // (success, rejection, error event, dispose) without leaking the
+  // refcount when play() rejects before the "playing" event fires.
+  private wakeLockHeld = false;
+
+  private async _acquireWakeLock(): Promise<void> {
+    if (this.wakeLockHeld) return;
+    this.wakeLockHeld = true;
+    try { await wakeLock.acquire(); } catch {}
+  }
+
+  private async _releaseWakeLock(): Promise<void> {
+    if (!this.wakeLockHeld) return;
+    this.wakeLockHeld = false;
+    try { await wakeLock.release(); } catch {}
   }
 
   private playBlob(blob: Blob): void {
@@ -199,8 +219,15 @@ export class TtsPlayer {
         console.warn("tts: ctx resume failed:", e));
     }
 
+    // Acquire BEFORE play() so the screen doesn't dim during a long
+    // sentence; release on every failure / end path below.
+    void this._acquireWakeLock();
     this.audio.play().catch((err) => {
       console.warn("tts: playback failed:", err);
+      // play() rejection means "playing" will never fire, so
+      // handlePlaybackStart was never called and the wake-lock would
+      // otherwise leak. Force-release symmetrically.
+      void this._releaseWakeLock();
       this.handlePlaybackEnd();
       this.pumpQueue();
     });
@@ -234,6 +261,11 @@ export class TtsPlayer {
       console.warn("tts replay fetch error:", err);
       return;
     }
+    // Re-check mute *after* the fetch resolves. The user might have
+    // muted during the round-trip; without this guard the blob would
+    // still be queued and play as soon as they unmute, which feels
+    // like the mute button "didn't work".
+    if (this.muted) return;
     this.queue.push(blob);
     this.pumpQueue();
   }
@@ -275,6 +307,7 @@ export class TtsPlayer {
       }
     }
     this.playbackActive = false;
+    void this._releaseWakeLock();
     this.onPlaybackStart = null;
     this.onPlaybackEnd = null;
   }

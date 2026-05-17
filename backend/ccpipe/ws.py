@@ -259,11 +259,13 @@ async def handle_terminal_ws(websocket: WebSocket, session: str,
 
     # Send any captured history before the live pump starts. xterm.js
     # writes these bytes into its scrollback; tmux attach's incoming
-    # redraw will then paint the current visible pane on top.
+    # redraw will then paint the current visible pane on top. Prefixed
+    # with FRAME_PTY_OUTPUT so the client dispatches it through the
+    # same PTY pipeline as live output.
     if history_bytes:
         async with send_lock:
             try:
-                await websocket.send_bytes(history_bytes)
+                await websocket.send_bytes(bytes([FRAME_PTY_OUTPUT]) + history_bytes)
             except Exception as exc:
                 log.debug("history send failed: %s", exc)
 
@@ -460,9 +462,12 @@ async def _wait_for_initial_resize(websocket: WebSocket
 
 def _is_ping(text: str) -> bool:
     """Cheap pre-parse check so the receive loop can dispatch pongs
-    without doing a full json.loads first. Falls back to a real parse
-    when the cheap test passes."""
-    if "\"ping\"" not in text:
+    without doing a full json.loads on every keystroke. The substring
+    check is tighter than ``"ping"`` alone so paste content containing
+    the word doesn't waste a parse — it has to look like our literal
+    ``{"type":"ping"}`` shape (modulo whitespace) to even be tested.
+    """
+    if '"type":"ping"' not in text and '"type": "ping"' not in text:
         return False
     try:
         return json.loads(text).get("type") == "ping"
