@@ -9,8 +9,9 @@ After=pipewire-pulse.service pipewire.service pulseaudio.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=%h/Projects/ccpipe/scripts/setup-virtual-mic.sh up
-ExecStop=%h/Projects/ccpipe/scripts/setup-virtual-mic.sh down
+# @REPO_ROOT@ is substituted by scripts/install.sh at install time.
+ExecStart=@REPO_ROOT@/scripts/setup-virtual-mic.sh up
+ExecStop=@REPO_ROOT@/scripts/setup-virtual-mic.sh down
 # If Pulse isn't actually up (rare on a logged-in graphical session, but
 # possible during cold boot), pactl will exit non-zero. Don't take down
 # ccpipe over that — voice just won't be available.

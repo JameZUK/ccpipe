@@ -36,12 +36,23 @@ ccpipe runs as a `systemd --user` service on the host. No Docker — the backend
 
 ## Install
 
+The repo is location-independent — clone it wherever you want it to
+live long-term. A common pattern is to keep one clone for development
+under `~/Projects/ccpipe/` and a separate "live install" under
+`~/.local/share/ccpipe/` that the systemd unit actually runs from;
+the install script picks up the path of whichever checkout you run
+it from and bakes that into the rendered systemd unit.
+
 The recommended path is the bundled installer — it creates a
 self-contained Python venv under `backend/.venv`, installs the
-frontend deps, builds the bundle, and wires up the two `systemd
+frontend deps, builds the bundle, renders the systemd unit templates
+with the current install location, and wires up the two `systemd
 --user` units in one command. Idempotent: re-run to upgrade.
 
 ```bash
+# Long-term install location:
+git clone https://github.com/<you>/ccpipe ~/.local/share/ccpipe
+cd ~/.local/share/ccpipe
 scripts/install.sh
 ```
 
@@ -69,10 +80,16 @@ python -m venv .venv
 pip install -e .
 cd ..
 
-# 3. Install the systemd user units
+# 3. Render + install the systemd user units. The repo ships templates
+#    (.service.in) with an @REPO_ROOT@ placeholder; substitute the
+#    absolute path of THIS checkout so the unit points at the right
+#    venv and frontend bundle.
+REPO_ROOT="$(pwd)"
 mkdir -p ~/.config/systemd/user
-cp systemd/ccpipe.service              ~/.config/systemd/user/
-cp systemd/ccpipe-virtual-mic.service  ~/.config/systemd/user/
+sed "s|@REPO_ROOT@|$REPO_ROOT|g" systemd/ccpipe.service.in \
+    > ~/.config/systemd/user/ccpipe.service
+sed "s|@REPO_ROOT@|$REPO_ROOT|g" systemd/ccpipe-virtual-mic.service.in \
+    > ~/.config/systemd/user/ccpipe-virtual-mic.service
 systemctl --user daemon-reload
 systemctl --user enable --now ccpipe-virtual-mic   # mic for /voice
 systemctl --user enable --now ccpipe               # the web service

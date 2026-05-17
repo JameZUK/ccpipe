@@ -71,11 +71,28 @@ say "building frontend bundle"
 ok  "frontend built to $FRONTEND/dist"
 
 # ─── 3. systemd user units ────────────────────────────────────────────
+# Units ship as templates (*.service.in) with an @REPO_ROOT@ placeholder
+# that we substitute with the absolute path of THIS install. That makes
+# the project location-independent: clone to anywhere, run install.sh,
+# the rendered unit at ~/.config/systemd/user/ccpipe.service points at
+# the right place. The repo never carries a hardcoded user path.
 if [[ "$INSTALL_UNITS" -eq 1 ]]; then
-  say "installing systemd --user units"
+  say "rendering + installing systemd --user units (REPO_ROOT=$REPO_ROOT)"
   mkdir -p "$USER_UNITS_DIR"
-  install -m 0644 "$UNITS_DIR/ccpipe.service"             "$USER_UNITS_DIR/"
-  install -m 0644 "$UNITS_DIR/ccpipe-virtual-mic.service" "$USER_UNITS_DIR/"
+  render_unit() {
+    local template="$1" target="$2"
+    if [[ ! -f "$template" ]]; then
+      warn "missing template: $template"
+      exit 1
+    fi
+    # Use a delimiter that can't appear in a filesystem path. The
+    # placeholder is documented in the .in files so a maintainer
+    # editing them knows what gets substituted.
+    sed "s|@REPO_ROOT@|$REPO_ROOT|g" "$template" \
+      | install -m 0644 /dev/stdin "$target"
+  }
+  render_unit "$UNITS_DIR/ccpipe.service.in"             "$USER_UNITS_DIR/ccpipe.service"
+  render_unit "$UNITS_DIR/ccpipe-virtual-mic.service.in" "$USER_UNITS_DIR/ccpipe-virtual-mic.service"
   systemctl --user daemon-reload
   systemctl --user enable --now ccpipe-virtual-mic.service || \
     warn "virtual-mic unit failed to enable — voice/dictation will be unavailable (continuing)"

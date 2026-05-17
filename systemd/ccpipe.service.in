@@ -8,17 +8,21 @@ Wants=ccpipe-virtual-mic.service
 
 [Service]
 Type=exec
-WorkingDirectory=%h/Projects/ccpipe/backend
+# @REPO_ROOT@ is substituted by scripts/install.sh at install time with
+# the absolute path of the checkout being installed. The rendered unit
+# lives in ~/.config/systemd/user/ccpipe.service; the source template
+# stays in the repo.
+WorkingDirectory=@REPO_ROOT@/backend
 # Default ExecStart binds 0.0.0.0 so an off-host reverse proxy (nginx)
 # can reach the backend over the LAN. When TLS is terminating at that
 # proxy, add a drop-in that resets ExecStart and re-runs uvicorn with
 # `--proxy-headers --forwarded-allow-ips=<proxy-host-IP>`; without
 # the latter the per-IP login throttle treats every request as coming
 # from the proxy. See README §"Reverse proxy" for the exact drop-in.
-ExecStart=%h/Projects/ccpipe/backend/.venv/bin/uvicorn ccpipe.main:app --host 0.0.0.0 --port 8080
+ExecStart=@REPO_ROOT@/backend/.venv/bin/uvicorn ccpipe.main:app --host 0.0.0.0 --port 8080
 
 # Frontend bundle served by FastAPI when this exists
-Environment=CCPIPE_FRONTEND_DIST=%h/Projects/ccpipe/frontend/dist
+Environment=CCPIPE_FRONTEND_DIST=@REPO_ROOT@/frontend/dist
 
 # TTS (set CCPIPE_TTS=off to disable)
 Environment=CCPIPE_TTS=kokoro
