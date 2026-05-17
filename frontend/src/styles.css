@@ -1350,39 +1350,71 @@ body.file-panel-resizing {
 }
 .file-editor[data-maximised="true"] .file-editor__handle { display: none; }
 
-/* Custom corner-drag resize handle. Native `resize: both` was being
-   obscured by the save button in the footer (same bottom-right
-   pixel), so we drive width + height ourselves with pointer events.
-   Visible affordance is a small diagonal stripe pattern; bumps to
-   amber on hover. */
+/* Resize affordances on the editor. Three of them so the user has
+   options:
+     - corner (bottom-right, 24×24, both axes)
+     - right edge (full-height strip, width only)
+     - bottom edge (full-width strip, height only)
+   All sit above the editor content via z-index. The right-edge handle
+   in particular is wide enough that the save button at the bottom-
+   right of the footer can't eat its pointer events. */
 .file-editor__handle {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  z-index: 5;
+  z-index: 20;
   touch-action: none;
-  background:
-    linear-gradient(135deg, transparent 0 35%,
-                            var(--fg-muted) 35% 45%,
-                            transparent 45% 60%,
-                            var(--fg-muted) 60% 70%,
-                            transparent 70% 100%);
+  background: transparent;
   transition: background 0.15s var(--ease-out);
 }
-.file-editor__handle:hover,
-body.file-editor-resizing .file-editor__handle {
+
+/* Right edge: thin strip for width-only drag. */
+.file-editor__handle--right {
+  top: 0;
+  right: 0;
+  bottom: 24px;            /* leave room for the corner handle below */
+  width: 6px;
+  cursor: ew-resize;
+}
+.file-editor__handle--right:hover,
+body.file-editor-resizing .file-editor__handle--right {
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+/* Bottom edge: thin strip for height-only drag. */
+.file-editor__handle--bottom {
+  left: 0;
+  right: 24px;             /* leave room for the corner handle */
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+.file-editor__handle--bottom:hover,
+body.file-editor-resizing .file-editor__handle--bottom {
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+/* Corner: prominent 24×24 with a visible diagonal-stripe affordance,
+   amber tint at rest so it's obvious it's a grab point. */
+.file-editor__handle--corner {
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
   background:
-    linear-gradient(135deg, transparent 0 35%,
-                            var(--accent) 35% 45%,
-                            transparent 45% 60%,
-                            var(--accent) 60% 70%,
-                            transparent 70% 100%);
+    linear-gradient(135deg, transparent 0 40%,
+                            var(--accent) 40% 48%,
+                            transparent 48% 60%,
+                            var(--accent) 60% 68%,
+                            transparent 68% 100%);
+  opacity: 0.7;
+}
+.file-editor__handle--corner:hover,
+body.file-editor-resizing .file-editor__handle--corner {
+  opacity: 1;
 }
 body.file-editor-resizing {
-  cursor: nwse-resize;
   user-select: none;
   -webkit-user-select: none;
 }

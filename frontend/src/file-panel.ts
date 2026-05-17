@@ -617,51 +617,69 @@ function openEditor(path: string): void {
   saveBtn.textContent = "save";
   foot.append(status, saveBtn);
 
-  // Custom corner-drag resize handle. CSS `resize: both` was being
-  // blocked by the save button in the footer (they shared the
-  // bottom-right pixel), so we drive width + height ourselves.
-  const handle = document.createElement("div");
-  handle.className = "file-editor__handle";
-  handle.setAttribute("aria-label", "Resize editor");
-  handle.setAttribute("role", "separator");
-  sheet.append(head, textarea, foot, handle);
+  // Three drag affordances: a 24px corner handle (both axes), and
+  // separate right-edge / bottom-edge strips for width-only and
+  // height-only drags. The independent edges are important because
+  // a long edge is easier to hit on touch than a small corner, and
+  // it splits the "drag for width" gesture out from the corner so
+  // even if the corner handle is tricky there's still a way to widen.
+  const mkHandle = (cls: string, label: string) => {
+    const el = document.createElement("div");
+    el.className = `file-editor__handle ${cls}`;
+    el.setAttribute("aria-label", label);
+    el.setAttribute("role", "separator");
+    return el;
+  };
+  const cornerHandle = mkHandle("file-editor__handle--corner",  "Resize editor");
+  const rightHandle  = mkHandle("file-editor__handle--right",   "Resize width");
+  const bottomHandle = mkHandle("file-editor__handle--bottom",  "Resize height");
+  sheet.append(head, textarea, foot, rightHandle, bottomHandle, cornerHandle);
   overlay.append(sheet);
   document.body.append(overlay);
 
-  let dragStart = { x: 0, y: 0, w: 0, h: 0 };
+  let dragStart = { x: 0, y: 0, w: 0, h: 0, axis: "both" as "both"|"w"|"h" };
   const clamp = () => ({
     minW: 480,
     minH: 320,
     maxW: Math.floor(window.innerWidth * 0.98),
     maxH: Math.floor(window.innerHeight * 0.98),
   });
-  handle.addEventListener("pointerdown", (e) => {
-    if (sheet.dataset.maximised === "true") return;
-    e.preventDefault();
-    const r = sheet.getBoundingClientRect();
-    dragStart = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
-    handle.setPointerCapture(e.pointerId);
-    document.body.classList.add("file-editor-resizing");
-  });
-  handle.addEventListener("pointermove", (e) => {
-    if (!handle.hasPointerCapture(e.pointerId)) return;
-    const c = clamp();
-    const w = Math.max(c.minW, Math.min(c.maxW, dragStart.w + (e.clientX - dragStart.x)));
-    const h = Math.max(c.minH, Math.min(c.maxH, dragStart.h + (e.clientY - dragStart.y)));
-    sheet.style.width = `${w}px`;
-    sheet.style.height = `${h}px`;
-  });
-  const endResize = (e: PointerEvent) => {
-    if (!handle.hasPointerCapture(e.pointerId)) return;
-    handle.releasePointerCapture(e.pointerId);
-    document.body.classList.remove("file-editor-resizing");
-    saveEditorSize({
-      w: Math.round(sheet.getBoundingClientRect().width),
-      h: Math.round(sheet.getBoundingClientRect().height),
+  const wireHandle = (el: HTMLElement, axis: "both"|"w"|"h") => {
+    el.addEventListener("pointerdown", (e) => {
+      if (sheet.dataset.maximised === "true") return;
+      e.preventDefault();
+      const r = sheet.getBoundingClientRect();
+      dragStart = { x: e.clientX, y: e.clientY, w: r.width, h: r.height, axis };
+      el.setPointerCapture(e.pointerId);
+      document.body.classList.add("file-editor-resizing");
     });
+    el.addEventListener("pointermove", (e) => {
+      if (!el.hasPointerCapture(e.pointerId)) return;
+      const c = clamp();
+      if (dragStart.axis !== "h") {
+        const w = Math.max(c.minW, Math.min(c.maxW, dragStart.w + (e.clientX - dragStart.x)));
+        sheet.style.width = `${w}px`;
+      }
+      if (dragStart.axis !== "w") {
+        const h = Math.max(c.minH, Math.min(c.maxH, dragStart.h + (e.clientY - dragStart.y)));
+        sheet.style.height = `${h}px`;
+      }
+    });
+    const end = (e: PointerEvent) => {
+      if (!el.hasPointerCapture(e.pointerId)) return;
+      el.releasePointerCapture(e.pointerId);
+      document.body.classList.remove("file-editor-resizing");
+      saveEditorSize({
+        w: Math.round(sheet.getBoundingClientRect().width),
+        h: Math.round(sheet.getBoundingClientRect().height),
+      });
+    };
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
   };
-  handle.addEventListener("pointerup", endResize);
-  handle.addEventListener("pointercancel", endResize);
+  wireHandle(cornerHandle, "both");
+  wireHandle(rightHandle,  "w");
+  wireHandle(bottomHandle, "h");
 
   const setStatus = (msg: string, error = false) => {
     status.textContent = msg;
