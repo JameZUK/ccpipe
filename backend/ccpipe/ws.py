@@ -395,25 +395,41 @@ _HISTORY_MAX_LINES = 10_000
 
 
 async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
-    """Return tmux scrollback bytes for the given session, preserving ANSI
-    escape sequences.
+    """Return the full tmux pane content (scrollback + visible) as
+    xterm-ready bytes, preserving ANSI escape sequences.
 
-    The output is ready to be written into xterm.js verbatim. After the
-    captured history we append ``viewport_rows`` blank lines so the
-    history scrolls into xterm's scrollback BEFORE tmux's attach redraw
-    repaints the visible viewport — otherwise the last `viewport_rows`
-    lines of history get clobbered by tmux's redraw at row 0.
+    The previous implementation captured *only* scrollback (``-E -1``)
+    and padded with ``viewport_rows`` blank LFs so the captured tail
+    would scroll past xterm's visible region before tmux's attach
+    redraw could clobber it. That seam was fragile: the padding count
+    had to equal the rows tmux would paint, but the two diverge as
+    soon as anything shifts the pane height (status bar, multi-pane
+    layouts, tmux config drift). When they disagreed the result was
+    silently-missing lines at the seam — exactly the
+    "older-overwriting-newer" symptom reported by the user.
 
-    Returns empty bytes on any failure or when there is no history.
+    The new approach is seam-free: capture the *entire* pane (history
+    + visible), send it as-is, and let tmux's attach redraw paint
+    over the visible region with the same bytes we just placed there.
+    The visible portion of our capture and tmux's redraw show
+    identical content (they're snapshots of the same pane microseconds
+    apart) so the overwrite is a no-op — no data loss, no alignment
+    to maintain. ``viewport_rows`` is kept on the API for callers
+    that still pass it; it's unused.
+
+    Returns empty bytes on any failure or when the pane is empty.
     """
+    del viewport_rows  # accepted for backwards compat; intentionally unused
     try:
         proc = await asyncio.create_subprocess_exec(
             tmux.TMUX_BIN, "capture-pane",
             "-t", session,
             "-p",                              # print to stdout
             "-e",                              # include escape sequences
-            "-S", f"-{_HISTORY_MAX_LINES}",    # last N lines of history
-            "-E", "-1",                        # end one line above visible pane
+            "-S", f"-{_HISTORY_MAX_LINES}",    # start: N lines into history
+            # No -E flag: capture extends through the visible pane to
+            # the bottom, so the resulting bytes describe the WHOLE
+            # pane state at this instant.
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -436,11 +452,7 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     normalised = out.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     if not normalised.endswith(b"\r\n"):
         normalised += b"\r\n"
-    # Push viewport contents into scrollback before tmux's redraw arrives.
-    # The redraw starts at \x1b[H (row 1) and overwrites whatever's in the
-    # visible region — including the most recent history lines we just
-    # wrote, which is exactly the data the user wanted to keep.
-    return normalised + b"\r\n" * max(1, viewport_rows)
+    return normalised
 
 
 async def _wait_for_initial_resize(websocket: WebSocket
