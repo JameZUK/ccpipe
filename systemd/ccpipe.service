@@ -9,6 +9,12 @@ Wants=ccpipe-virtual-mic.service
 [Service]
 Type=exec
 WorkingDirectory=%h/Projects/ccpipe/backend
+# Default ExecStart binds 0.0.0.0 so an off-host reverse proxy (nginx)
+# can reach the backend over the LAN. When TLS is terminating at that
+# proxy, add a drop-in that resets ExecStart and re-runs uvicorn with
+# `--proxy-headers --forwarded-allow-ips=<proxy-host-IP>`; without
+# the latter the per-IP login throttle treats every request as coming
+# from the proxy. See README §"Reverse proxy" for the exact drop-in.
 ExecStart=%h/Projects/ccpipe/backend/.venv/bin/uvicorn ccpipe.main:app --host 0.0.0.0 --port 8080
 
 # Frontend bundle served by FastAPI when this exists
@@ -19,10 +25,14 @@ Environment=CCPIPE_TTS=kokoro
 Environment=CCPIPE_KOKORO_URL=http://localhost:8880
 Environment=CCPIPE_TTS_VOICE=bf_emma
 
-# Authentication
-#   Set CCPIPE_AUTH_PASSWORD to require a login. If unset, the UI is open
-#   (LAN-internal only is the assumption). Prefer setting it via a drop-in
-#   file with mode 0600, NOT here in version-controlled config:
+# Authentication is ALWAYS ON. ccpipe generates a random password on
+# first start, argon2id-hashes it into ~/.local/state/ccpipe/credentials,
+# and writes the plaintext (once) into a sidecar ~/.local/state/ccpipe/
+# initial_password.txt (mode 0400). Read it, then `shred -u` the
+# sidecar.
+#
+# To pin the credentials in advance (e.g. provisioning), use a drop-in
+# with mode 0600 — NOT this version-controlled file:
 #     mkdir -p ~/.config/systemd/user/ccpipe.service.d/
 #     printf "[Service]\nEnvironment=CCPIPE_AUTH_PASSWORD=hunter2\n" \
 #         > ~/.config/systemd/user/ccpipe.service.d/auth.conf

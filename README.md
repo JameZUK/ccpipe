@@ -114,7 +114,7 @@ TLS + `CCPIPE_BEHIND_TLS=1` + the optional TOTP (see below) so the
 secure path is the only realistic way in.
 
 Once TLS is in front, drop in a service drop-in to flip the security
-toggles:
+toggles. Replace `10.0.0.5` with the actual IP of your nginx host:
 
 ```bash
 mkdir -p ~/.config/systemd/user/ccpipe.service.d/
@@ -123,6 +123,17 @@ cat > ~/.config/systemd/user/ccpipe.service.d/tls.conf <<'EOF'
 Environment=CCPIPE_BEHIND_TLS=1
 Environment=CCPIPE_TRUSTED_HOSTS=ccpipe.example.com
 Environment=CCPIPE_ALLOWED_ORIGINS=https://ccpipe.example.com
+
+# Reset ExecStart and re-run uvicorn with proxy-headers honoured. The
+# allow-ips list MUST be tight — every IP in it can spoof X-Forwarded-
+# For to bypass the per-IP login throttle. List only the host(s) where
+# nginx actually runs. Without this, request.client.host returns the
+# nginx IP for every request and the per-IP throttle is effectively
+# global.
+ExecStart=
+ExecStart=%h/Projects/ccpipe/backend/.venv/bin/uvicorn ccpipe.main:app \
+    --host 0.0.0.0 --port 8080 \
+    --proxy-headers --forwarded-allow-ips=10.0.0.5
 EOF
 systemctl --user daemon-reload && systemctl --user restart ccpipe
 ```
@@ -133,25 +144,41 @@ This:
 - enables `TrustedHostMiddleware` bound to your hostname,
 - restricts WebSocket Origin checks to the HTTPS origin so a browser
   loaded over HTTP can't hijack the WS upgrade,
-- sends `Strict-Transport-Security` on every response.
+- sends `Strict-Transport-Security` on every response,
+- accepts `X-Real-IP` / `X-Forwarded-For` from the configured proxy
+  IP(s) only, so the per-IP login throttle works per-real-client and
+  the journal records true source IPs in throttle-tripped warnings.
+
+Confirm the proxy-headers wiring is correct after restart by tailing
+the journal during a deliberate wrong-password attempt — the
+`login throttle tripped for ip=…` line should show the real client
+IP, not the nginx IP.
 
 Then visit `https://<server_name>/`.
 
 ## First-time login
 
-On first start, ccpipe generates a random password and prints it to
-the journal alongside a banner. Read it once and then either save it
-or rotate it via the Settings → Account UI:
+On first start, ccpipe generates a random password, **argon2id-hashes
+it into the credentials file**, and writes the plaintext into a
+read-once sidecar file (`0400`). The plaintext is never logged — the
+operator is told once where to look:
 
 ```bash
-journalctl --user -u ccpipe -b | grep -A 5 "GENERATED CCPIPE"
-# or just cat the credentials file
-cat ~/.local/state/ccpipe/credentials
+cat ~/.local/state/ccpipe/initial_password.txt
+# username + password + a reminder to delete this file once read
+
+# After you've recorded the password, delete the sidecar:
+shred -u ~/.local/state/ccpipe/initial_password.txt
 ```
 
+Existing installs with an old plaintext credentials file are migrated
+to argon2id automatically on next start. The journal banner that the
+old build produced is now suppressed — the plaintext never lands in
+`journalctl`.
+
 Username defaults to your system username. Both can be changed from
-the Settings modal, or by editing the credentials file (`0600`) and
-restarting ccpipe.
+the Settings modal at any time; ccpipe re-hashes the new password
+before persisting it.
 
 ### Two-factor (TOTP)
 
@@ -177,9 +204,10 @@ systemd drop-in at `~/.config/systemd/user/ccpipe.service.d/*.conf`.
 | `CCPIPE_AUTH_PASSWORD`    | auto-generated                     | Login password. Set explicitly to skip the auto-generated random one. |
 | `CCPIPE_CREDENTIALS_FILE` | `~/.local/state/ccpipe/credentials`| JSON credential store (`0600`). |
 | `CCPIPE_SESSION_SECRET_FILE` | `~/.local/state/ccpipe/session_secret` | Random secret used to sign session cookies. Auto-generated on first run. |
-| `CCPIPE_BEHIND_TLS`       | (unset)                            | When `1`/`true`/`on`, cookies get `Secure` + `__Host-` prefix, HSTS is sent, TrustedHostMiddleware enables. Required if a TLS proxy is in front. |
+| `CCPIPE_BEHIND_TLS`       | (unset)                            | When `1`/`true`/`on`, cookies get `Secure` + `__Host-` prefix, HSTS is sent, TrustedHostMiddleware enables, and a startup banner reminds the operator to firewall :8080 to the proxy IP. |
 | `CCPIPE_TRUSTED_HOSTS`    | `*`                                | Comma-separated allow-list for `Host`. Only meaningful with `CCPIPE_BEHIND_TLS=1`. |
 | `CCPIPE_ALLOWED_ORIGINS`  | derived from `Host`                | Comma-separated WebSocket origin allow-list. Set explicitly under TLS, e.g. `https://ccpipe.example.com`. |
+| `CCPIPE_FS_ROOT`          | `$HOME`                            | Root directory the file panel + editor are scoped to. Two subpaths under it (`.local/state/ccpipe`, `.config/ccpipe`) are denylisted to protect ccpipe's own credentials store. |
 | `CCPIPE_TTS`              | `off`                              | `kokoro`/`on`/`1`/`true` to enable TTS playback. Anything else disables. |
 | `CCPIPE_KOKORO_URL`       | `http://localhost:8880`            | URL of your running Kokoro-FastAPI instance. |
 | `CCPIPE_TTS_VOICE`        | `bf_emma`                          | Initial voice; user-overridable in Settings. |
@@ -246,7 +274,14 @@ pytest -v
 ```
 backend/
   ccpipe/
-    main.py            FastAPI app, /api/sessions, /ws, static frontend
+    main.py            App factory: middleware, lifespan, /ws, router wiring
+    auth.py            Argon2id passwords, TOTP, session middleware
+    routes/
+      auth.py          /api/auth/* (login, logout, TOTP, credentials)
+      sessions.py      /api/sessions/*, /api/claude-sessions/*
+      fs.py            /api/fs/* (list, read, write, upload, download, ...)
+      tts.py           /api/tts/* (voices, config, speak, preview)
+      static.py        /, /manifest.webmanifest, /sw.js, icons
     tmux.py            libtmux wrapper for one-shot ops
     tmux_control.py    Long-lived `tmux -C` listener; pushes events
     tmux_setup.py      Sets server-wide default-shell etc. at startup
@@ -255,17 +290,20 @@ backend/
     mic.py             Mic pipe writer (browser PCM → /tmp/ccpipe_mic.pipe)
     tts.py             JSONL tail + Kokoro client + audio chunk fan-out
     settings_patch.py  Idempotently adds voice keys to ~/.claude/settings.json
-  tests/               pytest suite (~140 tests)
+  tests/               pytest suite (~160 tests)
   pyproject.toml
 
 frontend/
   src/
-    main.ts            Entry: session picker → terminal
+    main.ts            Entry: session picker → terminal; lazy-loads heavy UI
+    api.ts             Shared fetch helper (CSRF header + same-origin + JSON)
     session-picker.ts
     terminal.ts        xterm.js setup, resize, input wiring
     mobile.ts          Composer bar + modifier-key row for phone/tablet
-    mic.ts             Mic capture: getUserMedia + AudioWorkletNode
-    tts.ts             Chunked audio player
+    file-panel.ts      Adaptive file browser + inline editor
+    settings.ts        Tabbed settings dialog (Display / Voice / Account)
+    mic.ts             Mic capture: getUserMedia + AudioWorkletNode + VAD
+    tts.ts             Chunked audio player + per-session mute
     ws.ts              WS client, JSON control + tagged binary frames
     styles.css
   public/
@@ -285,24 +323,53 @@ systemd/
 
 ## Security / ToS notes
 
-- Subscription OAuth (Pro/Max) is fine for personal use **only**
-  because the unmodified `claude` binary makes the API calls — ccpipe
-  is a pure PTY relay and never originates a request to
+- **Pure PTY relay.** Subscription OAuth (Pro/Max) is fine for
+  personal use **only** because the unmodified `claude` binary makes
+  the API calls — ccpipe never originates a request to
   `api.anthropic.com`. See
   https://code.claude.com/docs/en/legal-and-compliance.
-- Auth is **always on** — credentials are generated on first boot if
-  none are configured. The session cookie is signed and (under
-  `CCPIPE_BEHIND_TLS=1`) carries `Secure` + the `__Host-` prefix.
-  WebSocket upgrades enforce an Origin allow-list. State-changing
-  POSTs require an `X-Requested-By: ccpipe` header (CSRF defense).
-- Enable TOTP under Settings → Account if you need a second factor.
-- TTS reads from your Claude transcripts; only run ccpipe on a host
-  where you trust everyone with access to those files.
-- ccpipe binds `0.0.0.0:8080` so a reverse proxy on a different host
-  can reach it. If you don't have a firewall in front of that port,
-  any LAN device can attempt logins (rate-limited but reachable). If
-  the proxy is co-located, you can tighten by editing the unit's
-  `--host` to `127.0.0.1`.
+- **Always-on auth.** Credentials are generated on first boot if none
+  are configured. **Passwords are argon2id-hashed on disk**; the
+  plaintext only ever exists in the read-once `initial_password.txt`
+  sidecar (mode `0400`). Legacy plaintext credential files from older
+  builds are migrated to argon2id automatically.
+- **Session hardening.** The signed session cookie carries `Secure` +
+  the `__Host-` prefix under `CCPIPE_BEHIND_TLS=1`. WebSocket upgrades
+  enforce an Origin allow-list. State-changing POSTs require an
+  `X-Requested-By: ccpipe` header (CSRF defence). Each WS pong
+  re-checks `is_session_authed`, so a credential change closes any
+  open sockets on the next heartbeat.
+- **Login throttling.** Per-IP 5/min + global 30/min sliding-window
+  limit, with a 1-second sleep on every failure. Tripped attempts log
+  the resolved client IP. Behind a proxy, enable
+  `--proxy-headers --forwarded-allow-ips=<proxy-ip>` (see
+  §Reverse proxy) so the per-IP cap counts real clients, not the
+  proxy. No persistent banning — fail2ban reading
+  `journalctl --user -u ccpipe` is the conventional add-on.
+- **Optional TOTP** under Settings → Account. Codes are single-use
+  for ~120s after acceptance (in-memory burn-list refuses replay
+  even inside pyotp's clock-drift window).
+- **File panel scope.** `/api/fs/*` is jailed to `CCPIPE_FS_ROOT`
+  (default `$HOME`). The jail enforces `Path.is_relative_to(root)`
+  after symlink resolution, refuses non-regular files
+  (so `/proc/*`, `/dev/zero` and named pipes can't be read), and
+  uses `O_NOFOLLOW` on temp-file opens so a pre-staged symlink at
+  the tmp path can't clobber an arbitrary user-writable file. Only
+  ccpipe's own state dirs are denylisted; `.ssh`, `.aws`, `.gnupg`,
+  `.kube`, etc. remain reachable because this is an admin tool.
+- **TTS reads your Claude transcripts**; only run ccpipe on a host
+  where you trust everyone with access to those files. The transcript
+  watcher caps its in-memory state at 5k files (LRU eviction) and
+  drops watchdog events on overflow rather than growing unbounded.
+- **0.0.0.0 bind.** ccpipe binds `0.0.0.0:8080` so an off-host proxy
+  can reach it. Under `CCPIPE_BEHIND_TLS=1`, a startup banner reminds
+  the operator to firewall the port to the proxy IP only — otherwise
+  a LAN attacker can hit ccpipe directly over plaintext HTTP.
+  Suggested ufw rule:
+  ```
+  ufw deny  in on <iface> to any port 8080
+  ufw allow from <proxy-host>      to any port 8080
+  ```
 
 ## Troubleshooting
 
@@ -317,8 +384,15 @@ systemd/
   session. Browsers gate `AudioContext` resumption behind a user
   gesture. The voice pill in the statusbar should turn amber once
   it's wired.
-- **Login banner not in the journal**: `cat
-  ~/.local/state/ccpipe/credentials` always has the current values.
+- **Lost the generated initial password**: the credentials file
+  stores only the hash now. If you didn't capture the password from
+  `~/.local/state/ccpipe/initial_password.txt` before deleting it,
+  delete the credentials file itself
+  (`rm ~/.local/state/ccpipe/credentials`) and restart ccpipe — it
+  will regenerate fresh credentials and write a new sidecar.
+- **Login throttle keeps you locked out**: rate-limit windows are
+  60 s. Just wait. Or `systemctl --user restart ccpipe` to reset the
+  in-memory buckets immediately.
 - **`open terminal failed: not a terminal` in logs**: this used to
   fire during tmux control-client startup and is now suppressed; if
   you still see it, you're on an older build.

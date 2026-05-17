@@ -92,13 +92,29 @@ else
 fi
 
 # ─── 4. show credentials banner (if present) ──────────────────────────
-CREDS="${XDG_STATE_HOME:-$HOME/.local/state}/ccpipe/credentials"
-if [[ -f "$CREDS" ]]; then
+# Passwords are argon2id-hashed inside the credentials file; the
+# plaintext lives ONCE in a sidecar (mode 0400) that the operator is
+# expected to `cat` and then `shred -u`. Surface it here if it's still
+# present so a fresh install gets a one-shot reveal; otherwise just
+# tell them where to look.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ccpipe"
+SIDECAR="$STATE_DIR/initial_password.txt"
+CREDS="$STATE_DIR/credentials"
+if [[ -f "$SIDECAR" ]]; then
   echo
-  printf '\033[1;36m═══ ccpipe login credentials ═══\033[0m\n'
-  python3 -c "import json,sys; d=json.load(open(r'$CREDS')); print(f\"  username: {d['username']}\"); print(f\"  password: {d['password']}\"); print(f\"  totp:     {'enrolled' if d.get('totp_secret') else 'disabled'}\")"
+  printf '\033[1;36m═══ ccpipe initial credentials (read once) ═══\033[0m\n'
+  sed 's/^/  /' "$SIDECAR"
   echo
-  echo "  (edit / rotate via Settings → Account in the web UI)"
+  echo "  Recover later: cat $SIDECAR"
+  echo "  Delete after capturing: shred -u $SIDECAR"
+  echo "  Rotate via Settings → Account in the web UI."
+elif [[ -f "$CREDS" ]]; then
+  echo
+  printf '\033[1;36m═══ ccpipe credentials ═══\033[0m\n'
+  python3 -c "import json; d=json.load(open(r'$CREDS')); print(f\"  username: {d['username']}\"); print(f\"  totp:     {'enrolled' if d.get('totp_secret') else 'disabled'}\")"
+  echo
+  echo "  Password is argon2id-hashed in $CREDS (no plaintext stored)."
+  echo "  Forgot it? rm $CREDS && systemctl --user restart ccpipe to regenerate."
 fi
 
 echo
