@@ -200,6 +200,20 @@ export function mountMobileUI(parent: HTMLElement,
       composer.requestSubmit();
     }
   });
+  // beforeinput catches the soft-keyboard Enter on Android — Gboard
+  // (and most IME-driven keyboards) doesn't fire `keydown` with
+  // `key === "Enter"`; it reports `key: "Unidentified"` / `keyCode: 229`
+  // during composition and dispatches the line break via `beforeinput`
+  // with `inputType: "insertLineBreak"`. Without this hook the keydown
+  // handler above misses it, default behaviour inserts \n into the
+  // textarea, and the user sees "Enter just makes a new line".
+  textarea.addEventListener("beforeinput", (e) => {
+    const it = (e as InputEvent).inputType;
+    if (it === "insertLineBreak" || it === "insertParagraph") {
+      e.preventDefault();
+      composer.requestSubmit();
+    }
+  });
 
   composer.addEventListener("submit", (e) => {
     e.preventDefault();
