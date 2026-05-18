@@ -149,10 +149,26 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
 
   const sendResize = () => {
     if (disposed) return;
+    // ── Diagnostic (temporary): log every fit attempt so we can see
+    // what dimensions are being measured during reported misfit
+    // symptoms (narrow cols on inactivate, bottom row clipped). Filter
+    // devtools console with "ccpipe-debug" to see only these lines.
+    // eslint-disable-next-line no-console
+    console.log("[ccpipe-debug] sendResize pre", {
+      containerW: container.clientWidth,
+      containerH: container.clientHeight,
+      termCols: term.cols,
+      termRows: term.rows,
+      lastCols, lastRows,
+    });
     // Pre-flight: bail on transient too-small container states. See the
     // numbered comment above for the why.
     if (container.clientWidth < MIN_CONTAINER_PX
-        || container.clientHeight < MIN_CONTAINER_PX) return;
+        || container.clientHeight < MIN_CONTAINER_PX) {
+      // eslint-disable-next-line no-console
+      console.log("[ccpipe-debug] sendResize bailed: too-small container");
+      return;
+    }
 
     // Snapshot "user is at the live tail" BEFORE fit.fit(). If the
     // cols change, xterm's buffer.resize() reflows the scrollback
@@ -183,6 +199,13 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     if (term.cols < 2 || term.rows < 2) return;
     const colsRowsChanged =
       term.cols !== lastCols || term.rows !== lastRows;
+    // eslint-disable-next-line no-console
+    console.log("[ccpipe-debug] sendResize post", {
+      newCols: term.cols,
+      newRows: term.rows,
+      changed: colsRowsChanged,
+      wasAtBottom,
+    });
     if (!colsRowsChanged) return;
     lastCols = term.cols;
     lastRows = term.rows;

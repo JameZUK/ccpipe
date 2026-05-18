@@ -56,11 +56,66 @@ function applyOsChromeCompensation(): void {
       overlap = Math.max(0, window.innerHeight - avail);
     }
   } catch { /* screen unavailable in this environment */ }
-  // Ignore sub-row noise (fractional rounding, 1-2px DPI artefacts).
-  // A real taskbar is at least ~24px tall on every platform.
-  if (overlap < 8) overlap = 0;
+  // Ignore sub-row noise (<8px, almost certainly DPI rounding) AND
+  // implausibly large values (>200px, almost certainly a misdetection
+  // on a multi-monitor or misbehaving-compositor setup where
+  // screen.availHeight reports one monitor and window.innerHeight
+  // spans multiple). A real OS taskbar fits between ~24 and ~80 px.
+  if (overlap < 8 || overlap > 200) overlap = 0;
   document.documentElement.style.setProperty("--os-chrome-overlap", `${overlap}px`);
 }
+
+// ─── Diagnostic logging (temporary) ──────────────────────────────────────
+// Two persistent symptoms haven't been pinned down without telemetry from
+// the user's setup. Log key dimensions on every focus/visibility/resize
+// event AND expose a window.ccpipeDebug.dims() helper so the user can
+// open devtools, reproduce the bug, and copy the readings back. Keep
+// this opt-out behind a localStorage flag once we've understood the
+// root cause; for now it's unconditional so the user doesn't have to
+// re-enable it across reloads.
+function _ccpipeDebugSnapshot(): Record<string, unknown> {
+  const term = document.getElementById("terminal");
+  const viewport = document.querySelector(".xterm-viewport") as HTMLElement | null;
+  let availHeight: number | undefined;
+  let availWidth: number | undefined;
+  try { availHeight = screen.availHeight; } catch {}
+  try { availWidth = screen.availWidth; } catch {}
+  return {
+    iw: window.innerWidth,
+    ih: window.innerHeight,
+    aw: availWidth,
+    ah: availHeight,
+    dpr: window.devicePixelRatio,
+    bodyW: document.body.clientWidth,
+    bodyH: document.body.clientHeight,
+    termW: term?.clientWidth,
+    termH: term?.clientHeight,
+    vpW: viewport?.clientWidth,
+    vpH: viewport?.clientHeight,
+    vpSt: viewport?.scrollTop,
+    vpSh: viewport?.scrollHeight,
+    overlap: document.documentElement.style.getPropertyValue("--os-chrome-overlap"),
+    docVis: document.visibilityState,
+    hasFocus: document.hasFocus(),
+  };
+}
+function _ccpipeLog(event: string): void {
+  // Single tag prefix so the user can filter devtools console with
+  // "ccpipe-debug" and see only these lines.
+  // eslint-disable-next-line no-console
+  console.log("[ccpipe-debug] " + event, _ccpipeDebugSnapshot());
+}
+window.addEventListener("focus", () => _ccpipeLog("focus"));
+window.addEventListener("blur", () => _ccpipeLog("blur"));
+window.addEventListener("resize", () => _ccpipeLog("resize"));
+window.addEventListener("pageshow", (e) => _ccpipeLog("pageshow persisted=" + e.persisted));
+document.addEventListener("visibilitychange",
+  () => _ccpipeLog("visibilitychange " + document.visibilityState));
+(window as unknown as { ccpipeDebug?: unknown }).ccpipeDebug = {
+  dims: _ccpipeDebugSnapshot,
+};
+// Initial snapshot on bundle load so we have a "fresh page" baseline.
+_ccpipeLog("init");
 window.addEventListener("resize", applyOsChromeCompensation);
 window.addEventListener("focus", applyOsChromeCompensation);
 window.addEventListener("pageshow", applyOsChromeCompensation);
