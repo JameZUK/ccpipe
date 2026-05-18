@@ -4,6 +4,12 @@
 export type ServerHello = {
   type: "hello";
   session: string;
+  /** Absolute working directory of the tmux session, if resolvable.
+   * Used by the client to default file/directory-browse dialogs to
+   * the project root the user is actively working in rather than the
+   * fs jail root. Null if the server couldn't resolve it (e.g. the
+   * pane PID lookup failed). */
+  cwd: string | null;
   tts: boolean;
   voice: boolean;
 };
@@ -28,8 +34,13 @@ export type ServerTtsEnd = {
   type: "tts_end";
 };
 
+export type ServerStreamReady = {
+  type: "stream_ready";
+};
+
 export type ServerMessage =
   | ServerHello
+  | ServerStreamReady
   | ServerSessionEvent
   | ServerSessionGone
   | ServerTtsStart
@@ -176,7 +187,43 @@ export class TerminalSocket {
         try {
           const parsed = JSON.parse(ev.data) as { type: string } & Record<string, unknown>;
           switch (parsed.type) {
-            case "hello": this.handlers.onHello(parsed as unknown as ServerHello); return;
+            case "hello":
+              // No first-ping here. Hello is sent BEFORE the history-
+              // bytes blob, so a ping fired on hello arrival queues
+              // server-side behind the history send and the RTT
+              // measures setup time, not network. The accurate
+              // moment is `stream_ready`, sent immediately before
+              // the server enters its main receive loop.
+              this.handlers.onHello(parsed as unknown as ServerHello);
+              return;
+            case "stream_ready":
+              // Server has finished history-send and is one statement
+              // from `while True: await receive()`. But on the CLIENT
+              // side xterm.js is probably still parsing the history-
+              // bytes blob in microtasks queued ahead of us — and
+              // microtasks block message-event dispatch, so a ping
+              // sent here would have its pong queued behind xterm's
+              // remaining parse work, inflating the recorded RTT by
+              // the parse-tail duration (typically 10-30ms on a
+              // populated session).
+              //
+              // requestIdleCallback defers the send until the event
+              // loop is genuinely idle — xterm done, no pending DOM
+              // work — so the ping leaves with an empty queue and
+              // the pong's dispatch on return is instant. The
+              // resulting RTT measures pure wire round-trip.
+              //
+              // requestIdleCallback isn't on Safari before 16.4; the
+              // setTimeout(..., 0) fallback is "yield once then run"
+              // which is close enough — by then most of the
+              // synchronous history processing is done.
+              const fireFirstPing = () => this.sendPing();
+              if (typeof window.requestIdleCallback === "function") {
+                window.requestIdleCallback(fireFirstPing, { timeout: 500 });
+              } else {
+                setTimeout(fireFirstPing, 0);
+              }
+              return;
             case "session_event": this.handlers.onSessionEvent?.(parsed as unknown as ServerSessionEvent); return;
             case "session_gone": this.handlers.onSessionGone?.(parsed as unknown as ServerSessionGone); return;
             case "tts_start": this.handlers.onTtsStart?.(parsed as unknown as ServerTtsStart); return;
@@ -186,9 +233,25 @@ export class TerminalSocket {
               // it next to the connection dot. lastPingSentAt is 0 if
               // we never sent the matching ping (e.g. the server sent
               // an unsolicited pong); skip in that case.
+              //
+              // Use `ev.timeStamp` (the browser's record of WHEN the
+              // message event was created — close to when bytes hit
+              // the network card) rather than Date.now() inside this
+              // handler. On a busy event loop (page just refreshed,
+              // xterm.js still parsing the history-bytes blob in
+              // microtasks ahead of us, V8 still JIT-warming) our
+              // handler can run 10-20ms after the bytes actually
+              // arrived. timeStamp shaves that off so the indicator
+              // reads true network RTT instead of "wire RTT + how
+              // long the tab took to notice".
+              //
+              // timeStamp is DOMHighResTimeStamp relative to
+              // performance.timeOrigin; lastPingSentAt is set via
+              // performance.now() on the send side so they're in the
+              // same time base.
               if (this.lastPingSentAt) {
-                const rtt = Date.now() - this.lastPingSentAt;
-                this.handlers.onLatency?.(rtt);
+                const rtt = ev.timeStamp - this.lastPingSentAt;
+                this.handlers.onLatency?.(Math.round(rtt));
               }
               return;
           }
@@ -256,17 +319,25 @@ export class TerminalSocket {
 
   private startKeepalive(): void {
     this.stopKeepalive();
-    // Send an immediate ping so the latency indicator settles on a
-    // real value within a few hundred ms of connect, rather than
-    // sitting blank for 30 seconds until the first interval tick.
-    this.sendPing();
+    // No immediate ping here — that path used to fire before the
+    // server had finished its setup work (capture-pane + PTY spawn +
+    // subscriptions + history-send) and the round-trip measured
+    // server startup time rather than network RTT. The first
+    // honest measurement now happens in onmessage when the `hello`
+    // arrives (server is past setup at that point). 30s interval
+    // ticks after that are clean network round-trips.
     this.keepaliveTimer = window.setInterval(() => this.sendPing(),
                                               this.keepaliveIntervalMs);
   }
 
   private sendPing(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
-    this.lastPingSentAt = Date.now();
+    // performance.now() is a monotonic high-resolution clock in the
+    // same time base as the WebSocket message event's `timeStamp`
+    // (both are DOMHighResTimeStamp relative to performance.timeOrigin).
+    // Pairing them lets the pong-receive side measure RTT against a
+    // consistent zero rather than mixing wall-clock with high-res.
+    this.lastPingSentAt = performance.now();
     this.ws.send(JSON.stringify({ type: "ping" }));
   }
 

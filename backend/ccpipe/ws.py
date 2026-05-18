@@ -207,9 +207,17 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     # Best-effort: try to open the mic pipe now so the hello message can
     # advertise voice capability accurately.
     voice_available = _mic_writer.write(b"")  # zero-length write probes the FD
+    # Resolve the tmux session's working directory so the client can
+    # default file/directory-browse dialogs to the project root the
+    # user is actually working in, rather than the fs jail root
+    # (typically $HOME). Best-effort: session_cwd may return None if
+    # tmux's pane query failed; client falls back to the fs config
+    # root in that case.
+    session_cwd_value = await tmux.session_cwd(session)
     await websocket.send_json({
         "type": "hello",
         "session": session,
+        "cwd": session_cwd_value,
         "tts": tts_service.enabled,
         "voice": voice_available,
     })
@@ -348,6 +356,15 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
             except Exception as exc:
                 log.debug("history send failed: %s", exc)
 
+    # Tell the client we're past the slow part of setup. Used as the
+    # signal to fire the first latency-measuring ping — pinging any
+    # earlier (e.g. at hello, which is sent BEFORE the history-bytes
+    # blob) means the ping queues server-side behind the history send
+    # and the round-trip reflects setup time, not network RTT. By the
+    # time stream_ready lands the server is one statement away from
+    # the main receive() loop and a ping pongs back at network speed.
+    await send_json({"type": "stream_ready"})
+
     async def _pty_lifecycle() -> None:
         """Run the PTY pump; on EOF, surface the exit to the client and
         close the WS so the receive loop below unblocks.
@@ -405,7 +422,18 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                         log.info("ws closed mid-stream: session no longer authorized")
                         await websocket.close(code=1008, reason="session revoked")
                         break
+                    # DIAG: measure how long the server spends between
+                    # observing the ping and getting the pong onto the
+                    # WS. If this is consistently <1ms but clients report
+                    # 20ms RTT, the delay is on the network / radio side.
+                    # If this matches the client-reported delta, it's
+                    # send_lock contention with the live PTY pump (and
+                    # the fix is to bypass / prioritise pong sends).
+                    _ping_t0 = time.monotonic()
                     await send_json({"type": "pong"})
+                    _ping_dt_ms = (time.monotonic() - _ping_t0) * 1000
+                    log.info("ping→pong: %.1fms (session=%s frames=%d)",
+                             _ping_dt_ms, session, counters.frames_forwarded)
                     continue
                 # Mute state mirror: the client tells us when the user
                 # toggles TTS, so we can skip the Kokoro round-trip
