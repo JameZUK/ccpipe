@@ -585,9 +585,17 @@ def _handle_client_text(text: str, pty_proc: PtyProcess) -> None:
             except (TypeError, ValueError):
                 return  # malformed resize, ignore
             pty_proc.resize(cols, rows)
-        case "ping":
-            # Pong is sent from the receive loop where send_json is in
-            # scope — see _ping_needs_pong() check there.
+        case "ping" | "tts_mute" | "mic_stop":
+            # These are intercepted by the main WS receive loop where
+            # the closures over send_json / tts_sub / _mic_writer live.
+            # We still hit this code path when one of them lands in
+            # the pre-resize buffer (drained by _wait_for_initial_resize
+            # and replayed here) — at which point the side-effect
+            # state doesn't exist yet, so silently dropping is the
+            # right move. The frontend re-sends tts_mute on every
+            # state change so the loss is transient; mic_stop arriving
+            # pre-resize is implausible (mic lifecycle starts long
+            # after connect); ping just won't get a pong this once.
             pass
         case _:
             log.warning("unknown text message type: %r", msg.get("type"))
