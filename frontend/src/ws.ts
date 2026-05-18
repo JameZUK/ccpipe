@@ -403,12 +403,19 @@ export class TerminalSocket {
     if (!this.ws) return;
     if (this.ws.readyState === WebSocket.CONNECTING) return;
     if (!force && this.ws.readyState === WebSocket.OPEN) {
-      // Heuristic: a socket that's received data in the last 10s is
-      // genuinely alive. The longer-running stale check (45s, in
-      // startStaleCheck) catches the harder case of a TCP-dead-but-
-      // browser-still-says-OPEN socket.
+      // Heuristic: a socket that's received data within the most
+      // recent keepalive cycle is genuinely alive. The keepalive
+      // pings server-side at 30s intervals and we record
+      // lastReceivedAt on every pong (and on every PTY chunk), so a
+      // healthy idle conversation has lastReceivedAt 0..30s old. The
+      // previous 10s threshold meant ~2/3 of focus events on a
+      // healthy socket fired an unnecessary kick → resetTerminal →
+      // pane replay cycle (the "flicker" / "history rebuilt"
+      // symptom).  35s = one keepalive cycle + 5s slack. The
+      // longer-running 45s startStaleCheck still independently kicks
+      // genuinely-dead sockets, so this only relaxes the cheap path.
       const idle = Date.now() - this.lastReceivedAt;
-      if (idle < 10_000) return;
+      if (idle < 35_000) return;
     }
     try { this.ws.close(); } catch {}
     this.ws = null;
