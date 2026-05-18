@@ -507,31 +507,55 @@ def auth_client():
     client.close()
 
 
-def _ws_url() -> str:
+def _ws_connect_with_host_override(*, cookie_header: str, origin: str):
+    """Open a WebSocket carrying the auth cookie + an explicit Host
+    header for TrustedHostMiddleware.
+
+    The websockets library auto-derives the Host header from the URI,
+    so a naive ``ws://127.0.0.1:8080/...`` sends ``Host: 127.0.0.1:8080``
+    which the prod-style TrustedHostMiddleware rejects with HTTP 400.
+    Fix: open a raw TCP socket to the BASE host:port, pass it to
+    websockets via ``sock=``, and give the library a URI whose
+    hostname IS the trusted host. The library then sends
+    ``Host: <HOST_HEADER>`` on the upgrade request and the middleware
+    is happy, while the actual TCP connection still goes to BASE."""
+    from websockets.sync.client import connect as ws_connect
     parsed = urlparse(BASE)
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    return f"{scheme}://{parsed.netloc}/ws?session={T7_SESSION_NAME}"
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    raw_sock = socket.create_connection((host, port), timeout=10)
+    if parsed.scheme == "https":
+        ctx = ssl.create_default_context()
+        raw_sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    # URI uses HOST_HEADER so the lib sends Host: ccpipe.example.com
+    ws_uri = f"{ws_scheme}://{HOST_HEADER}/ws?session={T7_SESSION_NAME}"
+    return ws_connect(
+        ws_uri,
+        sock=raw_sock,
+        additional_headers={
+            "Cookie": cookie_header,
+            "Origin": origin,
+        },
+    )
+
+
+TEST_ORIGIN = os.environ.get("CCPIPE_TEST_ORIGIN") or f"https://{HOST_HEADER}"
+# ^^^ Default to https-scheme origin because production deployments
+# set CCPIPE_ALLOWED_ORIGINS=https://<host>. Even when we're hitting
+# the dev backend over plain http://127.0.0.1:8080 (to avoid the
+# Cloudflare/nginx layer), the server still validates Origin against
+# its allowlist, which is https in any BEHIND_TLS deployment. Override
+# with CCPIPE_TEST_ORIGIN for a different setup.
 
 
 def _open_ws(auth_client: httpx.Client, *, origin: str | None = None):
-    """Open a WebSocket carrying the auth cookie. The websockets sync
-    client doesn't accept a cookie-jar directly, so we serialise the
-    session cookie into a Cookie header manually. Origin must match
+    """Open a WebSocket carrying the auth cookie. Origin must match
     the server's allowlist (CCPIPE_ALLOWED_ORIGINS or Host fallback)."""
-    from websockets.sync.client import connect
     cookies = "; ".join(f"{c.name}={c.value}" for c in auth_client.cookies.jar)
-    # The origin allowlist (auth.py::_allowed_origins) accepts either
-    # the configured CCPIPE_ALLOWED_ORIGINS or — when unset — falls
-    # back to http(s)://<host-header>. Use the host header so this
-    # works on both local-HTTP-direct and through-Cloudflare setups.
-    parsed = urlparse(BASE)
-    scheme = "https" if parsed.scheme == "https" else "http"
-    return connect(
-        _ws_url(),
-        additional_headers={
-            "Cookie": cookies,
-            "Origin": origin or f"{scheme}://{HOST_HEADER}",
-        },
+    return _ws_connect_with_host_override(
+        cookie_header=cookies,
+        origin=origin or TEST_ORIGIN,
     )
 
 
@@ -741,19 +765,15 @@ def test_ws_many_concurrent_connections_dont_kill_server(auth_client):
     All should accept; /api/health must stay responsive. Each connection
     attaches another tmux client to the t7-fuzz session — bounded by
     PTY / FD limits, but a single-digit-count must not OOM the server."""
-    from websockets.sync.client import connect
     cookies = "; ".join(f"{c.name}={c.value}" for c in auth_client.cookies.jar)
-    parsed = urlparse(BASE)
-    scheme = "https" if parsed.scheme == "https" else "http"
-    origin = f"{scheme}://{HOST_HEADER}"
+    origin = TEST_ORIGIN
 
     n_conns = 10
     sockets = []
     try:
         for _ in range(n_conns):
-            ws = connect(
-                _ws_url(),
-                additional_headers={"Cookie": cookies, "Origin": origin},
+            ws = _ws_connect_with_host_override(
+                cookie_header=cookies, origin=origin,
             )
             ws.send(json.dumps({"type": "resize", "cols": 80, "rows": 24}))
             sockets.append(ws)
