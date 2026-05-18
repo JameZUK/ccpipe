@@ -540,10 +540,58 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    * completion callback in main.ts onOutput, so it runs AFTER xterm
    * has processed the pane-replay bytes — that ordering is what makes
    * the scroll actually land at the live tail rather than at the
-   * top of the buffer. */
+   * top of the buffer.
+   *
+   * Triple-fire: term.write()'s callback fires when the PARSER has
+   * consumed the bytes, but the DOM renderer (used when WebGL is
+   * disabled) paints rows in a separate render cycle. Between
+   * callback-fires and render-completes, the DOM viewport's
+   * scrollHeight hasn't yet caught up to the buffer's row count, so
+   * a single term.scrollToBottom() updates xterm's internal ydisp
+   * but the visible scroll lands wherever the previous-render DOM
+   * scrollTop was. We fire:
+   *   1. immediately — xterm's model goes to bottom now,
+   *   2. on the next xterm render — DOM has the post-write rows now,
+   *      DOM scrollTop catches up,
+   *   3. as a safety belt 100ms later — picks up any further async
+   *      layout settling that onRender misses (notably the canvas
+   *      vs DOM viewport sync on the DOM renderer's slow path).
+   */
   const scrollToBottom = (): void => {
     if (disposed) return;
+    // eslint-disable-next-line no-console
+    const viewport0 = container.querySelector(".xterm-viewport") as HTMLElement | null;
+    console.log("[ccpipe-debug] scrollToBottom #1", {
+      vpSt: viewport0?.scrollTop,
+      vpSh: viewport0?.scrollHeight,
+    });
     try { term.scrollToBottom(); } catch {}
+    const disposable = term.onRender(() => {
+      disposable.dispose();
+      if (disposed) return;
+      const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
+      // eslint-disable-next-line no-console
+      console.log("[ccpipe-debug] scrollToBottom #2 (onRender)", {
+        vpSt: viewport?.scrollTop,
+        vpSh: viewport?.scrollHeight,
+      });
+      try { term.scrollToBottom(); } catch {}
+      // Also force the DOM directly — on the DOM renderer the
+      // viewport's scrollTop is what the user actually sees, and
+      // it can lag behind xterm's ydisp until the next paint.
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+    window.setTimeout(() => {
+      if (disposed) return;
+      const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
+      // eslint-disable-next-line no-console
+      console.log("[ccpipe-debug] scrollToBottom #3 (+100ms)", {
+        vpSt: viewport?.scrollTop,
+        vpSh: viewport?.scrollHeight,
+      });
+      try { term.scrollToBottom(); } catch {}
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    }, 100);
   };
 
   return {
