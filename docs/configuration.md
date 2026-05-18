@@ -162,6 +162,53 @@ Four knobs in Settings → Voice → "voice input":
 Settings persist in `~/.local/state/ccpipe/config.json` under the `mic`
 key.
 
+## Session lifecycle
+
+### New sessions drop to a shell when claude exits
+
+Every new tmux session is launched with `claude; exec $SHELL -i`
+(`$SHELL` falls back to `/bin/bash`). When the user exits claude
+the pane doesn't die — it lands at an interactive shell prompt in
+the session's original working directory. Re-attaching from the
+picker drops you back at that prompt; typing `claude` relaunches it
+in the right cwd. Without this wrapper the only-pane closed when
+claude exited, the session was destroyed, and the next attach
+auto-created a fresh session in `$HOME`.
+
+The `--resume <uuid>` path goes through the same wrapper, so resumed
+conversations also leave you at a shell when claude exits.
+
+### Sticky sessions (survive a reboot)
+
+Mark a session "sticky" from its kebab (`⋮`) menu in the picker to
+have ccpipe re-create it automatically at backend startup. Useful
+for long-running project sessions you want available on every login
+without manually re-attaching.
+
+A pin glyph appears next to the name when the row is sticky.
+Toggling it again ("make ephemeral") removes the persisted entry.
+
+What's stored: just the session name and its current cwd, in
+`~/.local/state/ccpipe/sticky_sessions.json` (`0600`). What's
+restored on backend startup: a tmux session of the same name running
+`claude --continue; exec $SHELL -i` in that cwd. `--continue` makes
+claude itself resume the most recent conversation for that cwd (its
+JSONL transcripts under `~/.claude/projects/<encoded>/*.jsonl`), so
+you re-attach to your last chat with no extra clicks. Note that the
+in-memory state of the previous `claude` process is **not**
+preserved — only the conversation history that claude itself
+persists.
+
+When the user picks `kill` on a sticky session from the picker, the
+sticky flag is auto-cleared so the killed session isn't quietly
+resurrected on the next backend start. Renaming a sticky session
+preserves the flag under the new name.
+
+Limit: if there were multiple parallel conversations in the same
+cwd, `--continue` picks the latest. To resume a specific older
+conversation, use the picker's "start a new session" panel which
+lists transcripts by cwd and lets you pick one.
+
 ## Where state lives
 
 - `~/.local/state/ccpipe/credentials` — argon2id hash, TOTP secret,
@@ -172,6 +219,9 @@ key.
   with the auto-generated password on first run. **Delete after
   reading.**
 - `~/.local/state/ccpipe/config.json` — Settings-modal values.
+- `~/.local/state/ccpipe/sticky_sessions.json` — `{name: {cwd}}` map
+  of sticky sessions; read at backend startup to recreate any
+  missing entries. Override the path with `CCPIPE_STICKY_FILE`.
 - `~/.claude/keybindings.json` — ccpipe idempotently adds the meta+k
   voice push-to-talk binding here on startup (see
   `ccpipe/settings_patch.py`).

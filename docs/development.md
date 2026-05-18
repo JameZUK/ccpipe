@@ -34,7 +34,8 @@ backend/
     auth.py            Argon2id passwords, TOTP, session middleware
     routes/
       auth.py          /api/auth/* (login, logout, TOTP, credentials)
-      sessions.py      /api/sessions/*, /api/claude-sessions/*
+      sessions.py      /api/sessions/*, /api/claude-sessions/*,
+                       /api/sessions/{name}/sticky
       fs.py            /api/fs/* (list, read, write, upload, download, ...)
       tts.py           /api/tts/* (voices, config, speak, preview)
       mic.py           /api/mic/config (voice-input timing knobs)
@@ -48,6 +49,9 @@ backend/
     mic.py             Mic pipe writer (PCM → /tmp/ccpipe_mic.pipe);
                        tracks bytes/drops and estimates drain time
     tts.py             JSONL tail + Kokoro client + audio chunk fan-out
+    sticky.py          {name: {cwd}} JSON store for sticky sessions;
+                       lifespan in main.py recreates missing entries
+                       on startup using `claude --continue; exec $SHELL -i`
     settings_patch.py  Idempotently adds voice keys to ~/.claude/settings.json
   tests/               pytest suite
   pyproject.toml
