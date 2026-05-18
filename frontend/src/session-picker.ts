@@ -90,6 +90,112 @@ export function renderSessionPicker(
   });
   head.append(word, tagline, gear);
 
+  // ─── Backend reachability indicator ────────────────────────────────
+  // Same conceptual role as the per-session statusbar's dot + latency
+  // pip, but here there's no WS yet — we poll /api/health periodically
+  // so the user knows the backend is reachable from the device they're
+  // on BEFORE picking a session. Dot colour mirrors latency buckets:
+  // green <100ms, amber <300ms, red on failure / timeout.
+  const statusRow = document.createElement("div");
+  statusRow.className = "frame__status";
+  const statusDot = document.createElement("span");
+  statusDot.className = "frame__status__dot";
+  const statusLabel = document.createElement("span");
+  statusLabel.className = "frame__status__label";
+  statusLabel.textContent = "checking…";
+  const statusLatency = document.createElement("span");
+  statusLatency.className = "frame__status__latency";
+  statusRow.append(statusDot, statusLabel, statusLatency);
+
+  const setStatus = (cls: "ok" | "warn" | "err" | "",
+                      label: string, latency: string,
+                      bucket: "ok" | "warn" | "bad" | "" = "") => {
+    statusDot.className = "frame__status__dot" + (cls ? " " + cls : "");
+    statusLabel.textContent = label;
+    statusLatency.textContent = latency;
+    statusLatency.className = "frame__status__latency"
+      + (bucket ? " frame__status__latency--" + bucket : "");
+    statusLatency.hidden = !latency;
+  };
+
+  const HEALTH_POLL_MS = 5000;
+  // Cap on a single in-flight probe — long enough to be patient with a
+  // sluggish backend, short enough to flip the dot red within one
+  // tick if something's really wrong.
+  const HEALTH_TIMEOUT_MS = 4000;
+  let activeProbe: AbortController | null = null;
+  let healthTimer: number | null = null;
+
+  const probeHealth = async () => {
+    // Cancel any in-flight probe — if we're already overdue, the new
+    // one wins. Without this a stalled probe stacks behind the next
+    // tick and the UI lags.
+    activeProbe?.abort();
+    const ac = new AbortController();
+    activeProbe = ac;
+    const timeout = window.setTimeout(() => ac.abort(), HEALTH_TIMEOUT_MS);
+    const t0 = performance.now();
+    try {
+      const res = await fetch("/api/health", {
+        credentials: "same-origin",
+        signal: ac.signal,
+      });
+      const rtt = Math.round(performance.now() - t0);
+      if (!res.ok) {
+        setStatus("err", "backend " + res.status, "");
+        return;
+      }
+      const bucket: "ok" | "warn" | "bad" =
+        rtt < 100 ? "ok" : rtt < 300 ? "warn" : "bad";
+      // Dot follows the bucket so a single glance answers "is this
+      // device close to the server?". On a fast LAN expect <30ms,
+      // green; on cellular expect 100-300ms, amber.
+      const dotCls: "ok" | "warn" | "err" =
+        bucket === "bad" ? "err" : bucket === "warn" ? "warn" : "ok";
+      setStatus(dotCls, "online", `${rtt} ms`, bucket);
+    } catch (err) {
+      // AbortError is either the explicit timeout above or a follow-on
+      // tick superseding this one — either way, the next tick will
+      // tell the real story. Don't flicker the dot for an abort.
+      if ((err as Error)?.name === "AbortError") return;
+      setStatus("err", "offline", "");
+    } finally {
+      clearTimeout(timeout);
+      if (activeProbe === ac) activeProbe = null;
+    }
+  };
+
+  // Start probing AFTER the event loop drains, then re-tick on an
+  // interval. Both timers are stopped automatically once the picker
+  // is detached from the DOM — frame.isConnected goes false when
+  // attachTerminal wipes root, so we don't need a separate dispose
+  // hook.
+  //
+  // Why requestIdleCallback for the first probe: a synchronous
+  // `void probeHealth()` here would fire while the picker UI is
+  // still mid-mount + JS bundles still parsing — fetch initiates
+  // immediately but the Promise resolution that finally records
+  // `rtt = performance.now() - t0` is a microtask, queued behind
+  // page-boot work, which inflates the first reading by 5-10ms
+  // even though the network is fine. Yielding to idle lets the
+  // boot work clear, and the first reading is honest. See
+  // [[feedback-rtt-measurement-pitfalls]] for the broader pattern.
+  const fireFirstProbe = () => { void probeHealth(); };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(fireFirstProbe, { timeout: 500 });
+  } else {
+    setTimeout(fireFirstProbe, 0);
+  }
+  healthTimer = window.setInterval(() => {
+    if (!frame.isConnected) {
+      if (healthTimer !== null) clearInterval(healthTimer);
+      healthTimer = null;
+      activeProbe?.abort();
+      return;
+    }
+    void probeHealth();
+  }, HEALTH_POLL_MS);
+
   const picker = document.createElement("div");
   picker.className = "picker";
 
@@ -192,7 +298,7 @@ export function renderSessionPicker(
   createBody.append(actionRow);
 
   picker.append(list, errBox, create);
-  inner.append(head, picker);
+  inner.append(head, statusRow, picker);
   frame.append(inner);
   root.append(frame);
 

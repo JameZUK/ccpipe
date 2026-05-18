@@ -251,6 +251,60 @@ a:hover { color: var(--fg); }
 .frame__gear svg { width: 1rem; height: 1rem; }
 .frame__gear:hover { color: var(--accent); border-color: var(--accent); }
 
+/* Backend-reachability indicator on the session picker. Same visual
+ * language as the in-terminal statusbar's dot + latency pip, but
+ * driven by a periodic /api/health probe (the WS hasn't been opened
+ * yet at this stage of the SPA). */
+.frame__status {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: calc(-1 * var(--s-4));
+  margin-bottom: var(--s-4);
+  padding: var(--s-2) 0;
+  font-family: var(--font-mono);
+}
+.frame__status__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex-shrink: 0;
+  transition: background var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+.frame__status__dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(142, 184, 116, 0.18);
+}
+.frame__status__dot.warn {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.frame__status__dot.err {
+  background: var(--critical);
+  box-shadow: 0 0 0 3px var(--critical-bg);
+}
+.frame__status__label {
+  color: var(--fg);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.frame__status__latency {
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  padding: 0.05rem var(--s-2);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+.frame__status__latency--ok    { color: var(--ok); border-color: var(--ok); }
+.frame__status__latency--warn  { color: var(--accent); border-color: var(--accent); }
+.frame__status__latency--bad   { color: var(--critical); border-color: var(--critical); }
+
 /* ─── Login ────────────────────────────────────────────────────────────── */
 
 /* The login head is intentionally bare: an animated spark + the
