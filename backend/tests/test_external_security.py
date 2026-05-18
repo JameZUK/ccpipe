@@ -402,3 +402,390 @@ def test_concurrent_slow_connections_do_not_block_health():
         for s in socks:
             try: s.close()
             except Exception: pass
+
+
+# ─── T7: Credentialed WebSocket message-type fuzz ────────────────────────
+#
+# The threat model (docs/threat-model.md) flagged the post-auth WS
+# protocol as the highest-value next-pass target. Questions it asks:
+#
+#   - Are resize cols/rows bounded?
+#   - Is input.data size-limited?
+#   - Are unknown text/binary types silently dropped?
+#   - Are messages sent before `hello` rejected, or do they reach the mux?
+#   - Can a single client open many WS connections?
+#   - Does the server crash / OOM under any of this?
+#
+# These tests pin the answers. Each one asserts "the malformed input
+# doesn't crash the server" by verifying /api/health stays responsive
+# afterwards. Gated by CCPIPE_TEST_PASSWORD because we need a real
+# session cookie; TOTP secret is read from ~/.local/state/ccpipe/
+# credentials by default (you can override with CCPIPE_TEST_TOTP_SECRET).
+#
+# Side effect: tests create a tmux session named "t7-fuzz" running
+# claude. The fixture teardown best-effort kills it; if a test crashes
+# mid-run the session may linger and you can remove it from the
+# session picker.
+
+import json
+from pathlib import Path
+import pwd
+
+
+def _system_username() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return "ccpipe"
+
+
+def _read_totp_from_credentials_file() -> str:
+    """Best-effort: read the totp_secret out of ccpipe's own credentials
+    file. The file is mode 0600 + owned by the operator, so this only
+    works when the test runs AS that operator on the same machine."""
+    try:
+        creds_path = Path.home() / ".local" / "state" / "ccpipe" / "credentials"
+        creds = json.loads(creds_path.read_text())
+        secret = creds.get("totp_secret")
+        return secret if isinstance(secret, str) else ""
+    except Exception:
+        return ""
+
+
+TEST_USERNAME = os.environ.get("CCPIPE_TEST_USERNAME") or _system_username()
+TEST_PASSWORD = os.environ.get("CCPIPE_TEST_PASSWORD", "")
+TEST_TOTP_SECRET = (
+    os.environ.get("CCPIPE_TEST_TOTP_SECRET")
+    or _read_totp_from_credentials_file()
+)
+
+credentialed_skip = pytest.mark.skipif(
+    not TEST_PASSWORD,
+    reason="set CCPIPE_TEST_PASSWORD to enable T7 credentialed WS fuzz tests",
+)
+
+T7_SESSION_NAME = "t7-fuzz"
+
+
+@pytest.fixture(scope="module")
+def auth_client():
+    """Logged-in httpx.Client. One login per module (5 attempts/min cap)."""
+    if not TEST_PASSWORD:
+        pytest.skip("no test password set")
+    import pyotp
+    client = httpx.Client(
+        timeout=10.0,
+        headers={"Host": HOST_HEADER},
+        base_url=BASE,
+    )
+    body = {"username": TEST_USERNAME, "password": TEST_PASSWORD}
+    if TEST_TOTP_SECRET:
+        body["code"] = pyotp.TOTP(TEST_TOTP_SECRET).now()
+    r = client.post(
+        "/api/auth/login",
+        headers={**JSON_HEADERS},
+        json=body,
+    )
+    assert r.status_code == 200, (
+        f"login failed: {r.status_code} {r.text[:200]} — "
+        f"check CCPIPE_TEST_PASSWORD and (if TOTP enrolled) "
+        f"CCPIPE_TEST_TOTP_SECRET or credentials file"
+    )
+    yield client
+    # Best-effort teardown: nuke the t7-fuzz tmux session + logout.
+    try:
+        client.delete(
+            f"/api/sessions/{T7_SESSION_NAME}",
+            headers=CSRF,
+        )
+    except Exception:
+        pass
+    try:
+        client.post("/api/auth/logout", headers=CSRF)
+    except Exception:
+        pass
+    client.close()
+
+
+def _ws_url() -> str:
+    parsed = urlparse(BASE)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return f"{scheme}://{parsed.netloc}/ws?session={T7_SESSION_NAME}"
+
+
+def _open_ws(auth_client: httpx.Client, *, origin: str | None = None):
+    """Open a WebSocket carrying the auth cookie. The websockets sync
+    client doesn't accept a cookie-jar directly, so we serialise the
+    session cookie into a Cookie header manually. Origin must match
+    the server's allowlist (CCPIPE_ALLOWED_ORIGINS or Host fallback)."""
+    from websockets.sync.client import connect
+    cookies = "; ".join(f"{c.name}={c.value}" for c in auth_client.cookies.jar)
+    # The origin allowlist (auth.py::_allowed_origins) accepts either
+    # the configured CCPIPE_ALLOWED_ORIGINS or — when unset — falls
+    # back to http(s)://<host-header>. Use the host header so this
+    # works on both local-HTTP-direct and through-Cloudflare setups.
+    parsed = urlparse(BASE)
+    scheme = "https" if parsed.scheme == "https" else "http"
+    return connect(
+        _ws_url(),
+        additional_headers={
+            "Cookie": cookies,
+            "Origin": origin or f"{scheme}://{HOST_HEADER}",
+        },
+    )
+
+
+def _read_until_hello(ws, timeout: float = 3.0):
+    """Drain frames until we see the server's hello JSON message. The
+    server sends hello AFTER it has waited briefly for our initial
+    resize, so we send one first to unblock that wait."""
+    ws.send(json.dumps({"type": "resize", "cols": 80, "rows": 24}))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            ws.recv(timeout=0.5)
+        except TimeoutError:
+            continue
+        except Exception:
+            break
+        # We don't need to parse — once anything has flowed back, the
+        # hello side of the handshake has fired. The pump-loop is
+        # active and the server is in steady-state.
+        return
+
+
+def _health_ok() -> bool:
+    """Verify /api/health responds 200 within a reasonable window."""
+    with _client() as c:
+        r = _get(c, "/api/health")
+        return r.status_code == 200
+
+
+# ── Resize fuzz ──────────────────────────────────────────────────────────
+
+@credentialed_skip
+@pytest.mark.parametrize("cols,rows", [
+    (2**31, 100),                   # huge int
+    (-1, 100),                      # negative
+    (0, 0),                         # zero
+    (1.5, 2.7),                     # floats
+    ("notanumber", 100),            # wrong type (string)
+    (None, None),                   # null
+    ([1, 2, 3], {"a": 1}),          # objects/arrays
+])
+def test_ws_resize_malformed_does_not_crash(auth_client, cols, rows):
+    """Server must clamp / ignore malformed resize values, not crash."""
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        ws.send(json.dumps({"type": "resize", "cols": cols, "rows": rows}))
+        # Send a ping to confirm the WS is still alive.
+        ws.send(json.dumps({"type": "ping"}))
+        # Read until pong (or timeout). Any reply proves the receive
+        # loop is still running.
+        ws.recv(timeout=2.0)
+    assert _health_ok(), "/api/health failed after malformed resize"
+
+
+# ── Input-data fuzz ──────────────────────────────────────────────────────
+
+@credentialed_skip
+def test_ws_input_huge_string_does_not_crash(auth_client):
+    """A large input.data payload should be either accepted, truncated,
+    or rejected — but never crash the server. PTY write buffer is
+    capped at 4 MiB; the WS lib's max_size default is 1 MiB so the
+    frame itself is bounded before reaching our handler."""
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        # 500 KB — below the websockets default 1 MiB frame cap.
+        ws.send(json.dumps({"type": "input", "data": "A" * 500_000}))
+        ws.send(json.dumps({"type": "ping"}))
+        ws.recv(timeout=2.0)
+    assert _health_ok()
+
+
+@credentialed_skip
+@pytest.mark.parametrize("data", [
+    None,
+    123,
+    [1, 2, 3],
+    {"nested": "object"},
+    True,
+])
+def test_ws_input_wrong_type_does_not_crash(auth_client, data):
+    """input.data must be a string; anything else is silently dropped."""
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        ws.send(json.dumps({"type": "input", "data": data}))
+        ws.send(json.dumps({"type": "ping"}))
+        ws.recv(timeout=2.0)
+    assert _health_ok()
+
+
+# ── Unknown message-type fuzz ────────────────────────────────────────────
+
+@credentialed_skip
+@pytest.mark.parametrize("msg", [
+    {"type": "shell", "cmd": "id"},        # unknown type, common name
+    {"type": "exec", "data": "ls /"},      # ditto
+    {"type": "__proto__"},                  # prototype-pollution probe
+    {"type": "input"},                      # missing data field
+    {"type": ""},                           # empty type
+    {"type": None},                         # null type
+    {"type": ["array", "type"]},            # type as array
+    {},                                     # no type field
+    {"no_type_key": "x"},                   # no recognisable shape
+])
+def test_ws_unknown_message_types_are_silently_dropped(auth_client, msg):
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        ws.send(json.dumps(msg))
+        ws.send(json.dumps({"type": "ping"}))
+        ws.recv(timeout=2.0)
+    assert _health_ok()
+
+
+# ── Malformed JSON / non-JSON text frames ────────────────────────────────
+
+@credentialed_skip
+@pytest.mark.parametrize("text", [
+    "not valid json",
+    "",
+    "{",
+    "null",
+    '"just a string"',
+    "[1,2,3",
+    '\x00\x01\x02',
+])
+def test_ws_non_json_text_does_not_crash(auth_client, text):
+    """Text frames that don't parse as JSON should be logged + ignored."""
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        ws.send(text)
+        ws.send(json.dumps({"type": "ping"}))
+        ws.recv(timeout=2.0)
+    assert _health_ok()
+
+
+# ── Binary frame fuzz ────────────────────────────────────────────────────
+
+@credentialed_skip
+@pytest.mark.parametrize("payload", [
+    b"",                            # empty
+    b"\x99",                        # unknown prefix only
+    b"\x99" + b"A" * 1000,          # unknown prefix + data
+    b"\x00",                        # FRAME_PTY_OUTPUT prefix (server→client only, here as garbage)
+    b"\x02" + b"audio?",            # FRAME_TTS_AUDIO prefix (server→client only)
+    bytes(range(256)),              # every byte value as the "prefix"
+])
+def test_ws_unknown_binary_frames_dropped(auth_client, payload):
+    """Binary frames must be dispatched by their first byte; unknown
+    prefixes get a log line and are dropped, not crashed on."""
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        ws.send(payload)
+        ws.send(json.dumps({"type": "ping"}))
+        ws.recv(timeout=2.0)
+    assert _health_ok()
+
+
+@credentialed_skip
+def test_ws_mic_frame_oversized_rate_limited(auth_client):
+    """A burst of mic frames exceeding the per-second budget must be
+    silently dropped, not crash the limiter."""
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        # FRAME_MIC_PCM prefix (0x01) + 31 KB of payload, repeated 50x
+        # — far above the 1 MiB/s budget. Server should drop the
+        # excess; no crash.
+        for _ in range(50):
+            ws.send(b"\x01" + b"\x00" * 31_000)
+        ws.send(json.dumps({"type": "ping"}))
+        ws.recv(timeout=3.0)
+    assert _health_ok()
+
+
+# ── Pre-hello frames ─────────────────────────────────────────────────────
+
+@credentialed_skip
+def test_ws_pre_hello_input_is_processed(auth_client):
+    """The receive loop processes non-resize text frames sent BEFORE
+    the server emits hello (the server queues them as `leftover` then
+    drains after PTY spawn). Verify this doesn't crash — even though
+    semantically the client shouldn't send input before knowing the
+    session is ready, the user is already authenticated so this is
+    a quirk, not an escalation."""
+    with _open_ws(auth_client) as ws:
+        # Send input + ping IMMEDIATELY — before the initial resize
+        # round-trip. The server should buffer them and apply once
+        # the PTY is up. Then send the initial resize to unblock the
+        # handshake.
+        ws.send(json.dumps({"type": "input", "data": "echo pre-hello\n"}))
+        ws.send(json.dumps({"type": "ping"}))
+        ws.send(json.dumps({"type": "resize", "cols": 80, "rows": 24}))
+        # Pump for a moment so anything in flight settles.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                ws.recv(timeout=0.3)
+            except TimeoutError:
+                break
+    assert _health_ok()
+
+
+# ── Many concurrent WS connections ──────────────────────────────────────
+
+@credentialed_skip
+@pytest.mark.slow
+def test_ws_many_concurrent_connections_dont_kill_server(auth_client):
+    """Open N WS connections in parallel from one authenticated client.
+    All should accept; /api/health must stay responsive. Each connection
+    attaches another tmux client to the t7-fuzz session — bounded by
+    PTY / FD limits, but a single-digit-count must not OOM the server."""
+    from websockets.sync.client import connect
+    cookies = "; ".join(f"{c.name}={c.value}" for c in auth_client.cookies.jar)
+    parsed = urlparse(BASE)
+    scheme = "https" if parsed.scheme == "https" else "http"
+    origin = f"{scheme}://{HOST_HEADER}"
+
+    n_conns = 10
+    sockets = []
+    try:
+        for _ in range(n_conns):
+            ws = connect(
+                _ws_url(),
+                additional_headers={"Cookie": cookies, "Origin": origin},
+            )
+            ws.send(json.dumps({"type": "resize", "cols": 80, "rows": 24}))
+            sockets.append(ws)
+        # All open. Health still good?
+        assert _health_ok()
+    finally:
+        for ws in sockets:
+            try: ws.close()
+            except Exception: pass
+
+
+# ── Ping flood ──────────────────────────────────────────────────────────
+
+@credentialed_skip
+def test_ws_ping_flood_handled(auth_client):
+    """A flood of pings exercises the session-auth-recheck path (which
+    fires on every ping). Server must keep up + send pongs without
+    crashing."""
+    with _open_ws(auth_client) as ws:
+        _read_until_hello(ws)
+        n = 200
+        for _ in range(n):
+            ws.send(json.dumps({"type": "ping"}))
+        # Drain — we don't need all N pongs, just confirm the receive
+        # loop is still healthy after the burst.
+        deadline = time.monotonic() + 5.0
+        replies = 0
+        while time.monotonic() < deadline and replies < 5:
+            try:
+                ws.recv(timeout=0.3)
+                replies += 1
+            except TimeoutError:
+                break
+        assert replies > 0, "no replies after ping flood"
+    assert _health_ok()
