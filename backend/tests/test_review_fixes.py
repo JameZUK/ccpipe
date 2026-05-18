@@ -990,4 +990,76 @@ def test_canonical_hsts_header(tmp_path, monkeypatch):
         assert "preload" in hsts
 
 
+# ── External review pass-2: DoS hardening, cache headers, HEAD, security.txt ──
+
+def test_login_rejects_oversized_body(authed_client):
+    """Pass-2 review finding #9: deeply nested JSON on /api/auth/login
+    used to trip an unhandled RecursionError → HTTP 500, generated
+    BEFORE the rate-limit check. A 4 KiB body cap forces the JSON
+    parser to never see those payloads."""
+    # A legitimate login is well under 1 KiB; 8 KiB is comfortably above
+    # the 4 KiB cap and below anything that would crash the parser
+    # outright — exercises the size guard rather than the recursion
+    # fallback.
+    big = "a" * 8192
+    payload = '{"username":"alice","password":"' + big + '"}'
+    r = authed_client.post(
+        "/api/auth/login",
+        headers={"X-Requested-By": "ccpipe", "Content-Type": "application/json"},
+        content=payload,
+    )
+    assert r.status_code == 413, r.text
+
+
+def test_recursion_error_handler_returns_400(authed_client):
+    """Belt-and-braces: if a payload ever slips past the body-size
+    cap and triggers RecursionError during parsing, the handler must
+    surface a clean 400 rather than the default 500."""
+    # Trigger the exception handler directly via a synthetic route —
+    # the body cap covers the public path on /api/auth/login.
+    import ccpipe.main as m
+    handler = m._recursion_error_handler  # type: ignore[attr-defined]
+    from fastapi import Request
+    # Minimal fake — handler ignores both args other than for logging.
+    scope = {"type": "http", "method": "POST", "path": "/x", "headers": []}
+    fake_request = Request(scope)
+    import asyncio
+    response = asyncio.run(handler(fake_request, RecursionError()))
+    assert response.status_code == 400
+
+
+def test_json_responses_carry_cache_control(authed_client):
+    """Pass-2 review finding #10: cookie-bound JSON endpoints sent
+    Vary: Cookie but no Cache-Control. JSON responses must now declare
+    `private, no-store` so a misconfigured shared cache can't store
+    them. Static assets and HTML keep their own caching policy."""
+    r = authed_client.get("/api/auth/status")
+    cc = r.headers.get("cache-control", "")
+    assert "no-store" in cc, cc
+    assert "private" in cc, cc
+
+
+def test_head_returns_200_for_get_routes(authed_client):
+    """Pass-2 review finding #15: HEAD on @app.get routes used to 405.
+    Monitoring agents and HTTP cache validators typically probe HEAD
+    first — they should see the same 200 they'd see for GET, with no
+    body."""
+    r = authed_client.head("/api/health")
+    assert r.status_code == 200, r.text
+    # Per RFC 7231 §4.3.2 the body must be empty.
+    assert r.content == b"", r.content
+
+
+def test_security_txt_present(authed_client):
+    """Pass-2 review finding #14: serve a /.well-known/security.txt
+    pointing external researchers at the GitHub Security Advisory
+    channel."""
+    r = authed_client.get("/.well-known/security.txt")
+    assert r.status_code == 200
+    body = r.text
+    assert "Contact: " in body
+    assert "Policy: " in body
+    assert "Expires: " in body
+
+
 # ── #21 reconnect debounce is a frontend-only concern; verified by inspection.

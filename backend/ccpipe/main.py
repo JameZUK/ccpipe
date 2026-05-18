@@ -12,6 +12,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.responses import PlainTextResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import tmux
@@ -177,6 +178,75 @@ if _BEHIND_TLS:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)
 
 
+# ─── Pre-auth body-size cap (DoS hardening) ───────────────────────────────
+# Pass-2 review finding #9: a deeply nested JSON body (~6 KB, ~990 levels)
+# on POST /api/auth/login tripped an unhandled RecursionError → 500,
+# generated BEFORE the rate-limit check so it didn't even cost the
+# attacker their attempt budget. A realistic login body is <500 bytes;
+# anything above a few KB on this endpoint is an attack. Reject early
+# with 413 so the JSON parser never sees the payload.
+_AUTH_LOGIN_BODY_CAP = 4 * 1024  # 4 KiB — generous over any real body
+
+
+@app.middleware("http")
+async def _cap_auth_login_body(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/api/auth/login":
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                if int(cl) > _AUTH_LOGIN_BODY_CAP:
+                    return PlainTextResponse(
+                        "request body too large",
+                        status_code=413,
+                        headers={"Content-Type": "text/plain"},
+                    )
+            except ValueError:
+                # Malformed Content-Length — let the server reject it.
+                pass
+    return await call_next(request)
+
+
+# Belt-and-braces: if a payload ever slips past the size guard (chunked
+# encoding, no Content-Length, etc.) and the JSON parser overflows the
+# Python recursion limit, surface a clean 400 rather than the default
+# unhandled-exception 500. RecursionError isn't expected from anything
+# else in the request path.
+@app.exception_handler(RecursionError)
+async def _recursion_error_handler(_request: Request, _exc: RecursionError):
+    log.warning("RecursionError on request — likely a deep-nested JSON DoS attempt")
+    return PlainTextResponse(
+        "request structure too deep",
+        status_code=400,
+        headers={"Content-Type": "text/plain"},
+    )
+
+
+# ─── HEAD→GET shim ────────────────────────────────────────────────────────
+# Pass-2 review finding #15: FastAPI doesn't auto-pair HEAD with @app.get
+# routes — every API endpoint 405'd on HEAD probes from monitoring agents
+# and HTTP cache validators. Translate HEAD to GET at the router level,
+# then drop the body on the way out per RFC 7231 §4.3.2.
+@app.middleware("http")
+async def _head_to_get(request: Request, call_next):
+    if request.method != "HEAD":
+        return await call_next(request)
+    request.scope["method"] = "GET"
+    response = await call_next(request)
+    # Empty out any body so we comply with HEAD semantics regardless
+    # of whether the ASGI server also strips one.
+    if hasattr(response, "body_iterator"):
+        async def _empty():
+            if False:
+                yield b""  # pragma: no cover — never executed
+        response.body_iterator = _empty()
+    if hasattr(response, "body"):
+        response.body = b""
+    # Content-Length should reflect that the body is now empty.
+    if "content-length" in response.headers:
+        response.headers["content-length"] = "0"
+    return response
+
+
 # Defense-in-depth response headers. Applied to every response.
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
@@ -204,6 +274,16 @@ async def _security_headers(request: Request, call_next):
     headers.setdefault("Referrer-Policy", "no-referrer")
     headers.setdefault("Permissions-Policy",
                        "microphone=(self), camera=(), geolocation=()")
+    # Pass-2 review finding #10: cookie-bound JSON responses sent
+    # ``Vary: Cookie`` but no Cache-Control, so a misconfigured shared
+    # cache could in principle store and replay them. Apply
+    # `private, no-store, max-age=0` ONLY to JSON responses — the
+    # hashed `/assets/*` bundles are immutable-by-design and need to
+    # stay cacheable, and the HTML / icons set their own no-store
+    # headers in routes/static.py.
+    ctype = headers.get("content-type", "")
+    if ctype.startswith("application/json"):
+        headers.setdefault("Cache-Control", "private, no-store, max-age=0")
     if _BEHIND_TLS:
         # HSTS preload-ready: 2-year max-age, include subdomains, preload.
         # Single canonical source — the bundled nginx sample no longer
@@ -222,6 +302,25 @@ async def _security_headers(request: Request, call_next):
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ─── /.well-known/security.txt (RFC 9116) ─────────────────────────────────
+# Pass-2 review finding #14: external researchers had no machine-readable
+# disclosure target. Point them at the GitHub Security Advisory channel
+# we already document in SECURITY.md. Expires is set 1 year out per the
+# RFC's MUST; bump it as part of any major SECURITY.md revision.
+_SECURITY_TXT = (
+    "# ccpipe security contact — see SECURITY.md in the repo for context.\n"
+    "Contact: https://github.com/JameZUK/ccpipe/security/advisories/new\n"
+    "Policy: https://github.com/JameZUK/ccpipe/blob/main/SECURITY.md\n"
+    "Preferred-Languages: en\n"
+    "Expires: 2027-05-18T00:00:00Z\n"
+)
+
+
+@app.get("/.well-known/security.txt", include_in_schema=False)
+async def security_txt() -> PlainTextResponse:
+    return PlainTextResponse(_SECURITY_TXT, media_type="text/plain")
 
 
 # ─── Route packages ───────────────────────────────────────────────────────

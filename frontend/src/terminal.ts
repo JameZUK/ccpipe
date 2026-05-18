@@ -27,6 +27,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     cursorBlink: initialPrefs.cursorBlink,
     cursorStyle: initialPrefs.cursorStyle,
     convertEol: false,
+    // Required for term.parser.registerCsiHandler() below — that lives
+    // on xterm's "proposed API" surface. We rely on it to suppress
+    // alt-screen toggles (?1049h etc.) so TUI content stays in the
+    // main buffer where scrollback works. If you ever drop the
+    // alt-screen suppression, this flag can come off too. See pass-2
+    // review #13 (Info).
     allowProposedApi: true,
     // Generous scrollback so long Claude responses (and replayed tmux
     // history sent on attach) stay reachable by scrolling up.
