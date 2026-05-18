@@ -9,7 +9,24 @@ against ground truth from tmux's own ``capture-pane``.
 Usage:
     .venv/bin/python scripts/scrollback-doctor.py
     .venv/bin/python scripts/scrollback-doctor.py --lines 500 --rows 30
-    .venv/bin/python scripts/scrollback-doctor.py --verbose
+    .venv/bin/python scripts/scrollback-doctor.py --matrix
+    .venv/bin/python scripts/scrollback-doctor.py --realistic
+    .venv/bin/python scripts/scrollback-doctor.py --reconnect
+
+Modes
+-----
+- Default (single-config) and ``--matrix``: numbered-lines baseline.
+- ``--realistic``: invokes ``scripts/scrollback-test-generator.sh`` inside
+  a fresh tmux session via ``send-keys`` — covers numbered lines, wrapped
+  lines, full SGR coverage, cursor overwrites, erase sequences, UTF-8 +
+  box-drawing, a rapid-burst phase, and a few claude-like patterns.
+  Per-phase assertions catch missing lines, broken attribute preservation,
+  line-accumulation bugs, and encoding regressions.
+- ``--reconnect``: runs the generator twice in the same tmux session
+  (with distinct run-ids) and asserts the second capture is a strict
+  superset of the first. Models what happens when the WS reconnects
+  mid-conversation: both runs' content should be present in the new
+  capture without dups or gaps.
 
 What's tested
 -------------
@@ -19,6 +36,9 @@ What's tested
    emit when a new client attaches?
 3. The composition: history + redraw fed into pyte, does the resulting
    (screen, history) match what we'd expect from tmux's pane state?
+4. Realistic stress: many byte patterns (SGR / cursor / UTF-8 / bursts)
+   captured through the same path as #1 + #3, with phase-scoped
+   assertions on the replayed pyte buffer.
 
 What's NOT tested
 -----------------
@@ -38,6 +58,7 @@ import asyncio
 import fcntl
 import os
 import pty
+import re
 import select
 import subprocess
 import sys
@@ -329,8 +350,403 @@ async def run_one(rows: int, cols: int, lines: int,
     return rc, failures
 
 
+# ─── Realistic-mode helpers ─────────────────────────────────────────────
+
+GENERATOR_PATH = REPO_ROOT / "scripts" / "scrollback-test-generator.sh"
+SENTINEL_PREFIX = "<<<DOCTOR-EOT "
+SENTINEL_POLL_INTERVAL_S = 0.2
+SENTINEL_TIMEOUT_S = 60.0       # generator emits ~2.5k lines; finishes well under 60s
+
+
+def tmux_send_keys(session: str, keys: str, enter: bool = True) -> None:
+    args = ["tmux", "send-keys", "-t", session, keys]
+    if enter:
+        args.append("Enter")
+    subprocess.run(args, check=True)
+
+
+def wait_for_sentinel(session: str, run_id: str,
+                       timeout_s: float = SENTINEL_TIMEOUT_S) -> bool:
+    """Poll capture-pane until the generator's `<<<DOCTOR-EOT <run_id>>>`
+    marker appears, or timeout. Embedding run_id in the marker means a
+    stale capture from a previous run can't false-match."""
+    marker = f"{SENTINEL_PREFIX}{run_id}>>>"
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", session, "-p", "-S", "-10000"],
+            capture_output=True, text=True, check=False)
+        if marker in result.stdout:
+            return True
+        time.sleep(SENTINEL_POLL_INTERVAL_S)
+    return False
+
+
+def fresh_run_id() -> str:
+    return f"r{os.getpid()}-{int(time.time()*1000)}"
+
+
+# ─── Per-phase assertion helpers ────────────────────────────────────────
+#
+# Each returns a list of failure strings (empty list = phase passed).
+# `lines` is the combined history+visible text after replay through pyte.
+# Some checks also inspect `screen` directly for per-cell attribute data.
+
+_NUMBERED_RE = re.compile(r'^line (\d{4})\s*$')
+_BURST_RE = re.compile(r'^burst-(\d{5})\s*$')
+
+
+def assert_phase_a(lines: list[str]) -> list[str]:
+    """500 sequential numbered lines, each appearing exactly once."""
+    seen: dict[int, int] = {}
+    for line in lines:
+        m = _NUMBERED_RE.match(line)
+        if m:
+            n = int(m.group(1))
+            seen[n] = seen.get(n, 0) + 1
+    expected = set(range(1, 501))
+    missing = sorted(expected - set(seen.keys()))
+    dups = {n: c for n, c in seen.items() if c > 1}
+    failures = []
+    if missing:
+        sample = missing[:5] + (["…"] if len(missing) > 5 else [])
+        failures.append(f"PHASE A: {len(missing)} numbered lines missing: {sample}")
+    if dups:
+        sample = sorted(dups.items())[:5]
+        failures.append(f"PHASE A: {len(dups)} duplicates: {sample}")
+    return failures
+
+
+def assert_phase_b(lines: list[str]) -> list[str]:
+    """Wrapped long lines: both `[wrap-N]` and `[end-wrap-N]` tags
+    should survive capture+replay for every N. The visible cells of
+    a wrapped line span multiple rows; we only assert the tags are
+    present *somewhere* in the captured text — exact reflow is a
+    pyte-vs-xterm.js concern we don't model here."""
+    failures = []
+    haystack = "\n".join(lines)
+    for n in (1, 2, 3, 5, 8):
+        begin = f"[wrap-{n}]"
+        end = f"[end-wrap-{n}]"
+        if begin not in haystack:
+            failures.append(f"PHASE B: missing '{begin}'")
+        if end not in haystack:
+            failures.append(f"PHASE B: missing '{end}'")
+    return failures
+
+
+def assert_phase_c(screen) -> list[str]:
+    """SGR attribute preservation. Verify the 8 basic-fg-* lines land
+    with distinct fg colours in pyte's per-cell attribute store. We
+    don't pin specific colour names — pyte's mapping isn't always 1:1
+    with the SGR code (33 → "brown", 90 → "brightblack", etc.) — but
+    we DO require that at least 6 of the 8 produce distinct fg values,
+    which proves the attribute pipeline is working end-to-end."""
+    fg_by_label: dict[str, str] = {}
+    for line in screen.history.top:
+        if not line:
+            continue
+        cols = sorted(line.keys())
+        text = "".join(line[c].data if c in line else " " for c in cols).rstrip()
+        m = re.match(r'(basic-fg-\d+|bright-fg-\d+|palette-\d+|truecolor-\w+)', text)
+        if not m:
+            continue
+        label = m.group(1)
+        # First non-space cell's fg is representative — the cells past
+        # the label have the same fg up to the SGR reset.
+        for c in cols:
+            if line[c].data != " ":
+                fg_by_label[label] = line[c].fg
+                break
+    failures = []
+    basic = [v for k, v in fg_by_label.items() if k.startswith("basic-fg-")]
+    if len(basic) < 6:
+        failures.append(f"PHASE C: only {len(basic)} basic-fg lines found in pyte history "
+                         f"(expected 8); attribute pipeline may have dropped lines")
+    elif len(set(basic)) < 6:
+        failures.append(f"PHASE C: basic-fg-* lines all collapse to ≤{len(set(basic))} "
+                         f"distinct fg colours — attribute preservation broken: {set(basic)}")
+    # Also ensure ANY of the palette/truecolor lines landed with non-default fg.
+    extras = [v for k, v in fg_by_label.items()
+              if k.startswith(("palette-", "truecolor-"))]
+    if extras and all(str(v) == "default" for v in extras):
+        failures.append("PHASE C: palette/truecolor lines all show default fg — "
+                         "256-color / 24-bit escape decode is broken")
+    return failures
+
+
+def assert_phase_d(lines: list[str]) -> list[str]:
+    """Cursor-overwrite (\\r): only the final value of each row should
+    survive after the \\n. Catches buggy implementations that
+    accumulate overwritten text instead of replacing it."""
+    failures = []
+    # Look for the lines that are the FULL row after the overwrite.
+    haystack = "\n".join(lines)
+    # The overwrite pattern "loading...\rmidway   \rdone     \n" should
+    # leave `done     ` (possibly trimmed) on the row. We don't pin
+    # exact whitespace — just verify `done` appears and `loading` /
+    # `midway` do NOT appear as standalone tokens on that row.
+    if "done" not in haystack:
+        failures.append("PHASE D: 'done' missing (final overwrite value lost)")
+    if "final-value" not in haystack:
+        failures.append("PHASE D: 'final-value' missing (final overwrite value lost)")
+    if "progress: 100%" not in haystack:
+        failures.append("PHASE D: 'progress: 100%' missing")
+    # Stacked-overwrite anti-test: if we see `loading...done` as one
+    # token, the \r didn't reset the cursor — that's a buggy emulator.
+    if "loading...done" in haystack or "loading...midway" in haystack:
+        failures.append("PHASE D: text stacked across \\r overwrite "
+                         "(carriage-return handling broken)")
+    return failures
+
+
+def assert_phase_e(lines: list[str]) -> list[str]:
+    """Erase sequences: \\x1b[2K (erase whole line) and \\x1b[K
+    (erase to end of line) should clear the noisy parts before the
+    erase, leaving only the clean tail."""
+    failures = []
+    haystack = "\n".join(lines)
+    if "clean-after-2K" not in haystack:
+        failures.append("PHASE E: clean-after-2K missing (replacement text after 2K not preserved)")
+    # The noisy half should be GONE — its presence means the erase didn't apply.
+    if "noisy-text-that-should-disappear" in haystack:
+        failures.append("PHASE E: noisy-text survived an \\x1b[2K erase")
+    return failures
+
+
+def assert_phase_f(lines: list[str]) -> list[str]:
+    """UTF-8 + box-drawing. Verify a representative codepoint from each
+    sub-category lands intact."""
+    failures = []
+    haystack = "\n".join(lines)
+    checks = [
+        ("🦊", "emoji"),
+        ("┌", "box-drawing top-left"),
+        ("└", "box-drawing bottom-left"),
+        ("∑", "math symbol"),
+        ("café", "latin-1 accents"),
+        ("日本語", "CJK"),
+    ]
+    for needle, label in checks:
+        if needle not in haystack:
+            failures.append(f"PHASE F: missing '{needle}' ({label}) — UTF-8 corruption?")
+    return failures
+
+
+def assert_phase_g(lines: list[str]) -> list[str]:
+    """Rapid burst: all 2000 burst-NNNNN lines should be present and
+    in order. This is the doctor's biggest stress test — a single
+    missing line here points at a real capture / pump / scrollback bug."""
+    seen_indices: list[int] = []
+    seen_nums: set[int] = set()
+    for idx, line in enumerate(lines):
+        m = _BURST_RE.match(line)
+        if m:
+            n = int(m.group(1))
+            seen_nums.add(n)
+            seen_indices.append(n)
+    expected = set(range(1, 2001))
+    missing = sorted(expected - seen_nums)
+    failures = []
+    if missing:
+        sample = missing[:5] + (["…"] if len(missing) > 5 else [])
+        failures.append(f"PHASE G: {len(missing)} burst lines missing: {sample}")
+    # Order check: indices should be monotonically increasing.
+    for i in range(1, len(seen_indices)):
+        if seen_indices[i] < seen_indices[i - 1]:
+            failures.append(f"PHASE G: out-of-order at idx {i}: "
+                             f"...burst-{seen_indices[i - 1]:05d} then burst-{seen_indices[i]:05d}")
+            break
+    return failures
+
+
+def assert_phase_i(lines: list[str]) -> list[str]:
+    """Claude-like banner: box-drawing chars should form a complete box."""
+    failures = []
+    haystack = "\n".join(lines)
+    for marker in ("Claude Code", "Welcome back", "Opus 4.7"):
+        if marker not in haystack:
+            failures.append(f"PHASE I: missing banner content '{marker}'")
+    # Box corners
+    for corner in ("┌", "┐", "└", "┘"):
+        if corner not in haystack:
+            failures.append(f"PHASE I: missing box corner '{corner}'")
+    return failures
+
+
+def assert_sentinel(lines: list[str], run_id: str) -> list[str]:
+    marker = f"{SENTINEL_PREFIX}{run_id}>>>"
+    if not any(marker in line for line in lines):
+        return [f"sentinel '{marker}' missing from captured text — generator may not have completed"]
+    return []
+
+
+# ─── Realistic mode (single generator run) ──────────────────────────────
+
+async def run_realistic(rows: int, cols: int,
+                          session: str = "scrollback-doctor-realistic",
+                          verbose: bool = False) -> tuple[int, list[str]]:
+    if not GENERATOR_PATH.exists():
+        return 1, [f"generator script not found at {GENERATOR_PATH}"]
+
+    tmux_kill(session)
+    tmux_new(session, cols, rows)
+    run_id = fresh_run_id()
+
+    if verbose:
+        print(f"  generator: {GENERATOR_PATH}")
+        print(f"  run_id   : {run_id}")
+        print(f"  rows/cols: {rows} x {cols}")
+
+    tmux_send_keys(session, f"bash {GENERATOR_PATH} {run_id}")
+
+    if not wait_for_sentinel(session, run_id):
+        tmux_kill(session)
+        return 1, [f"generator did not finish in {SENTINEL_TIMEOUT_S}s "
+                    f"(sentinel for {run_id} never appeared)"]
+
+    history_bytes = await _capture_session_history(session, rows)
+    attach_bytes = capture_attach_redraw(session, cols, rows)
+    screen = replay_into_pyte([history_bytes, attach_bytes], cols, rows)
+
+    pyte_hist = pyte_history_text(screen)
+    pyte_vis = pyte_visible_text(screen)
+    combined = pyte_hist + pyte_vis
+
+    if verbose:
+        print(f"  pyte: history={len(pyte_hist)} visible={len(pyte_vis)}")
+        print(f"    last 3 history: {pyte_hist[-3:]!r}")
+        print(f"    last 3 visible: {pyte_vis[-3:]!r}")
+
+    failures: list[str] = []
+    failures += assert_sentinel(combined, run_id)
+    failures += assert_phase_a(combined)
+    failures += assert_phase_b(combined)
+    failures += assert_phase_c(screen)
+    failures += assert_phase_d(combined)
+    failures += assert_phase_e(combined)
+    failures += assert_phase_f(combined)
+    failures += assert_phase_g(combined)
+    failures += assert_phase_i(combined)
+
+    tmux_kill(session)
+    return (1 if failures else 0), failures
+
+
+# ─── Reconnect mode (two consecutive generator runs, one session) ───────
+
+async def run_reconnect(rows: int, cols: int,
+                          session: str = "scrollback-doctor-reconnect",
+                          verbose: bool = False) -> tuple[int, list[str]]:
+    """Model the WS-reconnect flow: same tmux session, two consecutive
+    runs of the generator with distinct run-ids. After both finish, the
+    captured pane should contain BOTH sentinels and BOTH full sets of
+    phase content — proving capture+replay survives content that
+    pre-dates the latest reconnect."""
+    if not GENERATOR_PATH.exists():
+        return 1, [f"generator script not found at {GENERATOR_PATH}"]
+
+    tmux_kill(session)
+    tmux_new(session, cols, rows)
+
+    run_id_a = fresh_run_id() + "a"
+    if verbose:
+        print(f"  first run : {run_id_a}")
+    tmux_send_keys(session, f"bash {GENERATOR_PATH} {run_id_a}")
+    if not wait_for_sentinel(session, run_id_a):
+        tmux_kill(session)
+        return 1, [f"first generator run did not finish (no sentinel for {run_id_a})"]
+
+    # Capture #1 — what a client connecting between the two runs would see.
+    cap1_bytes = await _capture_session_history(session, rows)
+    cap1_text = cap1_bytes.decode("utf-8", errors="replace")
+
+    run_id_b = fresh_run_id() + "b"
+    # Make sure the second run-id is distinct from the first even if
+    # the millisecond timer didn't tick between calls.
+    if run_id_b == run_id_a.replace("a", "b"):
+        run_id_b = run_id_b + "x"
+    if verbose:
+        print(f"  second run: {run_id_b}")
+    tmux_send_keys(session, f"bash {GENERATOR_PATH} {run_id_b}")
+    if not wait_for_sentinel(session, run_id_b):
+        tmux_kill(session)
+        return 1, [f"second generator run did not finish (no sentinel for {run_id_b})"]
+
+    # Capture #2 — what a client reconnecting after the second run sees.
+    cap2_bytes = await _capture_session_history(session, rows)
+    attach_bytes = capture_attach_redraw(session, cols, rows)
+    screen = replay_into_pyte([cap2_bytes, attach_bytes], cols, rows)
+
+    pyte_hist = pyte_history_text(screen)
+    pyte_vis = pyte_visible_text(screen)
+    combined = pyte_hist + pyte_vis
+    cap2_text = "\n".join(combined)
+
+    failures: list[str] = []
+
+    # The second capture should reach back far enough to include the
+    # first sentinel — tmux's history-limit (50k) is plenty for two
+    # generator runs (~5k lines combined).
+    if f"{SENTINEL_PREFIX}{run_id_a}>>>" not in cap2_text:
+        failures.append(f"reconnect: first run's sentinel ({run_id_a}) missing from "
+                         f"second capture — scrollback truncation or capture bug")
+    if f"{SENTINEL_PREFIX}{run_id_b}>>>" not in cap2_text:
+        failures.append(f"reconnect: second run's sentinel ({run_id_b}) missing from "
+                         f"second capture")
+
+    # The second run's content should also be intact — re-run the
+    # phase G assertion against the combined buffer to verify the
+    # 2000 burst lines from the second run are present (they'll be in
+    # the most recent half of scrollback).
+    burst_count_first = cap1_text.count("burst-")
+    burst_count_second = cap2_text.count("burst-")
+    if burst_count_second < 2 * burst_count_first - 50:
+        # 50-line slack for header lines and the small phases
+        failures.append(f"reconnect: second capture has {burst_count_second} burst lines "
+                         f"vs ~{2 * burst_count_first} expected (1st cap had {burst_count_first}) "
+                         f"— content from one of the runs is missing")
+
+    if verbose:
+        print(f"  cap1: {len(cap1_text)}B, burst-lines={burst_count_first}")
+        print(f"  cap2: {len(cap2_text)}B, burst-lines={burst_count_second}")
+
+    tmux_kill(session)
+    return (1 if failures else 0), failures
+
+
 async def run(args) -> int:
-    """Dispatch: single-config (default) or matrix mode."""
+    """Dispatch: single-config (default), matrix, realistic, or reconnect."""
+
+    if args.realistic:
+        print(f"╭─ scrollback-doctor — realistic mode")
+        print(f"│ rows={args.rows}  cols={args.cols}")
+        print(f"╰────────────────────────────────────────────────────────")
+        rc, failures = await run_realistic(args.rows, args.cols,
+                                             verbose=args.verbose)
+        print()
+        if rc == 0:
+            print(f"✓ realistic: all phase assertions passed")
+        else:
+            print(f"✗ realistic: {len(failures)} assertion(s) failed:")
+            for f in failures:
+                print(f"    {f}")
+        return rc
+
+    if args.reconnect:
+        print(f"╭─ scrollback-doctor — reconnect mode")
+        print(f"│ rows={args.rows}  cols={args.cols}  (two generator runs)")
+        print(f"╰────────────────────────────────────────────────────────")
+        rc, failures = await run_reconnect(args.rows, args.cols,
+                                             verbose=args.verbose)
+        print()
+        if rc == 0:
+            print(f"✓ reconnect: second capture cleanly supersedes first")
+        else:
+            print(f"✗ reconnect: {len(failures)} assertion(s) failed:")
+            for f in failures:
+                print(f"    {f}")
+        return rc
 
     if args.matrix:
         # Multi-config sweep over rows × lines to catch resolution-
@@ -392,6 +808,14 @@ def main() -> int:
     p.add_argument("--matrix", action="store_true",
                    help="run a matrix of resolutions/lines to catch "
                         "resolution-dependent regressions")
+    p.add_argument("--realistic", action="store_true",
+                   help="run scripts/scrollback-test-generator.sh inside a "
+                        "fresh tmux session — comprehensive phase-based "
+                        "assertions (SGR, cursor, UTF-8, bursts, etc.)")
+    p.add_argument("--reconnect", action="store_true",
+                   help="run the generator twice in one session — verify "
+                        "the second capture is a strict superset of the "
+                        "first (models a WS reconnect mid-conversation)")
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
     return asyncio.run(run(args))

@@ -352,6 +352,7 @@ async def security_txt() -> PlainTextResponse:
 
 # ─── Route packages ───────────────────────────────────────────────────────
 from .routes.auth import router as _auth_router
+from .routes.debug import router as _debug_router
 from .routes.fs import router as _fs_router
 from .routes.mic import router as _mic_router
 from .routes.sessions import router as _sessions_router
@@ -363,6 +364,7 @@ app.include_router(_tts_router)
 app.include_router(_mic_router)
 app.include_router(_sessions_router)
 app.include_router(_fs_router)
+app.include_router(_debug_router)
 app.include_router(_static_router)
 mount_static(app)
 

@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -52,6 +53,39 @@ _mic_owner: object | None = None
 _MIC_MAX_FRAME_BYTES = 32 * 1024            # one WS frame
 _MIC_BUDGET_BYTES = 1 * 1024 * 1024         # sustained 1s window
 _MIC_BUDGET_WINDOW_S = 1.0
+
+
+@dataclass
+class WsCounters:
+    """Per-WS byte accounting so we can prove (in the journal, after the
+    fact) whether the live PTY stream lost any content while the
+    connection was open. Every WS handler instantiates one and logs a
+    summary on close — grep ``"ws closed:"`` to see flow stats for any
+    session.
+
+    Loss-class fields (``bytes_lost`` / ``send_failures``) being non-zero
+    on close is the unambiguous signal that ``forward_pty_to_ws`` had to
+    drop bytes — typically a transient WS stall that the new behaviour
+    (raise + reconnect + capture-pane replay) recovers, but worth
+    catching when it happens so the failure mode is visible instead of
+    silent.
+    """
+    session: str = ""
+    started_at: float = 0.0
+    bytes_read_pty: int = 0
+    bytes_sent_ws: int = 0
+    bytes_lost: int = 0
+    send_failures: int = 0
+    # PTY-output frames forwarded (count, not size). Useful for
+    # distinguishing a few huge frames from many small ones at debug time.
+    frames_forwarded: int = 0
+
+
+# Registry of currently-open WS handlers' counters. Each handler
+# inserts itself on entry, removes itself on exit. An admin diagnostic
+# endpoint can iterate this list for a live snapshot. Concurrent
+# access is single-threaded by asyncio so no lock is needed.
+_active_counters: list[WsCounters] = []
 
 
 async def _build_tts_filter(tmux_session: str):
@@ -183,6 +217,13 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     # Track WS-send so we can serialize sends from multiple tasks safely.
     send_lock = asyncio.Lock()
 
+    # Per-WS byte accounting. Registered in the global active list for
+    # live diagnostics; a summary is logged in the `finally` block so
+    # every WS close leaves a "ws closed: …" line in the journal that
+    # tells us how much PTY data flowed and whether any was lost.
+    counters = WsCounters(session=session, started_at=time.monotonic())
+    _active_counters.append(counters)
+
     async def send_json(msg: dict) -> bool:
         async with send_lock:
             try:
@@ -210,11 +251,28 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         # start with FRAME_TTS_AUDIO (0x02 = Ctrl-B in normal terminal
         # output) doesn't get misclassified as an audio chunk on the
         # client side.
+        #
+        # If send_bytes raises (WS disconnected, transport stall, etc.)
+        # we re-raise so pump() exits and _pty_lifecycle cleanly closes
+        # the WS. Without re-raising, the previous DEBUG-level swallow
+        # silently leaked PTY bytes from xterm whenever the WS hiccupped
+        # — they'd never make it to the client's buffer but would still
+        # be in tmux's pane, producing the "gap until I refresh and
+        # capture-pane recovers them" symptom. Re-raising trades a
+        # warning + a reconnect for guaranteed eventual consistency.
+        counters.bytes_read_pty += len(data)
         async with send_lock:
             try:
                 await websocket.send_bytes(bytes([FRAME_PTY_OUTPUT]) + data)
+                counters.bytes_sent_ws += len(data)
+                counters.frames_forwarded += 1
             except Exception as exc:
-                log.debug("send_bytes(pty) failed: %s", exc)
+                counters.send_failures += 1
+                counters.bytes_lost += len(data)
+                log.warning("send_bytes(pty) failed (%d bytes lost from this "
+                            "ws; client should reconnect and re-capture pane): %s",
+                            len(data), exc)
+                raise
 
     # Subscribe to control-mode events; forward to this WS as JSON.
     async def on_tmux_event(event: TmuxEvent) -> None:
@@ -399,6 +457,24 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     except Exception:
         log.exception("ws handler error")
     finally:
+        # Always emit byte-flow counters on close — this is the
+        # diagnostic anchor for "did we lose any PTY bytes on this
+        # connection". Lost-byte / send-failure counts being > 0 means
+        # forward_pty_to_ws raised at least once (typically a transient
+        # WS stall) and the client should have reconnected to recover
+        # via capture-pane replay. Search the journal for "ws closed:".
+        duration = time.monotonic() - counters.started_at
+        log.info(
+            "ws closed: session=%s duration=%.1fs frames=%d "
+            "bytes_read_pty=%d bytes_sent_ws=%d bytes_lost=%d send_failures=%d",
+            counters.session, duration, counters.frames_forwarded,
+            counters.bytes_read_pty, counters.bytes_sent_ws,
+            counters.bytes_lost, counters.send_failures,
+        )
+        try:
+            _active_counters.remove(counters)
+        except ValueError:
+            pass
         # Release the mic if this WS was the owner so the next connection
         # can claim it.
         if _mic_owner is mic_token:
