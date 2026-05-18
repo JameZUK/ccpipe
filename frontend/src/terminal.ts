@@ -153,6 +153,24 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // numbered comment above for the why.
     if (container.clientWidth < MIN_CONTAINER_PX
         || container.clientHeight < MIN_CONTAINER_PX) return;
+
+    // Snapshot "user is at the live tail" BEFORE fit.fit(). If the
+    // cols change, xterm's buffer.resize() reflows the scrollback
+    // against the new column count, and the resulting line-index
+    // shuffle can leave the viewport pinned at the TOP of the buffer
+    // — the user's "I changed font size / clicked away and back and
+    // now I'm staring at the oldest scrollback" symptom. We can't
+    // suppress xterm's reflow (it has to happen for correct
+    // re-wrapping), but we CAN observe whether the user was tailing
+    // live output and force them back to the bottom afterwards.
+    //
+    // Tolerance of 4px in the at-bottom test absorbs DPI rounding /
+    // momentary scroll-offset drift around the actual bottom.
+    const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
+    const wasAtBottom = !viewport
+      || viewport.scrollTop + viewport.clientHeight
+         >= viewport.scrollHeight - 4;
+
     try {
       fit.fit();
     } catch {
@@ -163,10 +181,25 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // clientWidth, but cell metrics could be wrong for other reasons),
     // don't propagate the bogus size.
     if (term.cols < 2 || term.rows < 2) return;
-    if (term.cols === lastCols && term.rows === lastRows) return;
+    const colsRowsChanged =
+      term.cols !== lastCols || term.rows !== lastRows;
+    if (!colsRowsChanged) return;
     lastCols = term.cols;
     lastRows = term.rows;
     socket.send({ type: "resize", cols: term.cols, rows: term.rows });
+
+    // Restore the at-bottom state. If the user was tailing live output
+    // before the fit, snap back to the bottom regardless of what the
+    // reflow did. Schedule via rAF so any DOM/render work xterm
+    // queued in response to the resize has flushed before we measure
+    // and scroll — calling scrollToBottom synchronously here would
+    // sometimes run before the buffer reflow had updated scrollHeight.
+    if (wasAtBottom) {
+      requestAnimationFrame(() => {
+        if (disposed) return;
+        try { term.scrollToBottom(); } catch {}
+      });
+    }
   };
 
   const scheduleResize = () => {
