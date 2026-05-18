@@ -7,7 +7,7 @@
 
 import { getFsConfig } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
-import { MIC_SVG, SEND_SVG, STOP_SVG } from "./icons";
+import { MIC_SVG, STOP_SVG } from "./icons";
 import { commitPendingShare, discardPendingShare, peekPendingShare } from "./main";
 import { TerminalSocket } from "./ws";
 import type { Waveform } from "./waveform";
@@ -112,13 +112,11 @@ export function mountMobileUI(parent: HTMLElement,
   // the current value, so this is settled before paint in practice.
   micBtn.hidden = true;
 
-  const sendBtn = document.createElement("button");
-  sendBtn.type = "submit";
-  sendBtn.className = "composer__send";
-  sendBtn.title = "Send";
-  sendBtn.innerHTML = SEND_SVG;
-
-  composer.append(attachBtn, inputbox, micBtn, sendBtn);
+  // No separate send button — the modifier-row Enter key doubles as
+  // "send" (see KEYS handler below) so the composer reclaims the
+  // horizontal space for the textarea and the Enter button can be
+  // sized bigger as a primary action.
+  composer.append(attachBtn, inputbox, micBtn);
 
   const autoresize = () => {
     textarea.style.height = "auto";
@@ -274,7 +272,6 @@ export function mountMobileUI(parent: HTMLElement,
   const unsubConn = mic.onConnectionChange((connected) => {
     composer.classList.toggle("offline", !connected);
     textarea.disabled = !connected || composer.classList.contains("recording");
-    sendBtn.disabled = !connected || composer.classList.contains("recording");
     micBtn.disabled = !connected;
     textarea.placeholder = connected ? "Type a prompt…" : "offline — waiting to reconnect…";
   });
@@ -327,7 +324,6 @@ export function mountMobileUI(parent: HTMLElement,
     micBtn.title = recording
       ? "Tap to stop dictation"
       : "Tap to start dictation, tap again to stop";
-    sendBtn.disabled = recording;
     textarea.disabled = recording;
     if (recording) {
       clearAttachTimer();
@@ -393,9 +389,22 @@ export function mountMobileUI(parent: HTMLElement,
       modifierRow.append(btn);
       continue;
     }
+    // Enter is special: when the textarea has content it submits it
+    // (same path as the old send button — text + \r, then clear).
+    // When the textarea is empty it sends a bare \r so the user can
+    // still nudge claude past prompts that need an Enter without
+    // typing anything. Hold-to-repeat then behaves naturally: after
+    // a submit the textarea is empty, so subsequent fires are bare \r.
+    if (k.key === "enter") {
+      btn.classList.add("modifier-row__enter");
+    }
     let initialTimer: number | null = null;
     let repeatTimer: number | null = null;
     const fire = () => {
+      if (k.key === "enter" && textarea.value) {
+        composer.requestSubmit();
+        return;
+      }
       socket.send({ type: "input", data: k.bytes ?? "" });
     };
     const stop = () => {
