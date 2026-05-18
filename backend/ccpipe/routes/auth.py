@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
+import math
 import time
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..auth import (
     AuthDep,
@@ -114,14 +116,39 @@ def _login_throttle_ok(ip: str) -> bool:
     return True
 
 
+def _reject_non_finite_json_const(name: str) -> float:
+    """``parse_constant`` callback for stdlib json. Refuses NaN /
+    Infinity / -Infinity which RFC 8259 forbids but stdlib accepts
+    by default. Closes pass-3 #17."""
+    raise ValueError(f"non-finite JSON literal: {name}")
+
+
+def _reject_non_finite_json_float(s: str) -> float:
+    """``parse_float`` callback for stdlib json. Catches the
+    `1e1000` → inf overflow path that bypasses parse_constant."""
+    f = float(s)
+    if not math.isfinite(f):
+        raise ValueError(f"non-finite number: {s}")
+    return f
+
+
 @router.post("/api/auth/login", response_model=AuthStatus, dependencies=[CsrfDep])
-async def auth_login(body: LoginBody, request: Request) -> AuthStatus:
+async def auth_login(request: Request) -> AuthStatus:
     # `request.client.host` reflects whatever uvicorn resolved as the
     # peer. With `--proxy-headers --forwarded-allow-ips=<nginx-ip>` it's
     # the real client; without those flags it's the immediate TCP peer
     # (usually nginx itself), which collapses the per-IP throttle into
     # a global one. See README §"Reverse proxy" for the recommended unit.
     client_ip = (request.client.host if request.client else "") or "unknown"
+    # ── Rate-limit BEFORE body parsing.
+    # Pass-3 review finding #18: the previous code put the throttle
+    # check after FastAPI's automatic ``body: LoginBody`` parsing, so
+    # any payload that crashed the parser (NaN / Infinity / overflow /
+    # lone surrogates per #17, the deep-nest class per pass-2 #9)
+    # returned a 5xx without ever counting toward the attacker's
+    # attempt budget. Moving the throttle here means every login POST
+    # — successful, 401'd, or 400'd as malformed — costs the source
+    # exactly one bucket slot.
     if not _login_throttle_ok(client_ip):
         log.warning("login throttle tripped for ip=%s (per-IP %d/%ds + global %d/%ds)",
                      client_ip, _LOGIN_BUCKET_MAX, int(_LOGIN_BUCKET_WINDOW_S),
@@ -132,6 +159,36 @@ async def auth_login(body: LoginBody, request: Request) -> AuthStatus:
         raise HTTPException(status_code=429,
                             detail="too many attempts; try again in a minute",
                             headers={"Retry-After": str(int(_LOGIN_BUCKET_WINDOW_S))})
+
+    # ── Parse + validate body manually.
+    # Pass-3 review finding #17: FastAPI's automatic ``body: LoginBody``
+    # parameter delegates to stdlib json.loads, which accepts non-RFC
+    # JSON literals (NaN, ±Infinity) and float overflow (1e1000 → inf).
+    # Pydantic then crashed downstream and the response was 500. We
+    # parse with strict callbacks here (parse_constant rejects NaN/Inf,
+    # parse_float catches overflow) and treat any failure as 400 — same
+    # semantic class as "wrong credentials" from the attacker's POV.
+    try:
+        raw = await request.body()
+        data = (
+            json.loads(
+                raw,
+                parse_constant=_reject_non_finite_json_const,
+                parse_float=_reject_non_finite_json_float,
+            )
+            if raw else {}
+        )
+        body = LoginBody.model_validate(data)
+        # Reject lone surrogates / other non-encodable UTF-16 codepoints
+        # before they reach verify_credential's .encode() call, which
+        # would otherwise raise UnicodeEncodeError → 500.
+        body.username.encode("utf-8")
+        body.password.encode("utf-8")
+        if body.code is not None:
+            body.code.encode("utf-8")
+    except (ValueError, TypeError, UnicodeError, ValidationError):
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=400, detail="invalid request")
 
     # Single-step login. The previous two-step flow returned a 200 with
     # `otp_required=true` once the password was correct but before any

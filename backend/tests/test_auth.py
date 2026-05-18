@@ -78,7 +78,12 @@ def test_login_rejects_wrong_username(app_env_creds):
 def test_login_rejects_missing_fields(app_env_creds):
     with TestClient(app_env_creds) as c:
         r = c.post("/api/auth/login", headers={"X-Requested-By": "ccpipe"}, json={"password": "letmein"})
-        assert r.status_code in (401, 422)  # pydantic 422 or 401 (depends on which check runs first)
+        # Manual body parsing in the route now collapses all
+        # parse/validation failures (including missing required
+        # fields) to 400 — same response shape as malformed JSON.
+        # That's the pass-3 #17/#18 fix; 401/422 are kept here for
+        # back-compat with hypothetical older behaviours.
+        assert r.status_code in (400, 401, 422)
 
 
 def test_login_succeeds_then_access(app_env_creds):

@@ -1062,4 +1062,61 @@ def test_security_txt_present(authed_client):
     assert "Expires: " in body
 
 
+# ── External review pass-3: malformed-JSON 500s + rate-limit bypass ──
+
+_NASTY_LOGIN_BODIES = [
+    # Stdlib json accepts NaN/Infinity literals — RFC 8259 forbids them.
+    '{"username":NaN,"password":"a"}',
+    '{"username":-Infinity,"password":"a"}',
+    '{"username":Infinity,"password":"a"}',
+    # Valid JSON syntax but overflows Python float to inf.
+    '{"username":1e1000,"password":"a"}',
+    # Lone surrogate (illegal in well-formed Unicode) — historically
+    # tripped verify_credential's UTF-8 encode → UnicodeEncodeError.
+    '{"username":"\\ud834","password":"a"}',
+    # Pass-2 #9 reminder: deeply-nested JSON should also be a 4xx now.
+    # (Body-cap middleware should catch this with 413 OR this route
+    # returns 400 if it slips through.)
+    '{"a":' * 1000 + '1' + '}' * 1000,
+]
+
+
+def test_login_rejects_non_standard_json_with_400_not_500(authed_client):
+    """Pass-3 review #17: NaN / ±Infinity / float-overflow / lone-
+    surrogate JSON bodies used to escape into the auth pipeline and
+    surface as HTTP 500. They must now return a clean 400 with no
+    backend traceback or 5xx noise in the journal."""
+    import ccpipe.routes.auth as routes_auth
+    headers = {"X-Requested-By": "ccpipe", "Content-Type": "application/json"}
+    for body in _NASTY_LOGIN_BODIES:
+        routes_auth.reset_throttle_state()  # don't let one payload starve the next
+        r = authed_client.post(
+            "/api/auth/login", headers=headers, content=body,
+        )
+        assert r.status_code in (400, 413), (
+            f"payload {body[:60]!r}... gave {r.status_code}, want 400/413"
+        )
+
+
+def test_malformed_login_bodies_count_toward_rate_limit(authed_client):
+    """Pass-3 review #18: 5xx responses bypassed the rate-limiter, so
+    an attacker could spin unlimited malformed-body requests. After
+    the fix, every login POST — successful, 401'd, OR 400'd — costs
+    the source exactly one throttle slot. Verify by hammering
+    malformed bodies until the limiter trips."""
+    import ccpipe.routes.auth as routes_auth
+    routes_auth.reset_throttle_state()
+    headers = {"X-Requested-By": "ccpipe", "Content-Type": "application/json"}
+    # Bucket is 5 per minute per IP. The 6th attempt MUST 429
+    # regardless of the response status of the prior five.
+    nasty = '{"username":NaN,"password":"a"}'
+    statuses = []
+    for _ in range(7):
+        r = authed_client.post("/api/auth/login", headers=headers, content=nasty)
+        statuses.append(r.status_code)
+    assert 429 in statuses, f"never tripped 429; got statuses {statuses}"
+    # And NO 500s in the sequence — that was the original bug.
+    assert 500 not in statuses, f"saw a 500 in {statuses}"
+
+
 # ── #21 reconnect debounce is a frontend-only concern; verified by inspection.

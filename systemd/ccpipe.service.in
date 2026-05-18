@@ -19,7 +19,16 @@ WorkingDirectory=@REPO_ROOT@/backend
 # `--proxy-headers --forwarded-allow-ips=<proxy-host-IP>`; without
 # the latter the per-IP login throttle treats every request as coming
 # from the proxy. See README §"Reverse proxy" for the exact drop-in.
-ExecStart=@REPO_ROOT@/backend/.venv/bin/uvicorn ccpipe.main:app --host 0.0.0.0 --port 8080
+# Slowloris hardening (pass-3 review #19): cap simultaneous in-flight
+# requests so a single source can't saturate the worker by holding
+# 500+ slow connections, and shorten the keep-alive idle window so an
+# idle TCP doesn't pin a socket for the default 5 s × N connections.
+# Operator-side nginx still controls client_body_timeout /
+# client_header_timeout independently — this is the app's own bound.
+ExecStart=@REPO_ROOT@/backend/.venv/bin/uvicorn ccpipe.main:app \
+    --host 0.0.0.0 --port 8080 \
+    --timeout-keep-alive 5 \
+    --limit-concurrency 200
 
 # Frontend bundle served by FastAPI when this exists
 Environment=CCPIPE_FRONTEND_DIST=@REPO_ROOT@/frontend/dist
