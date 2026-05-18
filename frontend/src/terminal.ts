@@ -94,10 +94,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // Upgrade to the WebGL renderer when available. 2-5x faster on Claude
   // Code's busy TUI redraws; falls back silently to the default DOM
   // renderer if the addon fails to attach (no WebGL2, context lost, etc.).
+  let webglActive = false;
   try {
     const webgl = new WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
+    webgl.onContextLoss(() => { webgl.dispose(); webglActive = false; });
     term.loadAddon(webgl);
+    webglActive = true;
   } catch (e) {
     console.warn("xterm webgl renderer unavailable, using DOM:", e);
   }
@@ -191,6 +193,17 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       fit.fit();
     } catch {
       return;  // container has no size yet (hidden or detached)
+    }
+    // DOM-renderer safety pad: when WebGL is unavailable, xterm's DOM
+    // renderer can report a cell-height slightly smaller than what it
+    // actually renders. FitAddon floor()s the rows based on that
+    // smaller reported height, so the resulting rows-times-actual-
+    // cellHeight overflows the container by half a row and the last
+    // row gets clipped at the bottom. Sacrifice one row on the DOM
+    // renderer to guarantee no overflow. The WebGL renderer doesn't
+    // have this drift and gets the full row count.
+    if (!webglActive && term.rows > 2) {
+      try { term.resize(term.cols, term.rows - 1); } catch {}
     }
     // Defensive second guard: if fit ever computed a 0/1 cols/rows
     // despite the pre-flight check (it shouldn't, given a 100px+

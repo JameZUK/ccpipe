@@ -381,32 +381,56 @@ export class TerminalSocket {
    * regain visibility / network we proactively close any "OPEN" socket
    * to force the close + retry path to kick in. */
   /** Force-close any socket that isn't actively CONNECTING so the
-   * subsequent reconnect path can start fresh. We can't tell from JS
-   * whether an OPEN socket is actually alive on the wire (Android may
-   * silently kill TCP during background freeze and never deliver the
-   * close event), so we treat OPEN as suspect on any lifecycle hint. */
-  private kickStaleSocket(): void {
+   * subsequent reconnect path can start fresh. We can't ALWAYS tell
+   * from JS whether an OPEN socket is actually alive on the wire
+   * (Android may silently kill TCP during background freeze and
+   * never deliver the close event), so for events that strongly
+   * imply a stale socket (online, bfcache restore) callers pass
+   * `force=true`. For routine lifecycle nudges (focus,
+   * visibilitychange) we DON'T force, because every kick triggers a
+   * fresh hello → resetTerminal → history-replay cycle on the other
+   * side, and that buffer-rebuild churn is what was causing the
+   * "tab switch leaves me staring at the beginning of scrollback"
+   * symptom. With force=false we only kick if the socket hasn't
+   * received data recently — if it has, the connection is alive
+   * and there's no reason to tear it down. */
+  private kickStaleSocket(force: boolean): void {
     if (!this.ws) return;
     if (this.ws.readyState === WebSocket.CONNECTING) return;
+    if (!force && this.ws.readyState === WebSocket.OPEN) {
+      // Heuristic: a socket that's received data in the last 10s is
+      // genuinely alive. The longer-running stale check (45s, in
+      // startStaleCheck) catches the harder case of a TCP-dead-but-
+      // browser-still-says-OPEN socket.
+      const idle = Date.now() - this.lastReceivedAt;
+      if (idle < 10_000) return;
+    }
     try { this.ws.close(); } catch {}
     this.ws = null;
   }
 
   private attachLifecycleHooks(): void {
-    const kickAndRetry = (force = true) => {
-      this.kickStaleSocket();
+    const kickAndRetry = (force = true, forceKick = false) => {
+      this.kickStaleSocket(forceKick);
       this.reconnectNow(force);
     };
-    const onOnline = () => kickAndRetry();
-    const onFocus = () => kickAndRetry();
+    // 'online': OS reported network is back; the socket was almost
+    // certainly killed at some point during the offline window, so
+    // force a kick.
+    const onOnline = () => kickAndRetry(true, true);
+    // 'focus' / 'visibilitychange→visible': routine — a quick click
+    // between windows / tabs shouldn't blow away a working socket.
+    // Pass forceKick=false so kickStaleSocket only acts when the
+    // socket actually looks idle.
+    const onFocus = () => kickAndRetry(true, false);
     const onVisible = () => {
-      if (document.visibilityState === "visible") kickAndRetry();
+      if (document.visibilityState === "visible") kickAndRetry(true, false);
     };
     // pageshow with persisted=true fires when the page comes back from
     // bfcache — JS state is restored but the underlying WS was killed
     // when the page entered the cache, so we must dial again.
     const onPageshow = (e: PageTransitionEvent) => {
-      if (e.persisted) kickAndRetry();
+      if (e.persisted) kickAndRetry(true, true);
     };
     window.addEventListener("online", onOnline);
     window.addEventListener("focus", onFocus);
