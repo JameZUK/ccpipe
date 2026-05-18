@@ -92,6 +92,18 @@ html, body, #app {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* OS-chrome (taskbar) compensation. main.ts measures
+   `window.innerHeight - screen.availHeight` and exposes the overlap
+   via the `--os-chrome-overlap` custom property; we shrink the body
+   by that amount so our `height: 100%` cascade doesn't render content
+   into the pixel band covered by the OS taskbar (fullscreen /
+   borderless-maximised modes). Fallback `0px` keeps the layout at
+   full viewport height when no overlap is detected, which is the
+   normal-windowed-mode case. */
+body {
+  height: calc(100% - var(--os-chrome-overlap, 0px));
+}
+
 /* Background atmosphere: subtle warm noise + corner vignette */
 body::before {
   content: '';

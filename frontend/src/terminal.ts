@@ -106,19 +106,31 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // xterm.js cell metrics depend on the rendered font. If we fit before web
   // fonts swap in we get the wrong cols/rows. We:
   //   1. defer the first fit until document.fonts.ready
-  //   2. observe the terminal container with ResizeObserver (catches banner
-  //      appearance, composer height, orientation, soft-keyboard, etc.)
+  //   2. observe the terminal container with ResizeObserver — the
+  //      canonical signal that the actual layout changed. Banner
+  //      appearance, composer height, orientation, soft-keyboard,
+  //      OS-chrome-overlap CSS var swaps, etc. all flow through here.
   //   3. listen on window.resize for zoom / cross-frame edge cases
-  //   4. listen on focus / visibilitychange / pageshow to catch the case
-  //      where the window/tab was backgrounded while a resize landed
-  //      (those events DON'T fire window.resize on the way back) — without
-  //      this, the terminal can be left at a stale cols/rows that doesn't
-  //      match the actual viewport, manifesting as either a clipped bottom
-  //      row or wrapping at ~60 columns inside a much wider viewport
-  //   5. always run TWO fits per scheduled trigger: an immediate one, then
-  //      a second on the next rAF, so any layout/font-metric settling that
-  //      lands between them is captured rather than baked-in as final
-  //   6. debounce sends; only emit a resize message when cols/rows change
+  //   4. pre-flight check before fit: if the container is in a
+  //      momentary too-small state (page hidden, layout mid-shift,
+  //      transient zero-width), DON'T call fit. Calling fit.fit() with
+  //      a sub-100px clientWidth propagates a narrow cols to xterm and
+  //      the server, and the bug is sticky — when the layout recovers
+  //      the post-recovery clientWidth matches the pre-transient
+  //      value, ResizeObserver doesn't fire again, and the terminal is
+  //      stuck wrapping at ~60 columns until something else nudges
+  //      the layout. (Manifested as "browser was inactive, came back
+  //      and the terminal is narrow.")
+  //   5. NO focus / visibilitychange / pageshow → fit trigger — those
+  //      events fire even when no layout change happened, and a
+  //      no-op fit can still cause an internal xterm buffer reflow
+  //      that briefly puts the viewport at the top of scrollback. If
+  //      the OS-chrome-overlap compensation in main.ts changes anything
+  //      meaningful, the resulting CSS var swap reflows the layout,
+  //      ResizeObserver fires naturally, and we re-fit through the
+  //      same path everything else uses.
+  //   6. debounce sends; only emit a server resize message when
+  //      cols/rows change
   let lastCols = -1;
   let lastRows = -1;
   let pending: number | null = null;
@@ -128,17 +140,28 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // term.cols from running against a disposed terminal.
   let disposed = false;
 
+  // Minimum container size below which we refuse to call fit.fit().
+  // A real terminal has dozens of cols/rows; anything below this is a
+  // transient layout state we shouldn't propagate. The exact threshold
+  // doesn't matter much — anything between ~50px and ~200px catches
+  // the bug; pick 100 as a sane "definitely not a real terminal" floor.
+  const MIN_CONTAINER_PX = 100;
+
   const sendResize = () => {
     if (disposed) return;
+    // Pre-flight: bail on transient too-small container states. See the
+    // numbered comment above for the why.
+    if (container.clientWidth < MIN_CONTAINER_PX
+        || container.clientHeight < MIN_CONTAINER_PX) return;
     try {
       fit.fit();
     } catch {
       return;  // container has no size yet (hidden or detached)
     }
-    // Sanity guard: if fit ever computes 0 or 1 col/row (e.g. because the
-    // container measured tiny while hidden), don't propagate the bogus
-    // size to the server — a real terminal is always at least ~20×5.
-    // We'll get a real fit on the next event.
+    // Defensive second guard: if fit ever computed a 0/1 cols/rows
+    // despite the pre-flight check (it shouldn't, given a 100px+
+    // clientWidth, but cell metrics could be wrong for other reasons),
+    // don't propagate the bogus size.
     if (term.cols < 2 || term.rows < 2) return;
     if (term.cols === lastCols && term.rows === lastRows) return;
     lastCols = term.cols;
@@ -152,12 +175,6 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     pending = window.setTimeout(() => {
       pending = null;
       sendResize();
-      // Second pass on the next rAF: catches font/metric settling and
-      // layout reflows that the first fit measured mid-stream.
-      requestAnimationFrame(() => {
-        if (disposed) return;
-        sendResize();
-      });
     }, 60);
   };
 
@@ -168,24 +185,14 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // visualViewport changes when the soft keyboard opens / closes on mobile
   const vv = (window as any).visualViewport as VisualViewport | undefined;
   vv?.addEventListener("resize", scheduleResize);
-  // Focus / visibility / bfcache restore — see the comment above for why
-  // these matter (resize events don't fire when a window returns from
-  // background, even though the layout may need re-measuring).
-  const onFocus = () => scheduleResize();
-  const onVisibilityChange = () => {
-    if (document.visibilityState === "visible") scheduleResize();
-  };
-  const onPageShow = (e: PageTransitionEvent) => {
-    if (e.persisted) scheduleResize();
-  };
-  window.addEventListener("focus", onFocus);
-  window.addEventListener("pageshow", onPageShow);
-  document.addEventListener("visibilitychange", onVisibilityChange);
 
   // First fit only after fonts have loaded; otherwise cell metrics drift.
   // Two fits: once immediately when fonts.ready resolves, then a second
   // pass 200ms later to mop up any late layout shifts (banners, custom
-  // chrome height, the initial scrollbar appearing, etc.).
+  // chrome height, the initial scrollbar appearing, etc.). This double
+  // pass is INITIAL-LOAD only because that's where font/layout settling
+  // is observable — runtime resize events go through ResizeObserver,
+  // which fires for each real layout change.
   const fontsReady = (document as any).fonts?.ready as Promise<unknown> | undefined;
   if (fontsReady) {
     fontsReady.then(() => {
@@ -480,9 +487,6 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       try { ro.disconnect(); } catch {}
       window.removeEventListener("resize", scheduleResize);
       window.removeEventListener("orientationchange", scheduleResize);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("pageshow", onPageShow);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
       vv?.removeEventListener("resize", scheduleResize);
       document.removeEventListener("keydown", onTermKeyForSearch);
       try { term.dispose(); } catch {}

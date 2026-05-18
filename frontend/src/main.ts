@@ -25,6 +25,48 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 
+// ─── OS-chrome (taskbar) compensation ────────────────────────────────────
+// When the browser window extends behind an OS taskbar — e.g. fullscreen
+// mode (F11), borderless-maximised tiling, or kiosk-style window
+// managers — the browser viewport's `window.innerHeight` includes the
+// pixel band covered by the taskbar. Our layout chains `height: 100%`
+// from html → body → #app → .terminal-view → #terminal, so #terminal
+// ends up rendering its bottom rows into the area visually occluded by
+// the taskbar and the user sees only the top half of the last row.
+//
+// The signal we need is the OS-reported work area height
+// (`screen.availHeight`). If `window.innerHeight > screen.availHeight`,
+// the difference is exactly the amount of overlap. We expose it as a
+// CSS custom property and have `body` use
+// `height: calc(100% - var(--os-chrome-overlap, 0px))` to shrink the
+// layout above the taskbar.
+//
+// Triggers: resize (window size changes), focus / pageshow /
+// visibilitychange (the user may have toggled fullscreen / moved the
+// window between monitors with different work areas while we weren't
+// looking). None of these directly trigger an xterm fit — they update
+// the CSS variable, which only fires a real layout change when the
+// overlap actually moves. ResizeObserver on #terminal picks that up
+// and re-fits through the normal path.
+function applyOsChromeCompensation(): void {
+  let overlap = 0;
+  try {
+    const avail = screen.availHeight;
+    if (typeof avail === "number" && avail > 0) {
+      overlap = Math.max(0, window.innerHeight - avail);
+    }
+  } catch { /* screen unavailable in this environment */ }
+  // Ignore sub-row noise (fractional rounding, 1-2px DPI artefacts).
+  // A real taskbar is at least ~24px tall on every platform.
+  if (overlap < 8) overlap = 0;
+  document.documentElement.style.setProperty("--os-chrome-overlap", `${overlap}px`);
+}
+window.addEventListener("resize", applyOsChromeCompensation);
+window.addEventListener("focus", applyOsChromeCompensation);
+window.addEventListener("pageshow", applyOsChromeCompensation);
+document.addEventListener("visibilitychange", applyOsChromeCompensation);
+applyOsChromeCompensation();
+
 // PWA share_target: when the user shares text/URL/title from another
 // app into ccpipe, the launch URL is /?text=…&url=…&title=…. We snag
 // those values once into sessionStorage so the composer's onmount path
