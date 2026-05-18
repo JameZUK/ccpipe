@@ -354,7 +354,9 @@ async function attachTerminal(session: string): Promise<void> {
     view.insertBefore(httpsBanner, terminalContainer);
   };
 
-  let writeToTerm: ((d: Uint8Array | string) => void) | null = null;
+  let writeToTerm:
+    | ((d: Uint8Array | string, after?: () => void) => void)
+    | null = null;
   // Set once createTerminal has run. Called from onHello so each
   // (re)connect starts with a clean buffer before the server's pane
   // replay writes the current scrollback into it.
@@ -365,6 +367,13 @@ async function attachTerminal(session: string): Promise<void> {
   // bottom so xterm's auto-follow can't get stuck pinned at the TOP
   // of the just-replayed buffer (the "I reconnected and now I'm
   // looking at the OLDEST scrollback" symptom).
+  //
+  // CRITICAL: the scroll has to happen via term.write()'s completion
+  // callback, NOT synchronously after writeToTerm() returns. xterm's
+  // write queue is async — running scrollToBottom() too early
+  // scrolls to the bottom of the still-empty buffer (which becomes
+  // the TOP once the replay processes microseconds later), exactly
+  // the bug we're trying to fix.
   let bottomOnNextOutput = false;
   let mic: MicStreamerType | null = null;
   // Pass the session name so mute state is scoped per-session — muting
@@ -630,10 +639,13 @@ async function attachTerminal(session: string): Promise<void> {
       notifications.fireResponseReady(lastSpokenText, session);
     },
     onOutput(data) {
-      writeToTerm?.(data);
       if (bottomOnNextOutput) {
         bottomOnNextOutput = false;
-        scrollTerminalToBottom?.();
+        // Scroll via the write() completion callback so we definitely
+        // run AFTER xterm has processed the bytes and grown its buffer.
+        writeToTerm?.(data, () => scrollTerminalToBottom?.());
+      } else {
+        writeToTerm?.(data);
       }
     },
     onLatency(ms) {

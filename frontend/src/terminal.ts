@@ -160,7 +160,21 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
 
   // PTY output → terminal. xterm.js accepts string OR Uint8Array; bytes
   // skip a decode/encode roundtrip and avoid split-codepoint corruption.
-  const writeToTerm = (data: Uint8Array | string) => term.write(data);
+  //
+  // The optional ``after`` callback is forwarded to xterm.js's own
+  // post-process hook on term.write(). Critical for the pane-replay
+  // path: term.write() is asynchronous (data is queued and processed
+  // via an internal microtask loop), so anything that needs to happen
+  // AFTER the buffer has actually grown — like scrolling to the
+  // bottom of the just-replayed scrollback — must run inside this
+  // callback, not synchronously after the write() call returns.
+  const writeToTerm = (data: Uint8Array | string, after?: () => void) => {
+    if (after) {
+      term.write(data, after);
+    } else {
+      term.write(data);
+    }
+  };
 
   // Terminal input → PTY. Most data is small (single keystrokes), so
   // ship it through directly. Pastes (xterm's onData fires once with
@@ -394,28 +408,25 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    * Without this, content that scrolled out of view during a network
    * blip never made it into xterm's scrollback.
    *
-   * Why scrollToBottom() after reset(): xterm.js tracks an internal
-   * "user has scrolled away from the bottom" flag and only auto-follows
-   * the cursor while that flag is false. Right after reset() the
-   * viewport ends up at scrollTop=0 with an empty buffer; when the
-   * subsequent history-replay bytes arrive and scrollHeight grows, the
-   * raw DOM state (scrollTop=0, scrollHeight>>clientHeight) reads as
-   * "user is scrolled up" and xterm refuses to follow. The viewport
-   * stays pinned at the TOP of the replayed buffer (oldest entries
-   * visible) while the live tail streams off-screen. Explicitly
-   * calling scrollToBottom() here clears that flag so auto-follow
-   * works on the first write. See report from 2026-05-18 reconnect
-   * symptom. */
+   * The trailing scrollToBottom() is belt-and-braces — it sets xterm's
+   * internal "user at bottom" flag while the buffer is still empty,
+   * which puts auto-follow in the right state for the very first
+   * chunk that arrives. The LOAD-BEARING fix lives in main.ts onOutput
+   * which scrolls via term.write()'s completion callback after the
+   * history bytes have actually been processed; this scroll alone is
+   * not enough because term.write() is asynchronous and a synchronous
+   * scrollToBottom() after it would run before the buffer has grown. */
   const resetBuffer = (): void => {
     if (disposed) return;
     try { term.reset(); } catch {}
     try { term.scrollToBottom(); } catch {}
   };
 
-  /** Force the viewport to the bottom. Exposed so the hello handler in
-   * main.ts can call it once after the history-replay chunk lands —
-   * a belt-and-braces backstop in case xterm's auto-follow state hasn't
-   * fully recovered from the preceding reset(). */
+  /** Force the viewport to the bottom. Called from the term.write()
+   * completion callback in main.ts onOutput, so it runs AFTER xterm
+   * has processed the pane-replay bytes — that ordering is what makes
+   * the scroll actually land at the live tail rather than at the
+   * top of the buffer. */
   const scrollToBottom = (): void => {
     if (disposed) return;
     try { term.scrollToBottom(); } catch {}
