@@ -131,64 +131,10 @@ export function saveTtsMuted(muted: boolean, session?: string): void {
   } catch {}
 }
 
-// ─── Per-session scroll position ───────────────────────────────────────
-// We save how far from the bottom (in pixels) the user has scrolled, so
-// that a refresh keeps them roughly where they were reading rather than
-// snapping to the live tail. Keyed by tmux session name.
-
-const SCROLL_KEY = "ccpipe.scroll";
-
-interface ScrollMap { [session: string]: number }
-
-// In-memory cache of the parsed map. Avoids re-parsing localStorage on
-// every save (the debounce in terminal.ts cuts the call frequency, but
-// caching makes loads + writes O(1) for the common path).
-//
-// Invalidated when another tab writes (storage event below), so a
-// second window scrolling its session's offset is still respected.
-let _scrollMapCache: ScrollMap | null = null;
-
-function _readScrollMap(): ScrollMap {
-  if (_scrollMapCache) return _scrollMapCache;
-  try {
-    const raw = localStorage.getItem(SCROLL_KEY);
-    if (!raw) { _scrollMapCache = {}; return _scrollMapCache; }
-    const obj = JSON.parse(raw);
-    _scrollMapCache = obj && typeof obj === "object" ? obj : {};
-    return _scrollMapCache!;
-  } catch {
-    _scrollMapCache = {};
-    return _scrollMapCache;
-  }
-}
-
-if (typeof window !== "undefined") {
-  window.addEventListener("storage", (e) => {
-    if (e.key === SCROLL_KEY) _scrollMapCache = null;
-  });
-}
-
-export function loadScrollOffset(session: string): number | null {
-  const map = _readScrollMap();
-  const v = map[session];
-  // Number.isFinite rejects Infinity / -Infinity / NaN that bare
-  // typeof === "number" + comparison would otherwise allow through
-  // from a hand-edited localStorage value.
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
-}
-
-export function saveScrollOffset(session: string, offsetFromBottom: number): void {
-  try {
-    const map = _readScrollMap();
-    map[session] = Math.max(0, Math.round(offsetFromBottom));
-    localStorage.setItem(SCROLL_KEY, JSON.stringify(map));
-  } catch {}
-}
-
-export function clearScrollOffset(session: string): void {
-  try {
-    const map = _readScrollMap();
-    delete map[session];
-    localStorage.setItem(SCROLL_KEY, JSON.stringify(map));
-  } catch {}
-}
+// (Removed) Per-session scroll-position persistence used to live here.
+// It was a "land the user back where they were reading" feature that
+// in practice yanked operators out of the live tail on every refresh,
+// so the consumer was removed in 13b3704 and the producer follows
+// here. If you want it back, design the UX so the user has to OPT IN
+// (e.g. only when they explicitly bookmarked a scroll position)
+// rather than silently doing it on every attach.

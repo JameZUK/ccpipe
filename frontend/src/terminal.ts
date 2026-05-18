@@ -8,7 +8,6 @@ import "@xterm/xterm/css/xterm.css";
 import {
   DisplayPrefs,
   loadDisplayPrefs,
-  saveScrollOffset,
   saveSessionFontSize,
 } from "./display-prefs";
 import { TerminalSocket } from "./ws";
@@ -313,23 +312,15 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
     if (!viewport) { setTimeout(wireScrollAffordances, 40); return; }
 
-    // Persist scroll position per session so a refresh lands the user
-    // roughly where they were reading. We store the offset-from-bottom
-    // (in pixels) rather than absolute scrollTop, because the buffer
-    // grows asynchronously after attach.
-    let scrollSaveTimer: number | null = null;
+    // Track at-bottom state for the live-pill visibility. We used to
+    // also persist scroll offset to localStorage here so a refresh
+    // could restore "where the user was reading"; that whole feature
+    // was removed in 13b3704 because it kept yanking users out of
+    // the live tail. The save side is gone too — nothing reads it.
     const updatePill = () => {
       const atBottom =
         viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
       livePill.hidden = atBottom;
-      if (sessionName) {
-        const offset = Math.max(
-          0, viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight,
-        );
-        if (scrollSaveTimer !== null) clearTimeout(scrollSaveTimer);
-        scrollSaveTimer = window.setTimeout(
-          () => saveScrollOffset(sessionName, offset), 200);
-      }
     };
     viewport.addEventListener("scroll", updatePill, { passive: true });
     term.onScroll(updatePill);
