@@ -512,6 +512,16 @@ a:hover { color: var(--fg); }
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-bg);
 }
+/* Name + pin share one grid cell so the parent grid stays 4-column
+ * regardless of sticky state. The flex wrapper lets the name
+ * truncate (min-width: 0 propagates through) while the pin keeps
+ * its intrinsic size at the right of the name. */
+.session-row__name-wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
 .session-row__name {
   color: var(--fg);
   font-size: var(--t-md);

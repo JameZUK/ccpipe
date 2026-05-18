@@ -422,16 +422,23 @@ export function renderSessionPicker(
     // Single-line layout: name takes the available width and truncates
     // with an ellipsis; status sits to its right tightly. The old
     // two-line meta block has been folded into the status pill.
+    // Name + pin share one grid cell via a flex wrapper so the grid
+    // template stays 4 columns regardless of sticky state — putting
+    // the pin into its own grid track would wrap the actions cell to
+    // a new row on smaller widths and the kebab would land bottom-left.
+    const nameWrap = document.createElement("div");
+    nameWrap.className = "session-row__name-wrap";
     const nameEl = document.createElement("div");
     nameEl.className = "session-row__name";
     nameEl.textContent = s.name;
-    // Inline pin glyph appears when the session is sticky, so the
-    // state is visible at a glance without opening the kebab menu.
-    const pinEl = document.createElement("span");
-    pinEl.className = "session-row__pin";
-    pinEl.innerHTML = PIN_SVG;
-    pinEl.title = "sticky — restored on backend restart";
-    pinEl.hidden = !s.sticky;
+    nameWrap.append(nameEl);
+    if (s.sticky) {
+      const pinEl = document.createElement("span");
+      pinEl.className = "session-row__pin";
+      pinEl.innerHTML = PIN_SVG;
+      pinEl.title = "sticky — restored on backend restart";
+      nameWrap.append(pinEl);
+    }
     const statusEl = document.createElement("span");
     statusEl.className = "session-row__status"
       + (s.attached ? " session-row__status--attached" : "");
@@ -472,7 +479,7 @@ export function renderSessionPicker(
     menu.append(renameItem, stickyItem, killItem);
     actions.append(kebab, menu);
 
-    row.append(dot, nameEl, pinEl, statusEl, actions);
+    row.append(dot, nameWrap, statusEl, actions);
 
     // Row-level click + Enter/Space open the session. Skip when the
     // click bubbles from the inline rename input or the kebab.
