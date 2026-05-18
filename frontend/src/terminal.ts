@@ -151,26 +151,10 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
 
   const sendResize = () => {
     if (disposed) return;
-    // ── Diagnostic (temporary): log every fit attempt so we can see
-    // what dimensions are being measured during reported misfit
-    // symptoms (narrow cols on inactivate, bottom row clipped). Filter
-    // devtools console with "ccpipe-debug" to see only these lines.
-    // eslint-disable-next-line no-console
-    console.log("[ccpipe-debug] sendResize pre", {
-      containerW: container.clientWidth,
-      containerH: container.clientHeight,
-      termCols: term.cols,
-      termRows: term.rows,
-      lastCols, lastRows,
-    });
     // Pre-flight: bail on transient too-small container states. See the
     // numbered comment above for the why.
     if (container.clientWidth < MIN_CONTAINER_PX
-        || container.clientHeight < MIN_CONTAINER_PX) {
-      // eslint-disable-next-line no-console
-      console.log("[ccpipe-debug] sendResize bailed: too-small container");
-      return;
-    }
+        || container.clientHeight < MIN_CONTAINER_PX) return;
 
     // Snapshot "user is at the live tail" BEFORE fit.fit(). If the
     // cols change, xterm's buffer.resize() reflows the scrollback
@@ -212,13 +196,6 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     if (term.cols < 2 || term.rows < 2) return;
     const colsRowsChanged =
       term.cols !== lastCols || term.rows !== lastRows;
-    // eslint-disable-next-line no-console
-    console.log("[ccpipe-debug] sendResize post", {
-      newCols: term.cols,
-      newRows: term.rows,
-      changed: colsRowsChanged,
-      wasAtBottom,
-    });
     if (!colsRowsChanged) return;
     lastCols = term.cols;
     lastRows = term.rows;
@@ -559,37 +536,26 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    */
   const scrollToBottom = (): void => {
     if (disposed) return;
-    // eslint-disable-next-line no-console
-    const viewport0 = container.querySelector(".xterm-viewport") as HTMLElement | null;
-    console.log("[ccpipe-debug] scrollToBottom #1", {
-      vpSt: viewport0?.scrollTop,
-      vpSh: viewport0?.scrollHeight,
-    });
+    // Pass 1 — immediate: updates xterm's internal ydisp.
     try { term.scrollToBottom(); } catch {}
+    // Pass 2 — after the next render: DOM viewport has the post-write
+    // rows by now, so its scrollHeight reflects the buffer. Force the
+    // viewport's scrollTop too because the DOM renderer's CSSOM scroll
+    // can lag behind xterm's ydisp on the slow path.
     const disposable = term.onRender(() => {
       disposable.dispose();
       if (disposed) return;
-      const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
-      // eslint-disable-next-line no-console
-      console.log("[ccpipe-debug] scrollToBottom #2 (onRender)", {
-        vpSt: viewport?.scrollTop,
-        vpSh: viewport?.scrollHeight,
-      });
       try { term.scrollToBottom(); } catch {}
-      // Also force the DOM directly — on the DOM renderer the
-      // viewport's scrollTop is what the user actually sees, and
-      // it can lag behind xterm's ydisp until the next paint.
+      const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
       if (viewport) viewport.scrollTop = viewport.scrollHeight;
     });
+    // Pass 3 — +100ms safety belt: catches any further async layout
+    // settling that onRender missed (notably the canvas-vs-viewport
+    // sync on the DOM renderer's slow path).
     window.setTimeout(() => {
       if (disposed) return;
-      const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
-      // eslint-disable-next-line no-console
-      console.log("[ccpipe-debug] scrollToBottom #3 (+100ms)", {
-        vpSt: viewport?.scrollTop,
-        vpSh: viewport?.scrollHeight,
-      });
       try { term.scrollToBottom(); } catch {}
+      const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
       if (viewport) viewport.scrollTop = viewport.scrollHeight;
     }, 100);
   };
