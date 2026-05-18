@@ -108,8 +108,17 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   //   1. defer the first fit until document.fonts.ready
   //   2. observe the terminal container with ResizeObserver (catches banner
   //      appearance, composer height, orientation, soft-keyboard, etc.)
-  //   3. also listen on window.resize for zoom / cross-frame edge cases
-  //   4. debounce sends; only emit a resize message when cols/rows change
+  //   3. listen on window.resize for zoom / cross-frame edge cases
+  //   4. listen on focus / visibilitychange / pageshow to catch the case
+  //      where the window/tab was backgrounded while a resize landed
+  //      (those events DON'T fire window.resize on the way back) — without
+  //      this, the terminal can be left at a stale cols/rows that doesn't
+  //      match the actual viewport, manifesting as either a clipped bottom
+  //      row or wrapping at ~60 columns inside a much wider viewport
+  //   5. always run TWO fits per scheduled trigger: an immediate one, then
+  //      a second on the next rAF, so any layout/font-metric settling that
+  //      lands between them is captured rather than baked-in as final
+  //   6. debounce sends; only emit a resize message when cols/rows change
   let lastCols = -1;
   let lastRows = -1;
   let pending: number | null = null;
@@ -126,6 +135,11 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     } catch {
       return;  // container has no size yet (hidden or detached)
     }
+    // Sanity guard: if fit ever computes 0 or 1 col/row (e.g. because the
+    // container measured tiny while hidden), don't propagate the bogus
+    // size to the server — a real terminal is always at least ~20×5.
+    // We'll get a real fit on the next event.
+    if (term.cols < 2 || term.rows < 2) return;
     if (term.cols === lastCols && term.rows === lastRows) return;
     lastCols = term.cols;
     lastRows = term.rows;
@@ -138,6 +152,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     pending = window.setTimeout(() => {
       pending = null;
       sendResize();
+      // Second pass on the next rAF: catches font/metric settling and
+      // layout reflows that the first fit measured mid-stream.
+      requestAnimationFrame(() => {
+        if (disposed) return;
+        sendResize();
+      });
     }, 60);
   };
 
@@ -148,11 +168,32 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // visualViewport changes when the soft keyboard opens / closes on mobile
   const vv = (window as any).visualViewport as VisualViewport | undefined;
   vv?.addEventListener("resize", scheduleResize);
+  // Focus / visibility / bfcache restore — see the comment above for why
+  // these matter (resize events don't fire when a window returns from
+  // background, even though the layout may need re-measuring).
+  const onFocus = () => scheduleResize();
+  const onVisibilityChange = () => {
+    if (document.visibilityState === "visible") scheduleResize();
+  };
+  const onPageShow = (e: PageTransitionEvent) => {
+    if (e.persisted) scheduleResize();
+  };
+  window.addEventListener("focus", onFocus);
+  window.addEventListener("pageshow", onPageShow);
+  document.addEventListener("visibilitychange", onVisibilityChange);
 
   // First fit only after fonts have loaded; otherwise cell metrics drift.
+  // Two fits: once immediately when fonts.ready resolves, then a second
+  // pass 200ms later to mop up any late layout shifts (banners, custom
+  // chrome height, the initial scrollbar appearing, etc.).
   const fontsReady = (document as any).fonts?.ready as Promise<unknown> | undefined;
   if (fontsReady) {
-    fontsReady.then(sendResize);
+    fontsReady.then(() => {
+      sendResize();
+      window.setTimeout(() => {
+        if (!disposed) sendResize();
+      }, 200);
+    });
   } else {
     requestAnimationFrame(sendResize);
   }
@@ -382,15 +423,21 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   wireScrollAffordances();
 
   /** Apply new display prefs live; cell-metric changes trigger a re-fit
-   * so cols/rows propagate to the backend. */
+   * so cols/rows propagate to the backend.
+   *
+   * xterm applies font/line-height changes asynchronously — its internal
+   * cell-metric measurement happens on the next render pass, not the
+   * moment we set the option. A synchronous sendResize() would measure
+   * stale cell dimensions and compute the wrong rows/cols. Route
+   * through scheduleResize() instead so the debounce + double-rAF
+   * pattern lets xterm re-measure first. */
   const applyPrefs = (next: DisplayPrefs): void => {
     term.options.fontSize = next.fontSize;
     term.options.lineHeight = next.lineHeight;
     term.options.letterSpacing = next.letterSpacing;
     term.options.cursorBlink = next.cursorBlink;
     term.options.cursorStyle = next.cursorStyle;
-    // Force a re-fit because cell dimensions changed.
-    sendResize();
+    scheduleResize();
   };
 
   /** Clear scrollback + visible AND reset terminal state so the next
@@ -433,6 +480,9 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       try { ro.disconnect(); } catch {}
       window.removeEventListener("resize", scheduleResize);
       window.removeEventListener("orientationchange", scheduleResize);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       vv?.removeEventListener("resize", scheduleResize);
       document.removeEventListener("keydown", onTermKeyForSearch);
       try { term.dispose(); } catch {}
