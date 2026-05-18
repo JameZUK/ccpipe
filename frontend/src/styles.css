@@ -176,10 +176,20 @@ a:hover { color: var(--fg); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  min-height: 100%;
+  /* Height (not just min-height) gives the frame a constrained box
+     that overflow-y can actually scroll inside. With min-height alone
+     the frame grows past viewport when the picker has many sessions /
+     many resume entries, and body's `overflow: hidden` clips the
+     overflow with no scrollable surface — the user sees the middle
+     of the list and can't reach the start or end.
+     justify-content removed; vertical centering is delegated to the
+     inner's margin-block: auto so the layout collapses to top-anchored
+     (scrollable) when content exceeds the viewport instead of pushing
+     content equally past both edges. */
+  height: 100%;
   width: 100%;
   padding: var(--s-6) var(--s-4);
+  overflow-y: auto;
   animation: frame-in var(--dur-slow) var(--ease-out);
 }
 @keyframes frame-in {
@@ -190,6 +200,11 @@ a:hover { color: var(--fg); }
 .frame__inner {
   width: 100%;
   max-width: 560px;
+  /* margin: auto on a flex item distributes spare space, so the inner
+     is vertically centered when there's room and top-anchored (no
+     margin) when content exceeds .frame's height. Pair with
+     overflow-y: auto on .frame above. */
+  margin-block: auto;
 }
 
 /* Grid with named areas keeps the gear pinned to the top-right at
