@@ -36,6 +36,12 @@ Thumbs.db
 Screenshot*
 scratch/
 tmp/
+temp/
+
+# External pentest / audit deliverables. Anchored to root so they
+# don't accidentally hide e.g. docs/report.md.
+/report.md
+/report-*.md
 
 # Claude Code workspace state (not part of ccpipe itself)
 .claude/
