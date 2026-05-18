@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shlex
 from pathlib import Path
@@ -20,7 +21,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import tmux
+from .. import sticky, tmux
 from ..auth import AuthDep, CsrfDep
 from ..tmux_control import CONTROL_SESSION_NAME
 from .fs import content_disposition_attachment
@@ -54,6 +55,11 @@ class SessionInfo(BaseModel):
     windows: int
     attached: bool
     created: int
+    # True when the session is in the persisted sticky map — i.e. it
+    # will be auto-recreated by the lifespan hook after a backend
+    # restart. Surfaced so the UI can render a pin indicator and flip
+    # the kebab menu label between "make sticky" / "make ephemeral".
+    sticky: bool = False
 
 
 class CreateSessionBody(BaseModel):
@@ -68,12 +74,38 @@ class RenameSessionBody(BaseModel):
     newName: str
 
 
+class StickyBody(BaseModel):
+    sticky: bool
+
+
+def _wrap_in_shell(claude_cmd: str) -> str:
+    """Wrap a claude invocation so the tmux session survives claude
+    exiting. When claude exits, ``exec $SHELL -i`` replaces the shell
+    process with an interactive shell in the same working directory,
+    so the pane lands at a prompt instead of dying. Without this the
+    only-pane closes → only-window closes → session is destroyed.
+    """
+    shell = os.environ.get("SHELL") or "/bin/bash"
+    return f"{claude_cmd}; exec {shlex.quote(shell)} -i"
+
+
+def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str]) -> SessionInfo:
+    return SessionInfo(
+        name=s.name,
+        windows=s.windows,
+        attached=s.attached,
+        created=s.created,
+        sticky=s.name in sticky_names,
+    )
+
+
 # ─── tmux session CRUD ────────────────────────────────────────────────────
 
 @router.get("/api/sessions", response_model=list[SessionInfo], dependencies=[AuthDep])
 async def list_sessions() -> list[SessionInfo]:
     sessions = await tmux.list_sessions()
-    return [SessionInfo(**s.__dict__) for s in sessions]
+    sticky_names = sticky.sticky_names()
+    return [_to_session_info(s, sticky_names) for s in sessions]
 
 
 @router.post("/api/sessions", response_model=SessionInfo,
@@ -105,14 +137,21 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
         # shlex.quote is belt-and-braces: the UUID regex already bounds
         # the value to [0-9a-fA-F-], but libtmux passes window_command
         # to a shell and we want zero ambiguity.
-        command = f"claude --resume {shlex.quote(body.resumeSessionId)}"
+        claude_cmd = f"claude --resume {shlex.quote(body.resumeSessionId)}"
     else:
-        command = "claude"
+        claude_cmd = "claude"
+
+    # Wrap in $SHELL -i so the tmux session survives claude exit and
+    # drops to a prompt in the original cwd. Without this the only-pane
+    # closes when claude exits → session is destroyed → reconnect path
+    # auto-creates a fresh session in $HOME, losing the cwd.
+    command = _wrap_in_shell(claude_cmd)
 
     await tmux.create_session(name, command=command, cwd=cwd)
+    sticky_names = sticky.sticky_names()
     for s in await tmux.list_sessions():
         if s.name == name:
-            return SessionInfo(**s.__dict__)
+            return _to_session_info(s, sticky_names)
     raise HTTPException(status_code=500, detail="session created but not found in list")
 
 
@@ -133,9 +172,13 @@ async def rename_session_endpoint(name: str, body: RenameSessionBody) -> Session
             raise HTTPException(status_code=409, detail="target name already in use")
         if not await tmux.rename_session(name, new_name):
             raise HTTPException(status_code=500, detail="rename failed")
+        # Preserve sticky flag across rename — without this a sticky
+        # session would silently lose its persisted entry on rename.
+        sticky.rename(name, new_name)
+    sticky_names = sticky.sticky_names()
     for s in await tmux.list_sessions():
         if s.name == new_name:
-            return SessionInfo(**s.__dict__)
+            return _to_session_info(s, sticky_names)
     raise HTTPException(status_code=500, detail="renamed but session vanished")
 
 
@@ -150,7 +193,41 @@ async def delete_session_endpoint(name: str) -> dict[str, bool]:
         raise HTTPException(status_code=404, detail="session not found")
     if not await tmux.kill_session(name):
         raise HTTPException(status_code=500, detail="kill failed")
+    # Auto-unflip sticky: kill implies the user no longer wants this
+    # session, so don't quietly resurrect it on the next backend start.
+    sticky.clear(name)
     return {"deleted": True}
+
+
+@router.post("/api/sessions/{name}/sticky", response_model=SessionInfo,
+              dependencies=[AuthDep, CsrfDep])
+async def set_sticky_endpoint(name: str, body: StickyBody) -> SessionInfo:
+    """Toggle the sticky flag for an existing session. Sticky sessions
+    are auto-recreated by the lifespan hook on backend restart, with
+    ``claude --continue`` so the most recent conversation for the cwd
+    resumes automatically."""
+    try:
+        name = tmux.safe_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _reject_control_session(name)
+    if not await tmux.session_exists(name):
+        raise HTTPException(status_code=404, detail="session not found")
+    if body.sticky:
+        cwd = await tmux.session_cwd(name)
+        if not cwd:
+            raise HTTPException(
+                status_code=500,
+                detail="could not resolve session cwd; cannot make sticky",
+            )
+        sticky.set_sticky(name, cwd)
+    else:
+        sticky.clear(name)
+    sticky_names = sticky.sticky_names()
+    for s in await tmux.list_sessions():
+        if s.name == name:
+            return _to_session_info(s, sticky_names)
+    raise HTTPException(status_code=500, detail="session vanished")
 
 
 # ─── Claude Code session listing + export ─────────────────────────────────

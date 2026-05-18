@@ -111,6 +111,32 @@ def _warn_if_tls_with_open_host_validation() -> None:
     log.warning(bar)
 
 
+async def _restore_sticky_sessions() -> None:
+    """Recreate any sticky session whose tmux side has vanished
+    (typically a fresh boot, or `tmux kill-server`). Idempotent —
+    sessions that already exist are skipped. Restore uses
+    ``claude --continue`` so claude itself picks up the most recent
+    conversation for the cwd; on claude exit we drop to an
+    interactive shell, same as freshly-created sessions."""
+    from . import sticky as _sticky
+    from . import tmux as _tmux
+    entries = _sticky.load()
+    if not entries:
+        return
+    restore_cmd = _sticky.build_restore_command()
+    for name, info in entries.items():
+        cwd = info.get("cwd")
+        if not cwd:
+            continue
+        try:
+            if await _tmux.session_exists(name):
+                continue
+            await _tmux.create_session(name, command=restore_cmd, cwd=cwd)
+            log.info("sticky: restored session %r in %s", name, cwd)
+        except Exception:
+            log.exception("sticky: failed to restore session %r", name)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Eagerly resolve (or generate + persist) credentials so the operator
@@ -128,6 +154,7 @@ async def lifespan(app: FastAPI):
         patch_settings_safe()
         patch_keybindings_safe()
     await apply_server_defaults()
+    await _restore_sticky_sessions()
     await control_client.start()
     if os.environ.get("CCPIPE_TTS", "off").lower() in ("kokoro", "on", "1", "true"):
         tts_service.set_enabled(True)

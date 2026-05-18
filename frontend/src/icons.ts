@@ -54,3 +54,9 @@ export const KEBAB_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidd
 export const FOLDER_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
 </svg>`;
+
+// Pin / thumbtack — used on sticky session rows.
+export const PIN_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M12 17v5"/>
+  <path d="M9 10.76V6h6v4.76a2 2 0 0 0 .59 1.42L17 13.59V17H7v-3.41l1.41-1.41A2 2 0 0 0 9 10.76z"/>
+</svg>`;

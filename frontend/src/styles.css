@@ -520,6 +520,16 @@ a:hover { color: var(--fg); }
   text-overflow: ellipsis;
   min-width: 0;
 }
+.session-row__pin {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.session-row__pin svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
 .session-row__status {
   color: var(--fg-muted);
   font-size: var(--t-xs);

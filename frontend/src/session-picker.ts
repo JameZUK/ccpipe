@@ -1,7 +1,7 @@
 import { apiJson, getFsConfig } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
 import { clearLastSession } from "./display-prefs";
-import { FOLDER_SVG, GEAR_SVG, KEBAB_SVG } from "./icons";
+import { FOLDER_SVG, GEAR_SVG, KEBAB_SVG, PIN_SVG } from "./icons";
 import { loadRecentDirs, pushRecentDir } from "./recent-dirs";
 // `./settings` is dynamically imported in the gear click handler so it
 // stays out of the session-picker chunk.
@@ -11,6 +11,10 @@ type SessionInfo = {
   windows: number;
   attached: boolean;
   created: number;
+  // True if the backend has this session in its sticky map, i.e. it
+  // will be auto-recreated on backend restart. Drives the pin glyph
+  // on the row and the kebab menu's toggle label.
+  sticky: boolean;
 };
 
 type ClaudeSession = {
@@ -421,6 +425,13 @@ export function renderSessionPicker(
     const nameEl = document.createElement("div");
     nameEl.className = "session-row__name";
     nameEl.textContent = s.name;
+    // Inline pin glyph appears when the session is sticky, so the
+    // state is visible at a glance without opening the kebab menu.
+    const pinEl = document.createElement("span");
+    pinEl.className = "session-row__pin";
+    pinEl.innerHTML = PIN_SVG;
+    pinEl.title = "sticky — restored on backend restart";
+    pinEl.hidden = !s.sticky;
     const statusEl = document.createElement("span");
     statusEl.className = "session-row__status"
       + (s.attached ? " session-row__status--attached" : "");
@@ -448,15 +459,20 @@ export function renderSessionPicker(
     renameItem.className = "session-row__menu__item";
     renameItem.textContent = "rename";
 
+    const stickyItem = document.createElement("button");
+    stickyItem.type = "button";
+    stickyItem.className = "session-row__menu__item";
+    stickyItem.textContent = s.sticky ? "make ephemeral" : "make sticky";
+
     const killItem = document.createElement("button");
     killItem.type = "button";
     killItem.className = "session-row__menu__item danger";
     killItem.textContent = "kill";
 
-    menu.append(renameItem, killItem);
+    menu.append(renameItem, stickyItem, killItem);
     actions.append(kebab, menu);
 
-    row.append(dot, nameEl, statusEl, actions);
+    row.append(dot, nameEl, pinEl, statusEl, actions);
 
     // Row-level click + Enter/Space open the session. Skip when the
     // click bubbles from the inline rename input or the kebab.
@@ -505,6 +521,25 @@ export function renderSessionPicker(
       e.stopPropagation();
       closeMenu();
       startRename(row, s, nameEl);
+    });
+
+    // ── Sticky toggle ──
+    stickyItem.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      closeMenu();
+      const wanted = !s.sticky;
+      try {
+        const updated = await apiJson<SessionInfo>(
+          `/api/sessions/${encodeURIComponent(s.name)}/sticky`,
+          { method: "POST", body: JSON.stringify({ sticky: wanted }) },
+        );
+        // Local mirror so a quick re-open of the menu reflects the new
+        // state without waiting for the full refresh() round-trip.
+        s.sticky = updated.sticky;
+        refresh();
+      } catch (err) {
+        showError(`sticky toggle failed: ${(err as Error).message}`);
+      }
     });
 
     // ── Kill with inline confirm ──
