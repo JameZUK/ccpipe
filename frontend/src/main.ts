@@ -49,13 +49,16 @@ if ("serviceWorker" in navigator) {
 // overlap actually moves. ResizeObserver on #terminal picks that up
 // and re-fits through the normal path.
 function applyOsChromeCompensation(): void {
+  let rawOverlap = 0;
   let overlap = 0;
   try {
     const avail = screen.availHeight;
     if (typeof avail === "number" && avail > 0) {
-      overlap = Math.max(0, window.innerHeight - avail);
+      rawOverlap = window.innerHeight - avail;
+      overlap = Math.max(0, rawOverlap);
     }
   } catch { /* screen unavailable in this environment */ }
+  const beforeClamp = overlap;
   // Ignore sub-row noise (<8px, almost certainly DPI rounding) AND
   // implausibly large values (>200px, almost certainly a misdetection
   // on a multi-monitor or misbehaving-compositor setup where
@@ -63,6 +66,16 @@ function applyOsChromeCompensation(): void {
   // spans multiple). A real OS taskbar fits between ~24 and ~80 px.
   if (overlap < 8 || overlap > 200) overlap = 0;
   document.documentElement.style.setProperty("--os-chrome-overlap", `${overlap}px`);
+  // Diagnostic: verify the function runs AND that the math is what
+  // we expect on this user's setup. Filter "ccpipe-debug" in devtools.
+  // eslint-disable-next-line no-console
+  console.log("[ccpipe-debug] os-chrome", {
+    innerHeight: window.innerHeight,
+    availHeight: (() => { try { return screen.availHeight; } catch { return undefined; } })(),
+    rawOverlap,
+    beforeClamp,
+    overlap,
+  });
 }
 
 // ─── Diagnostic logging (temporary) ──────────────────────────────────────
@@ -94,7 +107,8 @@ function _ccpipeDebugSnapshot(): Record<string, unknown> {
     vpH: viewport?.clientHeight,
     vpSt: viewport?.scrollTop,
     vpSh: viewport?.scrollHeight,
-    overlap: document.documentElement.style.getPropertyValue("--os-chrome-overlap"),
+    overlap: getComputedStyle(document.documentElement)
+      .getPropertyValue("--os-chrome-overlap").trim(),
     docVis: document.visibilityState,
     hasFocus: document.hasFocus(),
   };
