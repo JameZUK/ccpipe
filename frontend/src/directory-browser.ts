@@ -6,7 +6,8 @@
 // GET /api/fs/list?path=... — caching would mask permission changes and
 // the response is small enough to refetch cheaply.
 
-import { CLOSE_SVG } from "./icons";
+import { apiJson } from "./api";
+import { CLOSE_SVG, FOLDER_SVG } from "./icons";
 
 type FsListResponse = {
   path: string;
@@ -72,16 +73,26 @@ export function openDirectoryBrowser(
   const list = document.createElement("div");
   list.className = "dir-browser__list";
 
-  // Footer: status text + pick button
+  // Footer: status on the left, action group on the right.
   const foot = document.createElement("div");
   foot.className = "dir-browser__foot";
   const status = document.createElement("div");
   status.className = "dir-browser__status";
+  // Two-button cluster so `space-between` on the foot pushes them as a
+  // unit to the right, with status free to absorb the remaining width.
+  const actions = document.createElement("div");
+  actions.className = "dir-browser__actions";
+  const mkdirBtn = document.createElement("button");
+  mkdirBtn.type = "button";
+  mkdirBtn.className = "btn btn--ghost dir-browser__mkdir";
+  mkdirBtn.title = "Create new directory here";
+  mkdirBtn.innerHTML = `${FOLDER_SVG}<span>new dir</span>`;
   const pickBtn = document.createElement("button");
   pickBtn.type = "button";
   pickBtn.className = "btn btn--primary";
   pickBtn.textContent = "use this directory";
-  foot.append(status, pickBtn);
+  actions.append(mkdirBtn, pickBtn);
+  foot.append(status, actions);
 
   sheet.append(head, pathBar, list, foot);
   overlay.append(sheet);
@@ -174,6 +185,37 @@ export function openDirectoryBrowser(
       return;
     }
     load(v);
+  });
+
+  mkdirBtn.addEventListener("click", async () => {
+    // Prompt + POST /api/fs/mkdir + reload the current view. Matches
+    // the file-panel mkdir UX so users get one consistent flow for
+    // creating directories regardless of which dialog they're in.
+    const name = window.prompt("new directory name:");
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.includes("/") || trimmed === "." || trimmed === "..") {
+      setStatus("invalid directory name", true);
+      return;
+    }
+    const target = currentPath.endsWith("/")
+      ? currentPath + trimmed
+      : currentPath + "/" + trimmed;
+    mkdirBtn.disabled = true;
+    setStatus("creating…");
+    try {
+      await apiJson("/api/fs/mkdir", {
+        method: "POST",
+        body: JSON.stringify({ path: target }),
+      });
+      // Reload then navigate into the newly-created dir so the user
+      // can either drop a session into it directly or browse further.
+      await load(target);
+    } catch (err) {
+      setStatus(`mkdir failed: ${(err as Error).message}`, true);
+    } finally {
+      mkdirBtn.disabled = false;
+    }
   });
 
   pickBtn.addEventListener("click", () => dismiss(currentPath));
