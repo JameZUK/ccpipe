@@ -5,6 +5,7 @@
 // FAB) so the soft keyboard opening doesn't shove it under the user's
 // finger and cancel the touch.
 
+import { getFsConfig } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
 import { MIC_SVG, SEND_SVG, STOP_SVG } from "./icons";
 import { consumePendingShare } from "./main";
@@ -77,10 +78,17 @@ export function mountMobileUI(parent: HTMLElement,
   attachBtn.className = "composer__attach";
   attachBtn.title = "Insert file or directory path";
   attachBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05 12.25 20.24a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95L9.78 18.46a2 2 0 0 1-2.83-2.83L15.5 7.07"/></svg>`;
-  attachBtn.addEventListener("click", (e) => {
+  attachBtn.addEventListener("click", async (e) => {
     e.preventDefault();
+    // Open the browser at the fs jail root rather than the legacy
+    // hardcoded "/home" — the jail root is whatever CCPIPE_FS_ROOT
+    // is set to (or the operator's home by default), and /home itself
+    // is the parent of the default jail so the browser used to 403
+    // on first open. cached, so cheap on repeat presses.
+    let initialPath = "/";
+    try { initialPath = (await getFsConfig()).root; } catch { /* keep "/" */ }
     openDirectoryBrowser(document.body, {
-      initialPath: "/home",
+      initialPath,
       onPick: (p) => {
         const v = textarea.value;
         // Ensure single-space separation around the inserted path so

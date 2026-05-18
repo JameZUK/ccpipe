@@ -616,11 +616,22 @@ export function renderSessionPicker(
   // First render
   renderRecent();
   refresh();
-  // Default the cwd input to the user's home (a sensible starting point
-  // from which Browse can navigate). The actual home string comes from
-  // either the last recent dir or, failing that, /home (server side
-  // will redirect to the user's home if they navigate up).
+  // Default the cwd input to: a recent dir if we have one, otherwise
+  // the fs jail root (operator's home or whatever CCPIPE_FS_ROOT is
+  // set to). The previous hardcoded "/home" was annoying — it's the
+  // parent of the default jail root, so /api/fs/list 403s on it and
+  // the user has to drill in by hand on every fresh session.
   const dirs = loadRecentDirs();
-  cwdInput.value = dirs[0] ?? "/home";
-  void onCwdChanged();
+  if (dirs[0]) {
+    cwdInput.value = dirs[0];
+    void onCwdChanged();
+  } else {
+    void getFsConfig().then((cfg) => {
+      cwdInput.value = cfg.root;
+      void onCwdChanged();
+    }).catch(() => {
+      cwdInput.value = "/";
+      void onCwdChanged();
+    });
+  }
 }
