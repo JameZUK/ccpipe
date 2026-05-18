@@ -1747,7 +1747,7 @@ body.file-editor-resizing {
 
 .composer {
   display: grid;
-  grid-template-columns: auto 1fr auto;        /* attach · input · mic */
+  grid-template-columns: auto 1fr auto auto;   /* attach · input · mic · enter */
   align-items: end;
   gap: var(--s-2);
   padding: var(--s-2) var(--s-3);
@@ -1788,20 +1788,31 @@ body.file-editor-resizing {
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  /* Tighter vertical padding so a single-line prompt doesn't eat the
-   * vertical space the modifier-row's Enter button now wants for a
-   * bigger touch target. autoresize() in mobile.ts still grows the
-   * textarea up to max-height as the user types. */
-  padding: var(--s-2) var(--s-3);
+  /* Default (collapsed) state — unfocused + empty textareas read as a
+   * single-line chip. Tight vertical padding + small min-height keeps
+   * the composer row compact when nothing's been typed yet. Tap the
+   * input (or paste content) and the :focus / :not(:placeholder-shown)
+   * rule below promotes it to its bigger form. */
+  padding: var(--s-1) var(--s-3);
   font-family: var(--font-mono);
   font-size: var(--t-md);
   line-height: 1.4;
   max-height: 9rem;
-  min-height: 2rem;
+  min-height: 1.8rem;
   outline: none;
   display: block;
   transition: border-color var(--dur-fast) var(--ease-out),
+              min-height var(--dur-fast) var(--ease-out),
+              padding var(--dur-fast) var(--ease-out),
               opacity var(--dur-fast) var(--ease-out);
+}
+/* Expanded state — focused or has content. Slightly taller and more
+ * generous vertical padding. autoresize() in mobile.ts continues to
+ * grow it up to max-height as multi-line content lands. */
+.composer__input:focus,
+.composer__input:not(:placeholder-shown) {
+  min-height: 2.4rem;
+  padding: var(--s-2) var(--s-3);
 }
 .composer__input:focus { border-color: var(--accent); }
 .composer__input::placeholder { color: var(--fg-faint); }
@@ -1891,6 +1902,40 @@ body.file-editor-resizing {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* Enter button — sits right of mic on the composer row. Accent-coloured
+ * primary action so it reads as the "go" target. type=submit on the
+ * element means tapping goes through composer.addEventListener("submit"),
+ * the same path as the soft-keyboard Enter. */
+.composer__enter {
+  height: 2.4rem;
+  min-width: 3.2rem;
+  padding: 0 var(--s-3);
+  background: var(--accent);
+  color: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              opacity var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.composer__enter:hover:not(:disabled),
+.composer__enter:active:not(:disabled) {
+  background: var(--fg);
+  border-color: var(--fg);
+}
+.composer__enter:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .composer__mic.recording {
   background: var(--critical);
   color: var(--bg);
@@ -1916,15 +1961,22 @@ body.file-editor-resizing {
 }
 .modifier-row::-webkit-scrollbar { display: none; }
 .modifier-row button {
-  flex: 0 0 auto;
-  min-width: 2.6rem;
-  padding: var(--s-2) var(--s-3);
+  /* Equal-share distribution across the row. Enter moved to the
+   * composer row, so what's left (Esc / Tab / / / Ctrl / arrows) has
+   * the whole modifier-row width to spread into. flex-basis:0 means
+   * each child starts at 0 and grows proportionally; min-width is a
+   * floor for narrow viewports where the row would otherwise pack
+   * unreadably tight (overflow-x:auto on the parent picks up any
+   * residual overflow). */
+  flex: 1 1 0;
+  min-width: 2.4rem;
+  padding: var(--s-2) var(--s-2);
   background: var(--bg-input);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: var(--t-sm);
+  font-size: var(--t-md);
   cursor: pointer;
   transition: all var(--dur-fast) var(--ease-out);
   /* Hold-to-repeat: without these, a long-press selects the button's
@@ -1941,27 +1993,6 @@ body.file-editor-resizing {
   background: var(--accent);
   color: var(--bg);
   border-color: var(--accent);
-}
-
-/* Enter is now the primary submit action (the old send button was
- * removed; the textarea's Enter-key handler and the row's Enter
- * button both go through the same composer.requestSubmit() path).
- * Give it a wider footprint + accent colour so it reads as the
- * dominant call-to-action on the row. */
-.modifier-row__enter {
-  flex: 1.4 0 auto;
-  min-width: 4.5rem;
-  background: var(--accent) !important;
-  color: var(--bg) !important;
-  border-color: var(--accent) !important;
-  font-weight: 600;
-}
-.modifier-row__enter:active {
-  /* :active background already comes from the generic rule above —
-   * this just re-asserts because the !important on accent in the
-   * default state would otherwise win even during press. */
-  background: var(--fg) !important;
-  border-color: var(--fg) !important;
 }
 
 /* ─── Banners (warning / info above the terminal) ──────────────────────── */

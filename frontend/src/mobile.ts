@@ -112,11 +112,18 @@ export function mountMobileUI(parent: HTMLElement,
   // the current value, so this is settled before paint in practice.
   micBtn.hidden = true;
 
-  // No separate send button — the modifier-row Enter key doubles as
-  // "send" (see KEYS handler below) so the composer reclaims the
-  // horizontal space for the textarea and the Enter button can be
-  // sized bigger as a primary action.
-  composer.append(attachBtn, inputbox, micBtn);
+  // Enter sits right of the textarea now (moved out of the modifier
+  // row). type="submit" so a tap triggers the composer's submit
+  // handler — same path as the soft-keyboard / keydown Enter, which
+  // means it sends the textarea contents + \r and clears, or with an
+  // empty textarea sends a bare \r to nudge past a claude prompt.
+  const enterBtn = document.createElement("button");
+  enterBtn.type = "submit";
+  enterBtn.className = "composer__enter";
+  enterBtn.title = "Send (Enter)";
+  enterBtn.textContent = "Enter";
+
+  composer.append(attachBtn, inputbox, micBtn, enterBtn);
 
   const autoresize = () => {
     textarea.style.height = "auto";
@@ -218,15 +225,21 @@ export function mountMobileUI(parent: HTMLElement,
   composer.addEventListener("submit", (e) => {
     e.preventDefault();
     const v = textarea.value;
-    if (!v) return;
-    // Append \r, not \n. Claude Code's TUI runs the PTY in raw mode and
-    // interprets carriage-return as "submit prompt" — the same byte a
-    // physical Enter from xterm produces. With \n the line lands in
-    // claude's input field but the prompt never fires, so the user had
-    // to tap the Enter shortcut on the modifier row to push it through.
-    socket.send({ type: "input", data: v + "\r" });
-    textarea.value = "";
-    autoresize();
+    if (v) {
+      // Append \r, not \n. Claude Code's TUI runs the PTY in raw mode
+      // and interprets carriage-return as "submit prompt" — the same
+      // byte a physical Enter from xterm produces. With \n the line
+      // lands in claude's input field but the prompt never fires.
+      socket.send({ type: "input", data: v + "\r" });
+      textarea.value = "";
+      autoresize();
+      return;
+    }
+    // Empty composer + Enter: nudge claude past a TUI prompt that
+    // expects a bare keypress (e.g. "press Enter to continue") without
+    // the user having to type a space first. Matches what the old
+    // modifier-row Enter did before it was promoted into the composer.
+    socket.send({ type: "input", data: "\r" });
   });
 
   // Mic gestures. Tap = toggle (existing behaviour). Long-press =
@@ -287,6 +300,7 @@ export function mountMobileUI(parent: HTMLElement,
     composer.classList.toggle("offline", !connected);
     textarea.disabled = !connected || composer.classList.contains("recording");
     micBtn.disabled = !connected;
+    enterBtn.disabled = !connected || composer.classList.contains("recording");
     textarea.placeholder = connected ? "Type a prompt…" : "offline — waiting to reconnect…";
   });
 
@@ -339,6 +353,7 @@ export function mountMobileUI(parent: HTMLElement,
       ? "Tap to stop dictation"
       : "Tap to start dictation, tap again to stop";
     textarea.disabled = recording;
+    enterBtn.disabled = recording;
     if (recording) {
       clearAttachTimer();
       attachAttempts = 0;
@@ -368,12 +383,11 @@ export function mountMobileUI(parent: HTMLElement,
   const KEYS: Array<{ label: string; key: string; bytes?: string }> = [
     { label: "Esc", key: "esc", bytes: "\x1b" },
     { label: "Tab", key: "tab", bytes: "\t" },
-    // Enter and "/" are the two most-used keys for talking to Claude
-    // Code's TUI: Enter accepts prompts / submits the current line, "/"
-    // opens the slash-command menu. \r matches what a physical Enter
-    // sends from xterm so claude reads it in raw mode the same way.
+    // "/" opens claude's slash-command menu — kept here as a quick-tap
+    // shortcut so the user doesn't have to switch keyboard layers on
+    // mobile. Enter used to live next to it; it now sits on the
+    // composer row (composer__enter) for a more obvious "send" target.
     { label: "/", key: "slash", bytes: "/" },
-    { label: "Enter", key: "enter", bytes: "\r" },
     { label: "Ctrl", key: "ctrl" },
     { label: "↑", key: "up", bytes: "\x1b[A" },
     { label: "↓", key: "down", bytes: "\x1b[B" },
@@ -403,22 +417,9 @@ export function mountMobileUI(parent: HTMLElement,
       modifierRow.append(btn);
       continue;
     }
-    // Enter is special: when the textarea has content it submits it
-    // (same path as the old send button — text + \r, then clear).
-    // When the textarea is empty it sends a bare \r so the user can
-    // still nudge claude past prompts that need an Enter without
-    // typing anything. Hold-to-repeat then behaves naturally: after
-    // a submit the textarea is empty, so subsequent fires are bare \r.
-    if (k.key === "enter") {
-      btn.classList.add("modifier-row__enter");
-    }
     let initialTimer: number | null = null;
     let repeatTimer: number | null = null;
     const fire = () => {
-      if (k.key === "enter" && textarea.value) {
-        composer.requestSubmit();
-        return;
-      }
       socket.send({ type: "input", data: k.bytes ?? "" });
     };
     const stop = () => {
