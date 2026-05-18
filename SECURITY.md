@@ -58,6 +58,37 @@ Out of scope:
 Only the latest commit on `main` receives security fixes. There are
 no version branches.
 
+## Threat model & regression tests
+
+ccpipe has been externally pen-tested in three passes (May 2026). The
+deliverables that landed in this repository as a result:
+
+- **[`docs/threat-model.md`](docs/threat-model.md)** — design-level
+  threat model for the prompt-injection / remote-shell-for-Claude
+  class of risks that can't be tested with curl. Worth re-reading
+  whenever you change the WebSocket protocol, terminal rendering,
+  share-target handling, or anything Claude touches via tool use.
+- **[`backend/tests/test_external_security.py`](backend/tests/test_external_security.py)** —
+  live-HTTP regression suite that pins every defensive property
+  observed across the three audit passes. Talks to a real running
+  instance over HTTP (not the in-process TestClient), so it also
+  catches deployment-layer regressions (nginx config, systemd
+  drop-ins, reverse-proxy header injection) that
+  `test_review_fixes.py` can't see.
+
+  Default `pytest` skips it. To run against a local instance:
+
+  ```bash
+  CCPIPE_EXTERNAL_BASE=http://localhost:8080 \
+      CCPIPE_EXTERNAL_HOST=ccpipe.example.com \
+      pytest -v backend/tests/test_external_security.py
+  ```
+
+  Rate-limit tests are further gated by
+  `CCPIPE_ALLOW_DESTRUCTIVE_TESTS=1` because they sleep 65 s after
+  tripping the limiter — don't enable that flag against production
+  unless you're OK locking your own IP out for a minute.
+
 ## Known limitations
 
 These are accepted trade-offs, documented here so you don't need to

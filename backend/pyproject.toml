@@ -26,6 +26,9 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "slow: tests that take noticeably longer than the rest (sleeps, network)",
+]
 
 [build-system]
 requires = ["hatchling"]
