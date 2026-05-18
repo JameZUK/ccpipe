@@ -8,7 +8,6 @@ import "@xterm/xterm/css/xterm.css";
 import {
   DisplayPrefs,
   loadDisplayPrefs,
-  loadScrollOffset,
   saveScrollOffset,
   saveSessionFontSize,
 } from "./display-prefs";
@@ -317,30 +316,18 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     pillCleanup = () => viewport.removeEventListener("scroll", updatePill);
     updatePill();
 
-    // Restore the saved scroll position after enough time for tmux's
-    // history capture + initial redraw to land in xterm. ~1.2s is a
-    // generous lower-bound for "content has settled".
-    //
-    // userInteracted is set the moment the user touches the viewport
-    // (scroll, pointer, key) so the restore can bail rather than
-    // yanking an actively-scrolling user back to the saved offset.
-    let userInteracted = false;
-    const markInteracted = () => { userInteracted = true; };
-    viewport.addEventListener("scroll", markInteracted, { passive: true, once: true });
-    viewport.addEventListener("pointerdown", markInteracted, { passive: true, once: true });
-    viewport.addEventListener("wheel", markInteracted, { passive: true, once: true });
-    if (sessionName) {
-      const savedOffset = loadScrollOffset(sessionName);
-      if (savedOffset !== null && savedOffset > 0) {
-        setTimeout(() => {
-          if (userInteracted) return;
-          if (viewport.scrollHeight <= viewport.clientHeight) return;
-          const target =
-            viewport.scrollHeight - viewport.clientHeight - savedOffset;
-          if (target > 0) viewport.scrollTop = target;
-        }, 1200);
-      }
-    }
+    // (Removed) The 1200ms savedOffset restoration timer that used to
+    // try to put the viewport back where the user was last reading
+    // before a reload. In practice it failed in two unfortunate ways:
+    //   - when the user had been at the bottom (live tail) it was a
+    //     no-op (saved=0), so it never helped in the common case;
+    //   - when the user HAD scrolled up, it yanked them BACK to that
+    //     spot after a reload, which they almost always perceive as
+    //     "ccpipe just dropped me out of the live tail" — exactly the
+    //     symptom that motivated removing it.
+    // Live tail is now the unconditional behaviour after attach/replay.
+    // The user can still scroll up to read; the live-pill button takes
+    // them back when they want.
 
     // PointerEvents in capture phase. Pointer Events unify touch + mouse
     // and are dispatched even when xterm has bound listeners deeper in
@@ -399,14 +386,37 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    * write starts from a clean slate. Used on every WS hello so the
    * backend's pane-replay replaces xterm's buffer rather than appending.
    * Without this, content that scrolled out of view during a network
-   * blip never made it into xterm's scrollback. */
+   * blip never made it into xterm's scrollback.
+   *
+   * Why scrollToBottom() after reset(): xterm.js tracks an internal
+   * "user has scrolled away from the bottom" flag and only auto-follows
+   * the cursor while that flag is false. Right after reset() the
+   * viewport ends up at scrollTop=0 with an empty buffer; when the
+   * subsequent history-replay bytes arrive and scrollHeight grows, the
+   * raw DOM state (scrollTop=0, scrollHeight>>clientHeight) reads as
+   * "user is scrolled up" and xterm refuses to follow. The viewport
+   * stays pinned at the TOP of the replayed buffer (oldest entries
+   * visible) while the live tail streams off-screen. Explicitly
+   * calling scrollToBottom() here clears that flag so auto-follow
+   * works on the first write. See report from 2026-05-18 reconnect
+   * symptom. */
   const resetBuffer = (): void => {
     if (disposed) return;
     try { term.reset(); } catch {}
+    try { term.scrollToBottom(); } catch {}
+  };
+
+  /** Force the viewport to the bottom. Exposed so the hello handler in
+   * main.ts can call it once after the history-replay chunk lands —
+   * a belt-and-braces backstop in case xterm's auto-follow state hasn't
+   * fully recovered from the preceding reset(). */
+  const scrollToBottom = (): void => {
+    if (disposed) return;
+    try { term.scrollToBottom(); } catch {}
   };
 
   return {
-    term, writeToTerm, sendResize, applyPrefs, resetBuffer,
+    term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom,
     dispose: () => {
       disposed = true;
       pillCleanup?.();

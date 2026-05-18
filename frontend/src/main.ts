@@ -359,6 +359,13 @@ async function attachTerminal(session: string): Promise<void> {
   // (re)connect starts with a clean buffer before the server's pane
   // replay writes the current scrollback into it.
   let resetTerminal: (() => void) | null = null;
+  let scrollTerminalToBottom: (() => void) | null = null;
+  // Flag set by onHello, cleared on the next onOutput. After the post-
+  // hello pane-replay lands we explicitly drop the viewport to the
+  // bottom so xterm's auto-follow can't get stuck pinned at the TOP
+  // of the just-replayed buffer (the "I reconnected and now I'm
+  // looking at the OLDEST scrollback" symptom).
+  let bottomOnNextOutput = false;
   let mic: MicStreamerType | null = null;
   // Pass the session name so mute state is scoped per-session — muting
   // one conversation no longer silences a sibling tab.
@@ -569,6 +576,15 @@ async function attachTerminal(session: string): Promise<void> {
       // stale content so the replay accurately reflects tmux's current
       // pane — closing the "new output not in scrollback" gap.
       resetTerminal?.();
+      // Arm a one-shot "scroll to bottom" for the first PTY chunk that
+      // arrives next (which is the history replay). After reset()
+      // xterm.js sometimes leaves its auto-follow flag in a state where
+      // it WON'T track the cursor as the replay scrolls lines into
+      // scrollback — the viewport stays at scrollTop=0 and the user
+      // sees the OLDEST replayed entries. Forcing scrollToBottom after
+      // the first post-hello write puts auto-follow back in the
+      // correct state for the live tail that follows.
+      bottomOnNextOutput = true;
       sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(msg.session)}`;
       const secure = isSecureContext();
       setMicAvailable(!!(msg.voice && secure));
@@ -613,7 +629,13 @@ async function attachTerminal(session: string): Promise<void> {
       // Notify if the tab is backgrounded (user opted in via settings).
       notifications.fireResponseReady(lastSpokenText, session);
     },
-    onOutput(data) { writeToTerm?.(data); },
+    onOutput(data) {
+      writeToTerm?.(data);
+      if (bottomOnNextOutput) {
+        bottomOnNextOutput = false;
+        scrollTerminalToBottom?.();
+      }
+    },
     onLatency(ms) {
       // Bucket the number so the UI reads as "fine / busy / janky"
       // without me having to read the digits. Hide the label when no
@@ -629,6 +651,7 @@ async function attachTerminal(session: string): Promise<void> {
   const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session);
   writeToTerm = terminalApi.writeToTerm;
   resetTerminal = terminalApi.resetBuffer;
+  scrollTerminalToBottom = terminalApi.scrollToBottom;
 
   // Cross-tab pref sync: if another tab changes display settings, mirror them here.
   const unsubPrefs = onDisplayPrefsChange((p) => terminalApi.applyPrefs(p));
