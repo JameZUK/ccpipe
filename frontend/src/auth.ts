@@ -79,15 +79,41 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   const inner = document.createElement("div");
   inner.className = "frame__inner";
 
+  // Minimal head: just the animated mark + a small lower-case wordmark.
+  // Deliberately no descriptive tagline ("remote shell" / "claude code")
+  // — the login screen is the most-scraped surface, so we don't tell
+  // unauthenticated visitors what's behind it.
+  //
+  // The mark is a four-petal "spark" — two crossed diamond shapes —
+  // that breathes and rotates slowly. Pure SVG + CSS, no extra JS or
+  // requestAnimationFrame loop.
   const head = document.createElement("div");
-  head.className = "frame__head";
+  head.className = "login__head";
+
+  const mark = document.createElement("div");
+  mark.className = "login-mark";
+  mark.setAttribute("aria-hidden", "true");
+  // Each petal uses the SAME path (a vertical diamond centred on the
+  // origin). The per-petal rotation is applied in CSS via a custom
+  // property so it can compose with the breathing scale animation —
+  // a SVG `transform=` attribute would be overridden by CSS transform.
+  mark.innerHTML = `
+    <svg class="login-mark__svg" viewBox="-40 -40 80 80">
+      <g class="login-mark__spark">
+        <path class="login-mark__petal login-mark__petal--a" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+        <path class="login-mark__petal login-mark__petal--b" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+        <path class="login-mark__petal login-mark__petal--c" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+        <path class="login-mark__petal login-mark__petal--d" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+      </g>
+      <circle class="login-mark__core" cx="0" cy="0" r="2.4"/>
+    </svg>
+  `;
+
   const word = document.createElement("div");
-  word.className = "wordmark huge";
+  word.className = "wordmark small login__wordmark";
   word.innerHTML = `cc<span class="dot"></span>pipe`;
-  const tagline = document.createElement("div");
-  tagline.className = "tagline";
-  tagline.textContent = "remote shell · claude code";
-  head.append(word, tagline);
+
+  head.append(mark, word);
 
   const wrap = document.createElement("div");
   wrap.className = "login";
@@ -162,9 +188,13 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   const err = document.createElement("div");
   err.className = "error";
 
+  // Hint is hidden by default; we only surface it on the TOTP step
+  // ("from your authenticator app"). The pre-fix "first run? credentials
+  // are in ~/.local/state/ccpipe/credentials" hint leaked the install
+  // layout to anyone who hit the login page.
   const hint = document.createElement("div");
   hint.className = "login__hint";
-  hint.textContent = "first run? credentials are in ~/.local/state/ccpipe/credentials";
+  hint.hidden = true;
 
   wrap.append(legend, form, otpForm, err, hint);
   inner.append(head, wrap);
@@ -190,6 +220,7 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
         otpForm.hidden = false;
         legend.textContent = "Enter the 6-digit code";
         hint.textContent = "from your authenticator app";
+        hint.hidden = false;
         setTimeout(() => otpInput.focus(), 50);
         return;
       }
@@ -227,7 +258,8 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
     otpForm.hidden = true;
     form.hidden = false;
     legend.textContent = "Sign in";
-    hint.textContent = "first run? credentials are in ~/.local/state/ccpipe/credentials";
+    hint.textContent = "";
+    hint.hidden = true;
     err.textContent = "";
     otpInput.value = "";
     setTimeout(() => userInput.focus(), 50);

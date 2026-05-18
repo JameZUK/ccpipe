@@ -226,6 +226,109 @@ a:hover { color: var(--fg); }
 
 /* ─── Login ────────────────────────────────────────────────────────────── */
 
+/* The login head is intentionally bare: an animated spark + the
+   ``ccpipe`` wordmark, no descriptive tagline. The pre-auth surface
+   shouldn't advertise what's behind it. */
+.login__head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-3);
+  margin-bottom: var(--s-6);
+  padding-bottom: var(--s-5);
+  border-bottom: 1px solid var(--border);
+}
+.login__wordmark {
+  color: var(--fg-dim);
+  font-size: var(--t-md);
+  letter-spacing: 0.32em;
+  /* The wordmark fades in slightly behind the mark so the eye is drawn
+     to the animation first. */
+  opacity: 0;
+  animation: login-wordmark-in 1.4s var(--ease-out) 0.5s forwards;
+}
+@keyframes login-wordmark-in {
+  to { opacity: 1; }
+}
+
+/* The mark: four diamond "petals" rotated 0/45/90/135° around a small
+   amber core. Two animations layer:
+     - spark-spin   : the whole group rotates at 18s / revolution
+     - spark-breathe: each petal stretches + dims on a 4s loop, with
+                       staggered delays so the four points pulse out of
+                       phase like a slow heartbeat
+   Plus a drop-shadow glow that breathes on the same cadence as the
+   core dot. respects prefers-reduced-motion below. */
+.login-mark {
+  width: 88px;
+  height: 88px;
+  display: grid;
+  place-items: center;
+  /* Soft amber halo that pulses with the mark — re-stated as a CSS
+     custom prop so the @keyframes can animate it without recomputing. */
+  filter: drop-shadow(0 0 12px rgba(245, 165, 36, 0.18));
+  animation: spark-halo 4s var(--ease-out) infinite;
+}
+.login-mark__svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.login-mark__spark {
+  transform-origin: 0 0;
+  animation: spark-spin 18s linear infinite;
+}
+/* Petal rotation lives in a CSS custom prop so the keyframes can
+   combine it with scale + keep the petals locked at their angles
+   throughout the breathe animation. (An SVG `transform=` attribute
+   would be overridden the moment the CSS animation took effect.) */
+.login-mark__petal {
+  fill: var(--accent);
+  transform-origin: 0 0;
+  transform: rotate(var(--rot, 0deg)) scale(1, 0.92);
+  opacity: 0.65;
+  animation: spark-breathe 4s var(--ease-out) infinite;
+}
+.login-mark__petal--a { --rot:   0deg; animation-delay:  0s; }
+.login-mark__petal--b { --rot:  45deg; animation-delay: -1s; }
+.login-mark__petal--c { --rot:  90deg; animation-delay: -2s; }
+.login-mark__petal--d { --rot: 135deg; animation-delay: -3s; }
+.login-mark__core {
+  fill: var(--accent);
+  transform-origin: 0 0;
+  animation: spark-core 4s var(--ease-out) infinite;
+}
+
+@keyframes spark-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+/* Petal breathing: stretches outward + dims at the same beat. The
+   rotate() factor reads --rot so each petal stays at its angle while
+   scaling. Staggered animation-delay above makes the four petals
+   pulse out of phase. */
+@keyframes spark-breathe {
+  0%, 100% { transform: rotate(var(--rot, 0deg)) scale(1, 0.92);    opacity: 0.65; }
+  50%      { transform: rotate(var(--rot, 0deg)) scale(1.08, 1.18); opacity: 1;    }
+}
+@keyframes spark-core {
+  0%, 100% { transform: scale(0.85); opacity: 0.55; }
+  50%      { transform: scale(1.25); opacity: 1;    }
+}
+@keyframes spark-halo {
+  0%, 100% { filter: drop-shadow(0 0 8px  rgba(245, 165, 36, 0.12)); }
+  50%      { filter: drop-shadow(0 0 18px rgba(245, 165, 36, 0.32)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-mark,
+  .login-mark__spark,
+  .login-mark__petal,
+  .login-mark__core { animation: none; }
+  .login-mark { filter: drop-shadow(0 0 10px rgba(245, 165, 36, 0.18)); }
+  .login__wordmark { animation: none; opacity: 1; }
+}
+
 .login {
   display: flex;
   flex-direction: column;
