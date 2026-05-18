@@ -1,7 +1,7 @@
 {
   "name": "ccpipe",
   "short_name": "ccpipe",
-  "description": "Remote shell for Claude Code",
+  "description": "ccpipe",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

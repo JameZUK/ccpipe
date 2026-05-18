@@ -1646,6 +1646,50 @@ body.file-editor-resizing {
 
 /* ─── Composer + modifier row (mobile) ─────────────────────────────────── */
 
+/* PWA share_target review chip — appears above the composer when the
+   user has launched ccpipe via a share intent (?text=…). User must
+   click [insert] before the text touches the composer. Click [discard]
+   drops it without ever putting it on the prompt. */
+.share-review {
+  margin: var(--s-2) var(--s-3) 0;
+  padding: var(--s-3) var(--s-4);
+  background: var(--bg-elev);
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.share-review__label {
+  font-size: var(--t-xs);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.share-review__body {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg-dim);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--s-2) var(--s-3);
+  /* Hard cap so a multi-KB shared payload doesn't push the composer
+     off-screen — operator can still scroll the chip if they want to
+     read the full body. */
+  max-height: 8rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.share-review__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+
 .composer {
   display: grid;
   grid-template-columns: auto 1fr auto auto;   /* attach · input · mic · send */

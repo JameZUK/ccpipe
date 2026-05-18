@@ -1,12 +1,26 @@
-// Cookie-based auth client. Two-step flow when TOTP is enrolled:
-//   1. POST {username, password}      → if otp_required, switch UI to
-//                                        the code-entry step.
-//   2. POST {username, password, code} → grants the session on success.
+// Cookie-based auth client.
+//
+// Wire flow: ONE POST. The client always submits {username, password,
+// code?} together and the server returns an identical 401 "invalid
+// credentials" if any part is wrong (or if a TOTP-enrolled account
+// omitted the code) — so the response distinguishes only "authenticated"
+// vs "not", with no positive password-correctness signal before the
+// code is checked. Accounts without TOTP can leave `code` blank.
+//
+// UI flow: TWO screens. Step 1 collects username + password and is
+// purely client-side (no API call); clicking Sign in advances to a
+// dedicated step 2 that asks for the 6-digit code. Step 2 fires the
+// single POST. Users without TOTP just leave the code blank and submit.
+// This keeps the dedicated "enter your code" surface the operator
+// prefers while preserving the single-call semantics that don't leak
+// the password-correctness oracle.
 
 export interface AuthStatus {
   required: boolean;
   authenticated: boolean;
   username?: string | null;
+  // Retained for backward compat with the wire model only — the server
+  // no longer sets it, and the client never branches on it.
   otp_required?: boolean;
   otp_enrolled?: boolean;
 }
@@ -122,7 +136,11 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   legend.className = "login__legend";
   legend.textContent = "Sign in";
 
-  // ── Step 1: username + password ─────────────────────────────────
+  // ── Step 1: username + password (client-side only) ──────────────
+  // Submitting this form does NOT hit the server — it just transitions
+  // the UI to step 2. The server only sees a single POST once the user
+  // has also entered (or skipped) the code, which is what closes the
+  // password-correctness oracle.
   const form = document.createElement("form");
   form.className = "login__form";
 
@@ -148,13 +166,15 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   const btn = document.createElement("button");
   btn.type = "submit";
   btn.className = "btn btn--primary";
-  btn.textContent = "Sign in";
+  btn.textContent = "Continue";
   submitRow.append(btn);
 
   form.append(userInput, passInput, submitRow);
 
   // ── Step 2: TOTP code ───────────────────────────────────────────
-  // Hidden until the password step indicates otp_required.
+  // Always rendered for everyone — we never ask the server pre-auth
+  // whether TOTP is enrolled, so the UI can't branch on it. Users
+  // without TOTP just leave the field blank and click Sign in.
   const otpForm = document.createElement("form");
   otpForm.className = "login__form";
   otpForm.hidden = true;
@@ -169,14 +189,14 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   otpInput.inputMode = "numeric";
   otpInput.maxLength = 8;
   otpInput.pattern = "[0-9]*";
-  otpInput.required = true;
+  // NOT required — accounts without TOTP submit an empty code.
 
   const otpSubmitRow = document.createElement("div");
   otpSubmitRow.className = "login__submit";
   const otpBtn = document.createElement("button");
   otpBtn.type = "submit";
   otpBtn.className = "btn btn--primary";
-  otpBtn.textContent = "Verify";
+  otpBtn.textContent = "Sign in";
   const otpBackBtn = document.createElement("button");
   otpBackBtn.type = "button";
   otpBackBtn.className = "btn btn--ghost";
@@ -188,10 +208,6 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   const err = document.createElement("div");
   err.className = "error";
 
-  // Hint is hidden by default; we only surface it on the TOTP step
-  // ("from your authenticator app"). The pre-fix "first run? credentials
-  // are in ~/.local/state/ccpipe/credentials" hint leaked the install
-  // layout to anyone who hit the login page.
   const hint = document.createElement("div");
   hint.className = "login__hint";
   hint.hidden = true;
@@ -203,49 +219,42 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
 
   setTimeout(() => userInput.focus(), 50);
 
-  // Step 1 submit — password.
-  form.addEventListener("submit", async (e) => {
+  // Step 1 → step 2 transition. NO API call here.
+  form.addEventListener("submit", (e) => {
     e.preventDefault();
     err.textContent = "";
-    btn.disabled = true;
-    try {
-      const status = await login(userInput.value, passInput.value);
-      if (status.authenticated) {
-        onSuccess();
-        return;
-      }
-      if (status.otp_required) {
-        // Switch to step 2.
-        form.hidden = true;
-        otpForm.hidden = false;
-        legend.textContent = "Enter the 6-digit code";
-        hint.textContent = "from your authenticator app";
-        hint.hidden = false;
-        setTimeout(() => otpInput.focus(), 50);
-        return;
-      }
-      err.textContent = status.error || "invalid credentials";
-      passInput.select();
-    } catch (e) {
-      err.textContent = (e as Error).message;
-    } finally {
-      btn.disabled = false;
-    }
+    form.hidden = true;
+    otpForm.hidden = false;
+    legend.textContent = "Enter the 6-digit code";
+    hint.textContent = "from your authenticator app";
+    hint.hidden = false;
+    setTimeout(() => otpInput.focus(), 50);
   });
 
-  // Step 2 submit — TOTP code (re-submits username+password+code).
+  // Step 2 — the only request. Submits {username, password, code?} as
+  // one shot and handles a single generic error path.
   otpForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     err.textContent = "";
     otpBtn.disabled = true;
     try {
-      const status = await login(userInput.value, passInput.value, otpInput.value);
+      const code = otpInput.value.trim();
+      const status = await login(userInput.value, passInput.value, code || undefined);
       if (status.authenticated) {
         onSuccess();
         return;
       }
-      err.textContent = status.error || "invalid code";
-      otpInput.select();
+      // Single uniform error path — no per-field reveal. Bounce the
+      // UI back to step 1 so the operator re-enters from scratch;
+      // clear the code so a typo isn't retried unintentionally.
+      err.textContent = status.error || "invalid credentials";
+      otpForm.hidden = true;
+      form.hidden = false;
+      legend.textContent = "Sign in";
+      hint.hidden = true;
+      hint.textContent = "";
+      otpInput.value = "";
+      passInput.select();
     } catch (e) {
       err.textContent = (e as Error).message;
     } finally {
@@ -253,7 +262,7 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
     }
   });
 
-  // Back button returns to step 1.
+  // Back button: undo the client-side step transition (no API call).
   otpBackBtn.addEventListener("click", () => {
     otpForm.hidden = true;
     form.hidden = false;

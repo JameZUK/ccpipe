@@ -140,7 +140,22 @@ async def lifespan(app: FastAPI):
         await control_client.stop()
 
 
-app = FastAPI(title="ccpipe", version="0.1.0", lifespan=lifespan)
+# Disable the OpenAPI surface (/docs, /redoc, /openapi.json) by default
+# so an unauthenticated visitor can't enumerate every route, body schema,
+# and Pydantic model name — pre-auth knowledge that materially helps an
+# attacker map the API. The dev workflow can opt back in with
+# CCPIPE_ENABLE_DOCS=1; everything else stays as-is.
+_DOCS_ENABLED = os.environ.get("CCPIPE_ENABLE_DOCS", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+app = FastAPI(
+    title="ccpipe",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+)
 
 # When behind TLS, harden cookie attrs and pin trusted hosts. The
 # CCPIPE_BEHIND_TLS env toggle exists so the default LAN-HTTP path
@@ -190,9 +205,14 @@ async def _security_headers(request: Request, call_next):
     headers.setdefault("Permissions-Policy",
                        "microphone=(self), camera=(), geolocation=()")
     if _BEHIND_TLS:
+        # HSTS preload-ready: 2-year max-age, include subdomains, preload.
+        # Single canonical source — the bundled nginx sample no longer
+        # emits this so we don't end up with two HSTS headers (browsers
+        # honour only the first, dropping a "preload" directive that
+        # only appeared on the second was the exact failure mode we hit).
         headers.setdefault(
             "Strict-Transport-Security",
-            "max-age=31536000; includeSubDomains",
+            "max-age=63072000; includeSubDomains; preload",
         )
     return response
 

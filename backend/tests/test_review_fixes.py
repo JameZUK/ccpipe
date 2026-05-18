@@ -228,8 +228,14 @@ def test_login_no_totp_returns_authenticated(authed_client):
 
 
 def test_totp_enroll_then_login_requires_code(authed_client):
-    """End-to-end enrollment + two-step login. Uses the actual server
-    pyotp instance, so a code generated here is valid."""
+    """End-to-end enrollment + single-step login with TOTP. Uses the
+    actual server pyotp instance, so a code generated here is valid.
+
+    Note: the previous two-step flow returned 200 / otp_required=true
+    when the password was correct but the code was missing. That was a
+    positive password-correctness oracle. Server now returns a uniform
+    401 for any failure (wrong password, missing code, wrong code).
+    """
     import pyotp
     # 1. Enroll.
     r = authed_client.post("/api/auth/totp/enroll",
@@ -251,17 +257,16 @@ def test_totp_enroll_then_login_requires_code(authed_client):
                             json={"currentPassword": "letmein",
                                   "secret": secret, "code": code})
     assert r.status_code == 200
-    # 3. Log out, then try password-only login — should signal otp_required.
+    # 3. Log out, then try password-only login — must now be 401
+    # (uniform error, not a 200 with otp_required=true).
     authed_client.post("/api/auth/logout",
                        headers={"X-Requested-By": "ccpipe"})
     r = authed_client.post("/api/auth/login",
                            headers={"X-Requested-By": "ccpipe"},
                            json={"username": "alice", "password": "letmein"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["authenticated"] is False
-    assert body["otp_required"] is True
-    # 4. Submit with a valid code → authenticated.
+    assert r.status_code == 401, r.text
+    assert r.json()["detail"] == "invalid credentials"
+    # 4. Submit username+password+valid code in one shot → authenticated.
     code = pyotp.TOTP(secret).now()
     r = authed_client.post("/api/auth/login",
                            headers={"X-Requested-By": "ccpipe"},
@@ -270,6 +275,43 @@ def test_totp_enroll_then_login_requires_code(authed_client):
     assert r.status_code == 200
     body = r.json()
     assert body["authenticated"] is True
+
+
+def test_login_wrong_code_and_missing_code_indistinguishable(authed_client):
+    """A wrong-password and a right-password-with-wrong-code response
+    must look identical: same status, same body. Otherwise the
+    response leaks password correctness before TOTP is checked, which
+    is useful for triaging credential-stuffing dumps.
+    """
+    import pyotp
+    # Enrol so the account requires TOTP.
+    r = authed_client.post("/api/auth/totp/enroll",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein"})
+    secret = r.json()["secret"]
+    code = pyotp.TOTP(secret).now()
+    r = authed_client.post("/api/auth/totp/confirm",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "secret": secret, "code": code})
+    assert r.status_code == 200
+    authed_client.post("/api/auth/logout",
+                       headers={"X-Requested-By": "ccpipe"})
+
+    headers = {"X-Requested-By": "ccpipe"}
+    # Wrong password (any code).
+    r_wp = authed_client.post("/api/auth/login", headers=headers,
+        json={"username": "alice", "password": "WRONG", "code": "000000"})
+    # Right password, missing code.
+    r_nc = authed_client.post("/api/auth/login", headers=headers,
+        json={"username": "alice", "password": "letmein"})
+    # Right password, wrong code.
+    r_wc = authed_client.post("/api/auth/login", headers=headers,
+        json={"username": "alice", "password": "letmein", "code": "000000"})
+    for r in (r_wp, r_nc, r_wc):
+        assert r.status_code == 401, r.text
+        body = r.json()
+        assert body["detail"] == "invalid credentials"
 
 
 def test_totp_enroll_rejects_wrong_current_password(authed_client):
@@ -331,7 +373,8 @@ def test_totp_code_replay_refused(authed_client):
                             json={"currentPassword": "letmein",
                                   "secret": secret, "code": code})
     assert r.status_code == 200
-    # First login with the current code succeeds.
+    # First login with the current code succeeds (single-step now —
+    # we submit username/password/code together in one POST).
     authed_client.post("/api/auth/logout", headers={"X-Requested-By": "ccpipe"})
     code = pyotp.TOTP(secret).now()
     r = authed_client.post("/api/auth/login",
@@ -851,6 +894,100 @@ def test_csp_connect_src_no_longer_includes_wildcard_ws(authed_client):
     # The scheme-only tokens are out.
     assert " ws:" not in csp
     assert " wss:" not in csp
+
+
+# ── External review round-3: docs disabled + pre-auth otp_enrolled ──
+
+def test_openapi_docs_disabled_by_default(authed_client):
+    """External review finding #1: /docs, /redoc, /openapi.json gave
+    anyone an annotated map of every route + body schema. Defaults must
+    now be 404. An operator who wants them in dev sets
+    CCPIPE_ENABLE_DOCS=1 and reboots."""
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        r = authed_client.get(path)
+        assert r.status_code == 404, f"{path}: expected 404, got {r.status_code}"
+
+
+def test_auth_status_does_not_leak_otp_enrolled_pre_auth(tmp_path, monkeypatch):
+    """External review finding #3 + #8: pre-fix, /api/auth/status told
+    an unauthenticated visitor whether the account had TOTP enrolled
+    AND /api/auth/logout disagreed with /api/auth/status on the same
+    field. Both must now return otp_enrolled=False when unauthenticated.
+    """
+    monkeypatch.setenv("CCPIPE_SESSION_SECRET_FILE", str(tmp_path / "secret"))
+    monkeypatch.setenv("CCPIPE_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("CCPIPE_AUTH_USERNAME", "alice")
+    monkeypatch.setenv("CCPIPE_AUTH_PASSWORD", "letmein")
+    monkeypatch.setenv("CCPIPE_FS_ROOT", str(tmp_path))
+    import importlib
+    import ccpipe.auth as auth
+    import ccpipe.main as m
+    import ccpipe.routes.auth as routes_auth
+    auth.reset_cached_credential()
+    routes_auth.reset_throttle_state()
+    importlib.reload(m)
+
+    with TestClient(m.app) as c:
+        # Log in (no TOTP yet) so we can enrol.
+        r = c.post("/api/auth/login",
+                   headers={"X-Requested-By": "ccpipe"},
+                   json={"username": "alice", "password": "letmein"})
+        assert r.status_code == 200
+        # Enrol TOTP.
+        import pyotp
+        r = c.post("/api/auth/totp/enroll",
+                   headers={"X-Requested-By": "ccpipe"},
+                   json={"currentPassword": "letmein"})
+        secret = r.json()["secret"]
+        code = pyotp.TOTP(secret).now()
+        r = c.post("/api/auth/totp/confirm",
+                   headers={"X-Requested-By": "ccpipe"},
+                   json={"currentPassword": "letmein",
+                         "secret": secret, "code": code})
+        assert r.status_code == 200
+        # Log out.
+        r = c.post("/api/auth/logout", headers={"X-Requested-By": "ccpipe"})
+        assert r.status_code == 200
+        # Pre-auth status: must NOT reveal otp_enrolled.
+        r = c.get("/api/auth/status")
+        body = r.json()
+        assert body["authenticated"] is False
+        assert body.get("otp_enrolled") is False, body
+        # Post-auth (sign back in with code): otp_enrolled should be true.
+        code = pyotp.TOTP(secret).now()
+        r = c.post("/api/auth/login",
+                   headers={"X-Requested-By": "ccpipe"},
+                   json={"username": "alice", "password": "letmein", "code": code})
+        assert r.status_code == 200
+        r = c.get("/api/auth/status")
+        body = r.json()
+        assert body["authenticated"] is True
+        assert body["otp_enrolled"] is True
+
+
+def test_canonical_hsts_header(tmp_path, monkeypatch):
+    """External review finding #2: HSTS must be the single canonical
+    preload-ready value. The bundled nginx sample no longer emits HSTS,
+    so the app is the only origin and must send the long max-age +
+    preload form."""
+    monkeypatch.setenv("CCPIPE_BEHIND_TLS", "1")
+    monkeypatch.setenv("CCPIPE_TRUSTED_HOSTS", "testserver")
+    monkeypatch.setenv("CCPIPE_ALLOWED_ORIGINS", "https://testserver")
+    monkeypatch.setenv("CCPIPE_SESSION_SECRET_FILE", str(tmp_path / "secret"))
+    monkeypatch.setenv("CCPIPE_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("CCPIPE_AUTH_USERNAME", "alice")
+    monkeypatch.setenv("CCPIPE_AUTH_PASSWORD", "letmein")
+    import importlib
+    import ccpipe.auth as auth
+    import ccpipe.main as m
+    auth.reset_cached_credential()
+    importlib.reload(m)
+    with TestClient(m.app) as c:
+        r = c.get("/api/health")
+        hsts = r.headers.get("strict-transport-security", "")
+        assert "max-age=63072000" in hsts
+        assert "includeSubDomains" in hsts
+        assert "preload" in hsts
 
 
 # ── #21 reconnect debounce is a frontend-only concern; verified by inspection.

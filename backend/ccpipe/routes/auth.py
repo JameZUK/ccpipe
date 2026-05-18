@@ -47,11 +47,15 @@ router = APIRouter()
 @router.get("/api/auth/status", response_model=AuthStatus)
 async def auth_status(request: Request) -> AuthStatus:
     authed = is_session_authed(request.session)
+    # Don't leak account-level security state (e.g. whether TOTP is
+    # enrolled) to unauthenticated callers — that hands an attacker
+    # writing automation a target/skip signal for free. Surface
+    # otp_enrolled only once we've established the session is real.
     return AuthStatus(
         required=is_auth_enabled(),
         authenticated=authed,
         username=session_username(request.session) if authed else None,
-        otp_enrolled=totp_enrolled(),
+        otp_enrolled=totp_enrolled() if authed else False,
     )
 
 
@@ -128,28 +132,31 @@ async def auth_login(body: LoginBody, request: Request) -> AuthStatus:
         raise HTTPException(status_code=429,
                             detail="too many attempts; try again in a minute",
                             headers={"Retry-After": str(int(_LOGIN_BUCKET_WINDOW_S))})
-    if not verify_credential(body.username, body.password):
-        # Sleep on failures to slow online brute-force regardless of
-        # whether the throttle window has elapsed.
-        await asyncio.sleep(1.0)
-        raise HTTPException(status_code=401, detail="invalid credentials")
+
+    # Single-step login. The previous two-step flow returned a 200 with
+    # `otp_required=true` once the password was correct but before any
+    # TOTP check — that response was a positive password-correctness
+    # oracle, useful for triaging credential-stuffing dumps. We now
+    # validate password AND code together and return a single uniform
+    # 401 on any failure (wrong password, missing/wrong code), so the
+    # response distinguishes only "authenticated" vs "not".
+    password_ok = verify_credential(body.username, body.password)
     cred = get_credential()
-    # Two-factor gate. When TOTP is enrolled we don't grant a session
-    # until the client resubmits with a valid 6-digit code. The
-    # password-step response signals `otp_required=true` so the
-    # frontend can switch to the code-entry view.
     if cred.totp_secret:
-        if not body.code:
-            return AuthStatus(
-                required=True,
-                authenticated=False,
-                username=None,
-                otp_required=True,
-                otp_enrolled=True,
-            )
-        if not totp_verify(body.code):
+        # When TOTP is enrolled, a missing or wrong code is just another
+        # form of "invalid credentials" — no leak about which part was
+        # right. Note: totp_verify is called on a code-only when present
+        # so the burn-list isn't poked by empty submissions.
+        code = (body.code or "").strip()
+        code_ok = bool(code) and totp_verify(code)
+        if not (password_ok and code_ok):
             await asyncio.sleep(1.0)
-            raise HTTPException(status_code=401, detail="invalid code")
+            raise HTTPException(status_code=401, detail="invalid credentials")
+    else:
+        if not password_ok:
+            await asyncio.sleep(1.0)
+            raise HTTPException(status_code=401, detail="invalid credentials")
+
     request.session["authed"] = True
     request.session["username"] = cred.username
     # Stamp the version so a later credential change can invalidate this

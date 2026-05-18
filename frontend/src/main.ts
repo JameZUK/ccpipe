@@ -26,10 +26,21 @@ if ("serviceWorker" in navigator) {
 }
 
 // PWA share_target: when the user shares text/URL/title from another
-// app into ccpipe, the launch URL is /?text=…&url=…&title=…. Snag
-// those values once into sessionStorage so the composer can pre-fill
-// them after the user picks a session, and scrub the query so a refresh
-// doesn't re-trigger.
+// app into ccpipe, the launch URL is /?text=…&url=…&title=…. We snag
+// those values once into sessionStorage so the composer's onmount path
+// can offer them — but we now ASK before pasting rather than dropping
+// arbitrary text straight into the prompt (the composer feeds a shell).
+//
+// Two deliberate changes from the pre-fix version:
+//   1. We DO NOT call history.replaceState() any more. The URL keeps
+//      its query params so the operator can see exactly where the text
+//      came from before they accept it. Silently scrubbing the URL was
+//      what made the previous behaviour a usable social-engineering
+//      vector (e.g. a Slack link preview that would silently pre-fill
+//      a destructive command).
+//   2. The consumer must call ``commitPendingShare()`` to actually take
+//      the text — peek + commit are separate, so a caller can render
+//      a review prompt first.
 function _capturePendingShare(): void {
   try {
     const params = new URLSearchParams(location.search);
@@ -40,18 +51,38 @@ function _capturePendingShare(): void {
     }
     if (parts.length === 0) return;
     sessionStorage.setItem("ccpipe.pendingShare", parts.join("\n"));
-    history.replaceState({}, "", location.pathname);
+    // Intentionally NOT calling history.replaceState() — see comment.
   } catch {}
 }
 _capturePendingShare();
 
-/** Reads the pending shared text (if any) and clears it. */
-export function consumePendingShare(): string | null {
+/** Peek at pending shared text without consuming it. */
+export function peekPendingShare(): string | null {
+  try {
+    return sessionStorage.getItem("ccpipe.pendingShare");
+  } catch { return null; }
+}
+
+/** Drop any pending shared text without inserting it (user dismissed). */
+export function discardPendingShare(): void {
+  try { sessionStorage.removeItem("ccpipe.pendingShare"); } catch {}
+}
+
+/** Read the pending shared text and clear it. Use only after the user
+ * has explicitly opted in to inserting it into the composer. */
+export function commitPendingShare(): string | null {
   try {
     const v = sessionStorage.getItem("ccpipe.pendingShare");
     if (v) sessionStorage.removeItem("ccpipe.pendingShare");
     return v;
   } catch { return null; }
+}
+
+/** Deprecated alias retained so any cached frontend bundle that still
+ * imports the old name doesn't break. New code should use peek/commit
+ * via the review-chip flow. */
+export function consumePendingShare(): string | null {
+  return commitPendingShare();
 }
 
 function wsUrlFor(session: string): string {

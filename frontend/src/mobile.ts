@@ -8,7 +8,7 @@
 import { getFsConfig } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
 import { MIC_SVG, SEND_SVG, STOP_SVG } from "./icons";
-import { consumePendingShare } from "./main";
+import { commitPendingShare, discardPendingShare, peekPendingShare } from "./main";
 import { TerminalSocket } from "./ws";
 import type { Waveform } from "./waveform";
 
@@ -436,12 +436,58 @@ export function mountMobileUI(parent: HTMLElement,
   parent.append(composer, modifierRow);
 
   // PWA share_target hand-off: if the user shared text into ccpipe
-  // from another app, pre-fill the composer with it. They can edit and
-  // send normally.
-  const pending = consumePendingShare();
+  // from another app, render an explicit review chip ABOVE the composer
+  // showing the text and asking [insert] / [discard]. The pre-fix
+  // version dropped the shared text straight into the prompt and
+  // silently scrubbed the URL, which made a crafted link from any
+  // chat/email client a usable command-injection social-engineering
+  // vector for a shell-adjacent tool.
+  const pending = peekPendingShare();
   if (pending) {
-    textarea.value = pending;
-    autoresize();
+    const review = document.createElement("div");
+    review.className = "share-review";
+    review.setAttribute("role", "dialog");
+    review.setAttribute("aria-label", "Shared text — review before insert");
+
+    const label = document.createElement("div");
+    label.className = "share-review__label";
+    label.textContent = "Shared text received";
+
+    const body = document.createElement("pre");
+    body.className = "share-review__body";
+    body.textContent = pending;
+
+    const actions = document.createElement("div");
+    actions.className = "share-review__actions";
+
+    const insertBtn = document.createElement("button");
+    insertBtn.type = "button";
+    insertBtn.className = "btn btn--primary";
+    insertBtn.textContent = "insert";
+    insertBtn.addEventListener("click", () => {
+      const text = commitPendingShare();
+      if (text) {
+        textarea.value = text;
+        autoresize();
+        textarea.focus({ preventScroll: true });
+      }
+      review.remove();
+    });
+
+    const discardBtn = document.createElement("button");
+    discardBtn.type = "button";
+    discardBtn.className = "btn btn--ghost";
+    discardBtn.textContent = "discard";
+    discardBtn.addEventListener("click", () => {
+      discardPendingShare();
+      review.remove();
+    });
+
+    actions.append(discardBtn, insertBtn);
+    review.append(label, body, actions);
+    // Insert above the composer so it's the first thing the operator
+    // sees on session-open. They have to actively choose to insert.
+    composer.parentElement?.insertBefore(review, composer);
   }
 
   // Focus the composer so the user can start typing immediately on
