@@ -165,10 +165,15 @@ Environment=CCPIPE_TRUSTED_HOSTS=ccpipe.example.com
 Environment=CCPIPE_ALLOWED_ORIGINS=https://ccpipe.example.com
 
 # Reset ExecStart and re-run uvicorn with proxy-headers honoured.
+# Replace the path below if you installed to somewhere other than
+# the recommended ~/.local/share/ccpipe (the install script bakes
+# the right path into the base unit; this drop-in is just adding
+# the proxy-headers flag).
 ExecStart=
-ExecStart=%h/Projects/ccpipe/backend/.venv/bin/uvicorn ccpipe.main:app \
+ExecStart=%h/.local/share/ccpipe/backend/.venv/bin/uvicorn ccpipe.main:app \
     --host 0.0.0.0 --port 8080 \
-    --proxy-headers --forwarded-allow-ips=10.0.0.5
+    --proxy-headers --forwarded-allow-ips=10.0.0.5 \
+    --timeout-keep-alive 5 --limit-concurrency 200
 EOF
 systemctl --user daemon-reload && systemctl --user restart ccpipe
 ```
