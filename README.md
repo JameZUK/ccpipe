@@ -18,6 +18,44 @@ Terminal stack unchanged: tmux owns the session, xterm.js renders it,
 the unmodified `claude` CLI does the API work. ccpipe is the bridge in
 the middle.
 
+## What it looks like
+
+Mobile (PWA, installable to the home screen):
+
+<table>
+<tr>
+<td align="center"><img src="docs/screenshots/Mobile-StartSession.jpg" width="220" alt="Mobile session picker"></td>
+<td align="center"><img src="docs/screenshots/Mobile-CreateSession.jpg" width="220" alt="New session dialog with directory browse"></td>
+<td align="center"><img src="docs/screenshots/Mobile-Session.jpg" width="220" alt="Live session with voice"></td>
+</tr>
+<tr>
+<td align="center"><sub>Pick an existing tmux session…</sub></td>
+<td align="center"><sub>…or start a new one in any directory…</sub></td>
+<td align="center"><sub>…then drive it by keyboard or voice.</sub></td>
+</tr>
+</table>
+
+Desktop:
+
+<table>
+<tr>
+<td align="center"><img src="docs/screenshots/Desktop-Login.png" width="380" alt="Login screen"></td>
+<td align="center"><img src="docs/screenshots/Desktop-Display-Settings.png" width="380" alt="Display settings tab"></td>
+</tr>
+<tr>
+<td align="center"><sub>Login</sub></td>
+<td align="center"><sub>Display — font, line height, cursor</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screenshots/Desktop-Voice-Settings.png" width="380" alt="Voice and voice-input settings"></td>
+<td align="center"><img src="docs/screenshots/Desktop-Account-Settings.png" width="380" alt="Account and two-factor settings"></td>
+</tr>
+<tr>
+<td align="center"><sub>Voice (TTS) + voice-input timings</sub></td>
+<td align="center"><sub>Account + two-factor (TOTP)</sub></td>
+</tr>
+</table>
+
 ## Architecture
 
 ccpipe runs as a `systemd --user` service on the host. No Docker — the

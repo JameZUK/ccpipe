@@ -102,8 +102,37 @@ apps, leave the default alone and instead pick `ccpipe_browser_mic`
 when you start a `/voice` session — or flip the default only for the
 duration of dictation and flip it back.
 
-Kokoro-FastAPI lives outside ccpipe; point `CCPIPE_KOKORO_URL` at your
-running instance.
+### Text-to-speech
+
+ccpipe POSTs each utterance to an **OpenAI-compatible
+`/v1/audio/speech` endpoint** and streams the audio back to the
+browser; the voice list in Settings → Voice is fetched from
+`/v1/audio/voices` on the same endpoint. Any TTS service that
+implements this shape works — OpenAI's actual API, a self-hosted
+compatible proxy, or one of several open-source TTS wrappers.
+ccpipe doesn't care which you pick.
+
+The default and recommended option is **Kokoro-FastAPI** —
+<https://github.com/remsky/Kokoro-FastAPI> — which wraps the
+[Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) TTS model and
+ships several install paths (GPU Docker image, CPU Docker image,
+bare-metal Python). Follow the upstream README for the path that
+fits your hardware.
+
+Once your TTS service is reachable, point ccpipe at it and enable TTS
+in your ccpipe systemd drop-in:
+
+```ini
+Environment=CCPIPE_TTS=kokoro
+Environment=CCPIPE_KOKORO_URL=http://localhost:8880
+Environment=CCPIPE_TTS_VOICE=bf_emma         # optional initial default
+```
+
+The env-var name is historical — `CCPIPE_KOKORO_URL` can point at any
+OpenAI-compatible audio endpoint, not just Kokoro-FastAPI. TTS-related
+Settings (voice, speech rate, "what to read aloud", per-session mute)
+are then editable from Settings → Voice and persist in
+`~/.local/state/ccpipe/config.json`.
 
 ## Voice-input behaviour (Settings → Voice → "voice input")
 
