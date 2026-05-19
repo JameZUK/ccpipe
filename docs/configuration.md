@@ -76,10 +76,31 @@ You can also drive the underlying script manually:
 ./scripts/setup-virtual-mic.sh up      # load
 ./scripts/setup-virtual-mic.sh down    # unload
 ./scripts/setup-virtual-mic.sh         # (defaults to up)
+```
 
-# (Optional) make it the default input so /voice picks it up automatically.
+### Coexistence with a real microphone
+
+Loading the virtual mic is purely additive — it appears in `pactl list
+short sources` alongside any real (USB / built-in / Bluetooth) inputs
+you already have. The unload path matches on `source_name=ccpipe_mic`
+specifically, so it can only ever touch its own module.
+
+If you want `claude /voice` to pick up the virtual mic automatically,
+the simplest path is:
+
+```bash
 pactl set-default-source ccpipe_mic
 ```
+
+**Heads up — this flips the system-wide default input.** Every app
+that grabs "the default mic" without explicitly selecting a device
+(video calls, voice-memo apps, browser `getUserMedia` calls without a
+`deviceId`, etc.) will then read silence from the pipe whenever ccpipe
+isn't actively streaming. If you already rely on a real mic for other
+apps, leave the default alone and instead pick `ccpipe_browser_mic`
+(the friendly device description) in claude's audio source picker
+when you start a `/voice` session — or flip the default only for the
+duration of dictation and flip it back.
 
 Kokoro-FastAPI lives outside ccpipe; point `CCPIPE_KOKORO_URL` at your
 running instance.
