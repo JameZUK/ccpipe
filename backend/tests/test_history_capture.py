@@ -98,6 +98,7 @@ async def test_capture_returns_empty_on_timeout():
             await asyncio.sleep(10)
             return (b"never", b"")
         def kill(self): pass
+        async def wait(self): return 0
     with patch("ccpipe.ws.asyncio.create_subprocess_exec",
                return_value=_Hanging()):
         with patch("ccpipe.ws._HISTORY_CAPTURE_TIMEOUT_S", 0.05):

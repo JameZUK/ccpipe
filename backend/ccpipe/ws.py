@@ -570,6 +570,12 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         # forward_pty_to_ws raised at least once (typically a transient
         # WS stall) and the client should have reconnected to recover
         # via capture-pane replay. Search the journal for "ws closed:".
+        # Fold in any chunks that pty_relay's bounded read queue had
+        # to drop (saturated by a stalled WS pump).
+        try:
+            counters.bytes_lost += pty_proc.bytes_dropped()
+        except Exception:
+            pass
         duration = time.monotonic() - counters.started_at
         log.info(
             "ws closed: session=%s duration=%.1fs frames=%d "
@@ -679,10 +685,11 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
         out, _ = await asyncio.wait_for(proc.communicate(),
                                          timeout=_HISTORY_CAPTURE_TIMEOUT_S)
     except asyncio.TimeoutError:
-        try:
+        # kill() AND wait() — without the wait() asyncio leaks the
+        # Process transport / child-watcher state.
+        with contextlib.suppress(ProcessLookupError):
             proc.kill()
-        except ProcessLookupError:
-            pass
+            await proc.wait()
         return b""
     if proc.returncode != 0 or not out:
         return b""

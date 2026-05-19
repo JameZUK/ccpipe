@@ -13,6 +13,7 @@ the backend's live counters in a single log line.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -23,7 +24,14 @@ from pydantic import BaseModel, Field
 
 from .. import tmux
 from ..auth import AuthDep, CsrfDep
+from ..tmux_control import CONTROL_SESSION_NAME
 from ..ws import _active_counters
+
+# Cap how many capture-pane subprocesses can run concurrently across
+# all in-flight /api/debug/snapshot requests. Each capture is bounded
+# at 2 s by the per-call timeout, so 2 concurrent + a 2 s wait is the
+# worst the operator can pile up by mashing the snapshot button.
+_SNAPSHOT_SUBPROCESS_SEMAPHORE = asyncio.Semaphore(2)
 
 # Sanity caps for the frontend snapshot body. The schema is free-form
 # so a misbehaving page (e.g. an XSS in a content modal) couldn't pipe
@@ -49,29 +57,43 @@ async def _capture_pane_plain(session: str, lines: int) -> list[str] | None:
     """
     if lines <= 0:
         return None
+    # Validate the session name before passing to tmux. argv-form
+    # subprocess invocation already prevents shell injection, but a
+    # bare `-flag` value would confuse tmux's argv parser and an
+    # operator-readable session name (e.g. the internal control
+    # session) shouldn't be accessible via this diagnostic surface.
+    try:
+        validated = tmux.safe_name(session)
+    except ValueError:
+        return None
+    if validated == CONTROL_SESSION_NAME:
+        return None
     n = min(max(1, int(lines)), _DIFF_MAX_LINES)
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            tmux.TMUX_BIN, "capture-pane",
-            "-t", session,
-            "-p",                  # print to stdout
-            "-S", f"-{n}",         # start N lines back from current
-            # No -E: capture extends through visible bottom, so the
-            # result is "the last N rendered lines tmux knows about".
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        return None
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(),
-                                         timeout=_DIFF_CAPTURE_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    async with _SNAPSHOT_SUBPROCESS_SEMAPHORE:
         try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        return None
+            proc = await asyncio.create_subprocess_exec(
+                tmux.TMUX_BIN, "capture-pane",
+                "-t", validated,
+                "-p",                  # print to stdout
+                "-S", f"-{n}",         # start N lines back from current
+                # No -E: capture extends through visible bottom, so the
+                # result is "the last N rendered lines tmux knows about".
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(),
+                                             timeout=_DIFF_CAPTURE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # kill() AND wait() — without the wait() asyncio leaks the
+            # Process transport / child-watcher state, which piles up
+            # under repeat snapshot taps.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+                await proc.wait()
+            return None
     if proc.returncode != 0 or not out:
         return None
     # Split into lines; tmux uses LF, no terminator on last line.
@@ -226,8 +248,13 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
         backend_tail = await _capture_pane_plain(body.session, len(front_tail))
         if backend_tail is not None:
             diff = _diff_buffers([str(x) for x in front_tail], backend_tail)
+    # Sanitise the session string for the log line — Pydantic doesn't
+    # constrain it, so a value containing literal "\n" would otherwise
+    # forge a second log entry. The note is logged with %r which
+    # already escapes; session uses %s for readability.
+    safe_session = (body.session or "?").replace("\r", "").replace("\n", " ")[:64]
     log.info("frontend snapshot: session=%s note=%r frontend=%s backend=%s diff=%s",
-             body.session or "?", body.note, body.payload, backend, diff)
+             safe_session, body.note, body.payload, backend, diff)
     return {
         "backend": backend,
         "active_sessions_for_name": len(matches),

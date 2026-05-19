@@ -48,6 +48,17 @@ FS_ROOT_ENV = "CCPIPE_FS_ROOT"
 _FS_DENY_SUBPATHS = (
     ".local/state/ccpipe",
     ".config/ccpipe",
+    # ~/.claude is where Claude Code stores its transcripts
+    # (~/.claude/projects/<encoded>/<uuid>.jsonl), live-session
+    # bookkeeping (~/.claude/sessions/<pid>.json), keybindings,
+    # and settings. Letting an authenticated client browse/write
+    # there would let them rewrite the voice:pushToTalk binding
+    # we depend on for /voice release (mic_stop writes \x1b k),
+    # or plant a JSONL the TTS watcher will read and stream
+    # through Kokoro as if claude said it. The TTS service uses
+    # this directory directly (not through /api/fs/*) so denying
+    # the fs route doesn't affect normal operation.
+    ".claude",
 )
 
 def content_disposition_attachment(name: str) -> str:

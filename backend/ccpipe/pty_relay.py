@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import logging
 import os
@@ -52,8 +53,17 @@ class PtyProcess:
         # syscalls + a future allocation per PTY chunk on the hot
         # output path. Chunks land in this queue; read() just drains
         # it. EOF is signalled by an empty bytes sentinel.
-        self._read_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        #
+        # maxsize=64 caps the queue at ~4 MiB worth of 64 KiB chunks
+        # — if pump can't drain (e.g. the WS is stalled), the kernel
+        # PTY buffer fills, then the callback drops chunks here and
+        # records the loss rather than growing the heap unbounded.
+        self._read_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         self._read_eof = False
+        # Bytes the reader couldn't enqueue because the queue was
+        # full. Reported through PtyProcess.bytes_dropped() so the
+        # WS layer can fold it into its WsCounters.bytes_lost.
+        self._read_dropped = 0
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -137,7 +147,25 @@ class PtyProcess:
             data = b""
         if not data:
             self._read_eof = True
-        self._read_queue.put_nowait(data)
+        try:
+            self._read_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            # pump() isn't keeping up — almost certainly because the
+            # WS is stalled. Drop this chunk and count the loss; the
+            # natural backpressure into the kernel PTY buffer will
+            # also slow claude. The client's reconnect path replays
+            # via capture-pane so the bytes aren't permanently lost
+            # from the user's perspective.
+            if data:
+                self._read_dropped += len(data)
+                if self._read_dropped % (1 << 20) < len(data):
+                    log.warning("pty read queue full; dropped a chunk "
+                                "(cumulative=%d bytes)", self._read_dropped)
+
+    def bytes_dropped(self) -> int:
+        """Total bytes dropped because the read queue was saturated.
+        Lets the WS layer fold this into its WsCounters.bytes_lost."""
+        return self._read_dropped
 
     async def read(self, max_bytes: int = 65536) -> bytes:
         """Pop the next available output chunk from the queue.
@@ -214,9 +242,22 @@ class PtyProcess:
             except BlockingIOError:
                 n = 0
             except OSError as exc:
-                log.debug("pty drain write failed: %s", exc)
-                self._write_buffer.clear()
-                return
+                # EBADF / EPIPE / ENOTTY are fatal: the PTY master is
+                # gone or in a state we can't recover from, so bail
+                # and let terminate()/the WS handler clean up. Anything
+                # else (e.g. EINTR, EAGAIN-disguised, ENOSPC on the
+                # pty buffer for some odd kernel config) is transient
+                # — leave the buffer intact and try again on the next
+                # writable wake. Without this distinction, a single
+                # transient error used to permanently exit the drain
+                # task; subsequent write()s would then accumulate up
+                # to 4 MiB then silently drop bytes.
+                if exc.errno in (errno.EBADF, errno.EPIPE, errno.ENOTTY):
+                    log.debug("pty drain write fatal: %s", exc)
+                    self._write_buffer.clear()
+                    return
+                log.warning("pty drain write transient error: %s; will retry", exc)
+                n = 0
             if n > 0:
                 del self._write_buffer[:n]
                 if not self._write_buffer:
