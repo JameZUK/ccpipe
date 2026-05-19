@@ -15,7 +15,7 @@ const LS_KEY = "ccpipe.display.v1";
 export type { CursorStyle, CursorInactiveStyle };
 
 export interface DisplayPrefs {
-  fontSize: number;        // 11..22 px
+  fontSize: number;        // 8..22 px
   lineHeight: number;      // 1.0..1.6
   letterSpacing: number;   // 0..3 px
   cursorStyle: CursorStyle;
@@ -62,7 +62,7 @@ function clamp(n: number, lo: number, hi: number): number {
 
 function sanitize(p: Partial<DisplayPrefs>): DisplayPrefs {
   return {
-    fontSize: clamp(Math.round(p.fontSize ?? DEFAULT_PREFS.fontSize), 11, 22),
+    fontSize: clamp(Math.round(p.fontSize ?? DEFAULT_PREFS.fontSize), 8, 22),
     lineHeight: clamp(Number(p.lineHeight ?? DEFAULT_PREFS.lineHeight), 1.0, 1.6),
     letterSpacing: clamp(Number(p.letterSpacing ?? DEFAULT_PREFS.letterSpacing), 0, 3),
     cursorStyle: (["bar", "block", "underline"] as const).includes(p.cursorStyle as CursorStyle)

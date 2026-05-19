@@ -624,7 +624,7 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
     <div class="modal__rows">
       <label class="row">
         <span class="row__label">Font size <span class="row__hint" data-role="fontSize-value">${prefs.fontSize}px</span></span>
-        <input type="range" name="fontSize" min="11" max="22" step="1" value="${prefs.fontSize}" class="slider"/>
+        <input type="range" name="fontSize" min="8" max="22" step="1" value="${prefs.fontSize}" class="slider"/>
       </label>
       <label class="row">
         <span class="row__label">Line height <span class="row__hint" data-role="lineHeight-value">${prefs.lineHeight.toFixed(2)}</span></span>
