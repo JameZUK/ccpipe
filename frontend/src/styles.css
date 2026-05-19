@@ -1640,7 +1640,10 @@ body.file-editor-resizing {
 @media (max-width: 600px) {
   .file-editor {
     width: 100% !important;
-    height: 100vh !important;
+    /* `dvh` instead of `vh` so the editor doesn't extend below the
+     * mobile URL bar — see the .modal__sheet rule for the same fix
+     * and rationale. */
+    height: 100dvh !important;
     min-width: 0;
     min-height: 0;
     resize: none;
@@ -2364,8 +2367,13 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   .modal-overlay { padding: 0; }
   .modal__sheet {
     max-width: 100%;
-    max-height: 100vh;
-    height: 100vh;
+    /* `dvh` tracks the *visible* viewport — it shrinks when the mobile
+     * URL bar is showing and grows when it slides away. `100vh` on iOS
+     * Safari / Chrome is the URL-bar-hidden height, so a sheet sized
+     * with it extends below the address bar and the bottom row (foot
+     * with the action buttons) gets hidden in portrait. */
+    max-height: 100dvh;
+    height: 100dvh;
     border-radius: 0;
     border: none;
   }
