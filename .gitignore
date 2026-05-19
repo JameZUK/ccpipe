@@ -52,3 +52,4 @@ skills-lock.json
 
 # vite/tsc incremental build cache (don't ship)
 tsconfig.tsbuildinfo
+ccpipe-snapshot-*.json
