@@ -12,6 +12,7 @@ the backend's live counters in a single log line.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -20,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from .. import tmux
 from ..auth import AuthDep, CsrfDep
 from ..ws import _active_counters
 
@@ -28,6 +30,91 @@ from ..ws import _active_counters
 # arbitrary-sized blobs into the operator's journal; this gates that.
 _SNAPSHOT_MAX_PAYLOAD_BYTES = 256 * 1024     # ~quarter MiB serialized
 _SNAPSHOT_MAX_NOTE_BYTES = 1024
+
+# Tmux capture-pane caps for the diagnostic content-diff. Match the
+# frontend dumpBuffer() default (500) and the xterm scrollback cap
+# (10_000) so we never request more than xterm could surface.
+_DIFF_CAPTURE_TIMEOUT_S = 2.0
+_DIFF_MAX_LINES = 10_000
+
+
+async def _capture_pane_plain(session: str, lines: int) -> list[str] | None:
+    """Run `tmux capture-pane -p -t <session> -S -<lines>` and return
+    the plain-text lines. No -e flag: we want the *rendered* text so
+    it lines up with xterm's translateToString(true) output for a
+    line-by-line diff.
+
+    Returns None on any failure or empty output (caller can render
+    "backend capture failed" rather than a confusing empty diff).
+    """
+    if lines <= 0:
+        return None
+    n = min(max(1, int(lines)), _DIFF_MAX_LINES)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            tmux.TMUX_BIN, "capture-pane",
+            "-t", session,
+            "-p",                  # print to stdout
+            "-S", f"-{n}",         # start N lines back from current
+            # No -E: capture extends through visible bottom, so the
+            # result is "the last N rendered lines tmux knows about".
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(),
+                                         timeout=_DIFF_CAPTURE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return None
+    if proc.returncode != 0 or not out:
+        return None
+    # Split into lines; tmux uses LF, no terminator on last line.
+    return out.decode("utf-8", errors="replace").split("\n")
+
+
+def _diff_buffers(
+    frontend_tail: list[str], backend_tail: list[str],
+) -> dict[str, Any]:
+    """Align two line lists from the bottom and report how well they
+    agree. Trailing-space-tolerant (xterm pads cells with spaces; tmux
+    capture-pane may pad differently).
+
+    Returns a dict with:
+      lines_compared, matches, mismatches, mismatch_examples (first
+      N mismatching indices with the divergent lines from each side).
+    """
+    front = [(line or "").rstrip() for line in frontend_tail]
+    back = [(line or "").rstrip() for line in backend_tail]
+    n = min(len(front), len(back))
+    # Align from the bottom: front[-1] vs back[-1], etc. The TOP of
+    # the comparison window is "how far back both can see".
+    front_tail = front[-n:] if n else []
+    back_tail = back[-n:] if n else []
+    matches = 0
+    mismatch_examples: list[dict[str, Any]] = []
+    for i in range(n):
+        if front_tail[i] == back_tail[i]:
+            matches += 1
+        elif len(mismatch_examples) < 5:
+            mismatch_examples.append({
+                "line_from_bottom": n - i,
+                "frontend": front_tail[i],
+                "backend": back_tail[i],
+            })
+    return {
+        "lines_compared": n,
+        "frontend_lines": len(front),
+        "backend_lines": len(back),
+        "matches": matches,
+        "mismatches": n - matches,
+        "mismatch_examples": mismatch_examples,
+    }
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -124,6 +211,25 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
             "bytes_lost": c.bytes_lost,
             "send_failures": c.send_failures,
         }
-    log.info("frontend snapshot: session=%s note=%r frontend=%s backend=%s",
-             body.session or "?", body.note, body.payload, backend)
-    return {"backend": backend, "active_sessions_for_name": len(matches)}
+    # Content diff: compare the frontend's xterm buffer tail against
+    # what tmux's capture-pane reports for the same session at the
+    # same instant. This catches a class of bugs the byte-counter
+    # check misses — corrupted escape sequences, scrollback eviction
+    # off-by-one, multi-byte codepoints split across frames — where
+    # the wire was fine but the rendered content diverged.
+    diff: dict[str, Any] | None = None
+    try:
+        front_tail = body.payload.get("buffer", {}).get("tail")
+    except AttributeError:
+        front_tail = None
+    if body.session and isinstance(front_tail, list) and front_tail:
+        backend_tail = await _capture_pane_plain(body.session, len(front_tail))
+        if backend_tail is not None:
+            diff = _diff_buffers([str(x) for x in front_tail], backend_tail)
+    log.info("frontend snapshot: session=%s note=%r frontend=%s backend=%s diff=%s",
+             body.session or "?", body.note, body.payload, backend, diff)
+    return {
+        "backend": backend,
+        "active_sessions_for_name": len(matches),
+        "content_diff": diff,
+    }

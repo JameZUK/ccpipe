@@ -70,12 +70,33 @@ export function captureSnapshot(opts: DebugCaptureOpts): DebugSnapshot {
   };
 }
 
+export interface DiffMismatchExample {
+  line_from_bottom: number;
+  frontend: string;
+  backend: string;
+}
+export interface DebugSnapshotAck {
+  backend: Record<string, unknown>;
+  active_sessions_for_name: number;
+  /** Content diff: backend re-runs `tmux capture-pane` for this
+   * session and compares the rendered lines to the frontend's
+   * buffer tail. null when the capture failed (no session, tmux
+   * unreachable, etc.) or when there were no lines to compare. */
+  content_diff: {
+    lines_compared: number;
+    frontend_lines: number;
+    backend_lines: number;
+    matches: number;
+    mismatches: number;
+    mismatch_examples: DiffMismatchExample[];
+  } | null;
+}
+
 /** POST the snapshot to /api/debug/snapshot. Returns the server's
- * acknowledgement (which includes its view of the same session's
- * WsCounters) so the caller can render the merged record. */
-export async function postSnapshot(
-  snapshot: DebugSnapshot,
-): Promise<{ backend: Record<string, unknown>; active_sessions_for_name: number }> {
+ * acknowledgement: the same session's WsCounters PLUS a content
+ * diff between the frontend buffer tail and what tmux currently
+ * has for the pane. */
+export async function postSnapshot(snapshot: DebugSnapshot): Promise<DebugSnapshotAck> {
   return apiJson("/api/debug/snapshot", {
     method: "POST",
     body: JSON.stringify({
@@ -185,14 +206,60 @@ export function showDebugModal(snapshot: DebugSnapshot): void {
       serverEl.textContent = "Sending…";
       try {
         const ack = await postSnapshot(snapshot);
-        const ackJson = JSON.stringify(ack, null, 2);
-        serverEl.textContent = `Server ack:\n${ackJson}`;
+        serverEl.textContent = formatAck(ack);
       } catch (err) {
         serverEl.textContent = `Send failed: ${(err as Error).message}`;
       } finally {
         btn.disabled = false;
       }
     });
+}
+
+/** Render the backend ack as a human-readable summary. The
+ * content_diff section is what makes the comparison useful — the
+ * counter math is already in the JSON, but the diff needs to be
+ * surfaced clearly so the operator can tell at a glance whether
+ * frontend and backend agree on what's on the pane. */
+function formatAck(ack: DebugSnapshotAck): string {
+  const lines: string[] = [];
+  if (ack.backend && Object.keys(ack.backend).length) {
+    lines.push("─── backend counters ───");
+    for (const [k, v] of Object.entries(ack.backend)) lines.push(`  ${k}: ${v}`);
+  } else {
+    lines.push("backend counters: no active WS for this session");
+  }
+  const d = ack.content_diff;
+  if (!d) {
+    lines.push("");
+    lines.push("─── content diff ───");
+    lines.push("  unavailable (no tail to compare or capture-pane failed)");
+  } else {
+    const pct = d.lines_compared
+      ? Math.round((d.matches / d.lines_compared) * 1000) / 10
+      : 0;
+    lines.push("");
+    lines.push("─── content diff (xterm vs tmux capture-pane) ───");
+    lines.push(`  compared: ${d.lines_compared} lines from bottom`);
+    lines.push(`  matches:  ${d.matches} / ${d.lines_compared} (${pct}%)`);
+    lines.push(`  frontend buffer tail: ${d.frontend_lines} lines`);
+    lines.push(`  backend capture-pane: ${d.backend_lines} lines`);
+    if (d.mismatch_examples.length) {
+      lines.push("  first mismatches (line# counted from bottom):");
+      for (const ex of d.mismatch_examples) {
+        lines.push(`    [${ex.line_from_bottom}]`);
+        lines.push(`      front: ${truncate(ex.frontend, 100)}`);
+        lines.push(`      back:  ${truncate(ex.backend, 100)}`);
+      }
+    } else if (d.mismatches === 0 && d.lines_compared > 0) {
+      lines.push("  all compared lines agree.");
+    }
+  }
+  return lines.join("\n");
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
 }
 
 function escapeText(s: string): string {
