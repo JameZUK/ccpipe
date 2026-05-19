@@ -177,18 +177,18 @@ def _scan_dir_entries(resolved: Path, show_hidden: bool,
                     break
                 if not show_hidden and e.name.startswith("."):
                     continue
-                try:
-                    is_dir = e.is_dir(follow_symlinks=True)
-                except OSError:
-                    continue
-                if is_dir:
-                    entries.append({"name": e.name, "type": "dir"})
-                    continue
-                if not include_files:
-                    continue
+                # One stat call per entry, with the type derived from
+                # st_mode — previously is_dir(...) + stat(...) made
+                # 2 syscalls per file. On a 2000-entry directory that's
+                # 4000 syscalls cut to 2000.
                 try:
                     st = e.stat(follow_symlinks=True)
                 except OSError:
+                    continue
+                if stat_mod.S_ISDIR(st.st_mode):
+                    entries.append({"name": e.name, "type": "dir"})
+                    continue
+                if not include_files:
                     continue
                 entries.append({
                     "name": e.name,

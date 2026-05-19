@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import math
+from collections import deque
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -67,7 +68,10 @@ async def auth_status(request: Request) -> AuthStatus:
 # out the whole tenant. Bucket = 5 attempts per minute, window slides.
 _LOGIN_BUCKET_MAX = 5
 _LOGIN_BUCKET_WINDOW_S = 60.0
-_login_attempts: dict[str, list[float]] = {}
+# deque, not list — popleft() is O(1) where list.pop(0) is O(n).
+# Under sustained burst within the window the list version was
+# quadratic in bucket length per call.
+_login_attempts: dict[str, deque[float]] = {}
 
 # Global ceiling that complements the per-IP bucket. The per-IP limit
 # alone is bypassed when ccpipe sits behind nginx (the documented
@@ -76,7 +80,7 @@ _login_attempts: dict[str, list[float]] = {}
 # absolute rate while still letting a legit user retry.
 _GLOBAL_LOGIN_MAX = 30
 _GLOBAL_LOGIN_WINDOW_S = 60.0
-_global_login_attempts: list[float] = []
+_global_login_attempts: deque[float] = deque()
 
 
 def reset_throttle_state() -> None:
@@ -100,19 +104,19 @@ def _login_throttle_ok(ip: str) -> bool:
         for k in list(_login_attempts.keys()):
             b = _login_attempts[k]
             while b and b[0] < cutoff:
-                b.pop(0)
+                b.popleft()
             if not b:
                 _login_attempts.pop(k, None)
     # ── Global window ──
     g_cutoff = now - _GLOBAL_LOGIN_WINDOW_S
     while _global_login_attempts and _global_login_attempts[0] < g_cutoff:
-        _global_login_attempts.pop(0)
+        _global_login_attempts.popleft()
     if len(_global_login_attempts) >= _GLOBAL_LOGIN_MAX:
         return False
     # ── Per-IP window ──
-    bucket = _login_attempts.setdefault(ip, [])
+    bucket = _login_attempts.setdefault(ip, deque())
     while bucket and bucket[0] < cutoff:
-        bucket.pop(0)
+        bucket.popleft()
     if len(bucket) >= _LOGIN_BUCKET_MAX:
         if not bucket:
             _login_attempts.pop(ip, None)

@@ -111,13 +111,12 @@ def _diff_buffers(
       lines_compared, matches, mismatches, mismatch_examples (first
       N mismatching indices with the divergent lines from each side).
     """
-    front = [(line or "").rstrip() for line in frontend_tail]
-    back = [(line or "").rstrip() for line in backend_tail]
-    n = min(len(front), len(back))
-    # Align from the bottom: front[-1] vs back[-1], etc. The TOP of
-    # the comparison window is "how far back both can see".
-    front_tail = front[-n:] if n else []
-    back_tail = back[-n:] if n else []
+    n = min(len(frontend_tail), len(backend_tail))
+    # Slice + rstrip only the compared window — previously we rstripped
+    # the entire input on both sides (up to 10K lines × 2) before
+    # discarding all but the last n. On large buffers that's pure waste.
+    front_tail = [(line or "").rstrip() for line in frontend_tail[-n:]] if n else []
+    back_tail = [(line or "").rstrip() for line in backend_tail[-n:]] if n else []
     matches = 0
     mismatch_examples: list[dict[str, Any]] = []
     for i in range(n):
@@ -131,8 +130,8 @@ def _diff_buffers(
             })
     return {
         "lines_compared": n,
-        "frontend_lines": len(front),
-        "backend_lines": len(back),
+        "frontend_lines": len(frontend_tail),
+        "backend_lines": len(backend_tail),
         "matches": matches,
         "mismatches": n - matches,
         "mismatch_examples": mismatch_examples,
