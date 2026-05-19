@@ -101,12 +101,15 @@ async def _capture_pane_plain(
             out, _ = await asyncio.wait_for(proc.communicate(),
                                              timeout=_DIFF_CAPTURE_TIMEOUT_S)
         except asyncio.TimeoutError:
-            # kill() AND wait() — without the wait() asyncio leaks the
-            # Process transport / child-watcher state, which piles up
-            # under repeat snapshot taps.
+            # kill() then BOUNDED wait — without the wait() asyncio
+            # leaks the Process transport / child-watcher state, but
+            # if the child is stuck in uninterruptible sleep
+            # (D-state) a bare wait() can block forever while still
+            # holding the snapshot-endpoint semaphore. Cap it.
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-                await proc.wait()
+            with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
             return None
     if proc.returncode != 0 or not out:
         return None
@@ -302,10 +305,72 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
     # forge a second log entry. The note is logged with %r which
     # already escapes; session uses %s for readability.
     safe_session = (body.session or "?").replace("\r", "").replace("\n", " ")[:64]
-    log.info("frontend snapshot: session=%s note=%r frontend=%s backend=%s diff=%s",
-             safe_session, body.note, body.payload, backend, diff)
+    # Log shape metadata + diff SUMMARY only — not the raw payload or
+    # mismatch_examples. Terminal contents in the buffer tail can
+    # include secrets typed at a read prompt, tokens, or paths;
+    # we don't want them in the operator's journal at INFO. The full
+    # detail still rides in the HTTP response so the user can see it
+    # in the snapshot modal.
+    payload_meta = _payload_shape(body.payload) if isinstance(body.payload, dict) else {}
+    diff_summary = _diff_summary(diff) if diff else None
+    log.info("frontend snapshot: session=%s note=%r payload_meta=%s backend=%s diff=%s",
+             safe_session, body.note, payload_meta, backend, diff_summary)
     return {
         "backend": backend,
         "active_sessions_for_name": len(matches),
         "content_diff": diff,
     }
+
+
+def _payload_shape(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract non-sensitive shape info from a frontend snapshot
+    payload — sizes, types, identifiers — leaving raw terminal
+    contents out of the journal."""
+    out: dict[str, Any] = {
+        "schema": payload.get("schema"),
+        "capturedAt": payload.get("capturedAt"),
+    }
+    term = payload.get("terminal")
+    if isinstance(term, dict):
+        out["terminal"] = {
+            k: term.get(k) for k in
+            ("cols", "rows", "bufferType", "bufferLength", "renderer")
+            if k in term
+        }
+    socket = payload.get("socket")
+    if isinstance(socket, dict):
+        out["socket"] = {
+            k: socket.get(k) for k in
+            ("readyStateLabel", "framesReceived", "bytesReceived",
+             "helloCount", "lastHistoryBytes", "receivingHistory")
+            if k in socket
+        }
+    buf = payload.get("buffer")
+    if isinstance(buf, dict):
+        out["buffer_lines"] = buf.get("lineCount")
+    bufs = payload.get("buffers")
+    if isinstance(bufs, dict):
+        out["buffers"] = {
+            "activeType": bufs.get("activeType"),
+            "normal_lines": len(bufs.get("normal", []) or []),
+            "alternate_lines": len(bufs.get("alternate", []) or []),
+        }
+    return out
+
+
+def _diff_summary(diff: dict[str, Any]) -> dict[str, Any]:
+    """Compress a content_diff for journal logging — keep the
+    match-percentage signal, drop the per-line mismatch_examples
+    which contain raw terminal text."""
+    out: dict[str, Any] = {"active_type": diff.get("active_type")}
+    for label in ("normal", "alternate"):
+        sub = diff.get(label)
+        if sub is None:
+            out[label] = None
+        else:
+            out[label] = {
+                k: sub.get(k) for k in
+                ("lines_compared", "matches", "mismatches",
+                 "frontend_lines", "backend_lines")
+            }
+    return out

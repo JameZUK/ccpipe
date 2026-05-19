@@ -685,11 +685,14 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
         out, _ = await asyncio.wait_for(proc.communicate(),
                                          timeout=_HISTORY_CAPTURE_TIMEOUT_S)
     except asyncio.TimeoutError:
-        # kill() AND wait() — without the wait() asyncio leaks the
-        # Process transport / child-watcher state.
+        # kill() then BOUNDED wait — bare proc.wait() can block
+        # forever if the child is stuck in uninterruptible sleep,
+        # and history capture happens during WS attach so a stuck
+        # subprocess would stall every reconnect.
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-            await proc.wait()
+        with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
         return b""
     if proc.returncode != 0 or not out:
         return b""
