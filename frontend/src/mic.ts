@@ -23,12 +23,20 @@ export class MicStreamer {
   // small interval; if it stays below the threshold for SILENCE_MS, fire
   // onSilence. Lets the UI auto-finalise a recording the user forgot
   // about, before the mic streams forever into a dead WS.
+  //
+  // Tuning history: the original 1500 ms / 0.02 threshold pair stopped
+  // too aggressively — natural mid-utterance pauses (breath, "uhh…",
+  // sub-sentence hesitation) and quiet trailing syllables both dropped
+  // below the gate fast enough that the silence-accumulator fired
+  // before the user was actually done. Bumped to 2500 ms and 0.012 RMS
+  // so the VAD is a tail-cleanup safety net, not a speech-finaliser.
+  // The user can still tap the mic explicitly to submit immediately.
   private vadInterval: number | null = null;
   private vadSilenceStart: number | null = null;
   private vadHasHadVoice = false;
   private static readonly VAD_POLL_MS = 100;
-  private static readonly VAD_SILENCE_MS = 1500;
-  private static readonly VAD_THRESHOLD = 0.02;   // RMS, 0-1 scale
+  private static readonly VAD_SILENCE_MS = 2500;
+  private static readonly VAD_THRESHOLD = 0.012;  // RMS, 0-1 scale
 
   /** Callback fired after a sustained silence is detected. The receiver
    * should treat it like the user releasing PTT — stop recording + send

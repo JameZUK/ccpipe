@@ -491,7 +491,15 @@ async function attachTerminal(session: string): Promise<void> {
 
   // ─── Recording state (single source of truth, both UIs subscribe) ─────
   const VOICE_TRIGGER = "\x1bk";          // matches the meta+k keybinding
-  const TRIGGER_TO_AUDIO_DELAY_MS = 60;   // give /voice a tick to arm before PCM arrives
+  // Wait between sending meta+k (which arms claude's /voice) and
+  // opening the browser mic. The pipeline is: meta+k → tmux → claude
+  // parses it → claude enters /voice mode → claude reads PCM from
+  // Pulse. If the mic opens before that whole chain has primed,
+  // leading audio frames can be dropped on the claude side. 60 ms
+  // was the original value and turned out to truncate the start of
+  // utterances; 200 ms gives the chain comfortable headroom while
+  // still being imperceptible from the user's tap-to-speak rhythm.
+  const TRIGGER_TO_AUDIO_DELAY_MS = 200;
 
   let recording = false;
   const stateSubs: Array<(r: boolean) => void> = [];
