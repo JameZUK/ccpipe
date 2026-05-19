@@ -622,7 +622,21 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    * scrollToBottom() after it would run before the buffer has grown. */
   const resetBuffer = (): void => {
     if (disposed) return;
+    // term.reset() is RIS (\x1bc): it clears the visible screen and
+    // terminal state but LEAVES THE SCROLLBACK INTACT. On reconnect
+    // the post-reset history replay then *appends* to the surviving
+    // scrollback; once the combined buffer exceeds maxScrollback
+    // (10000) xterm evicts the OLDEST lines — which were the user's
+    // earliest visible history. Symptom: "scrollback is missing some
+    // history, fixed by a full page reload" (reload re-creates the
+    // xterm instance so there's nothing to survive).
+    //
+    // term.clear() is the documented way to wipe the entire buffer
+    // *including* scrollback. Call it after reset() so we get both
+    // a clean state machine and a clean buffer before the replay
+    // bytes arrive.
     try { term.reset(); } catch {}
+    try { term.clear(); } catch {}
     try { term.scrollToBottom(); } catch {}
   };
 
