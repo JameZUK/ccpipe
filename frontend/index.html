@@ -2,7 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <!-- interactive-widget=resizes-content makes Chrome Android shrink
+         the layout viewport when the on-screen keyboard appears, so
+         the bottom composer bar stays glued to the visible edge
+         instead of falling below the keyboard. Firefox Android
+         already behaves this way by default; without the directive,
+         Chrome's default (resizes-visual) leaves the page the same
+         size and the bottom bar intermittently scrolls off-screen
+         depending on visualViewport scroll offset. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#0d0c08" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
