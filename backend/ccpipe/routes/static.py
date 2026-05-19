@@ -66,16 +66,38 @@ async def manifest() -> FileResponse: return _serve_file("manifest.webmanifest")
 async def service_worker() -> FileResponse: return _serve_file("sw.js")
 
 
+# PWA icon set. Each variant is served from its own route so the
+# top-level URLs stay flat (browsers expect /icon-192.png, not
+# /assets/icon-192.png) and the TrustedHostMiddleware + CSP layer
+# still apply. The SVG is the canonical mark used by desktop browser
+# tabs; the PNG raster pack is what mobile launchers actually pick
+# up — Firefox Android in particular won't fall back from a 404'd
+# manifest icon to the SVG, so the PNGs must be reachable or the
+# home-screen shortcut ends up with a generated letter glyph.
 @router.get("/icon.svg")
 async def icon_svg() -> FileResponse: return _serve_file("icon.svg")
 
 
-@router.get("/icon-192.svg")
-async def icon_192() -> FileResponse: return _serve_file("icon-192.svg")
+@router.get("/icon-maskable.svg")
+async def icon_maskable_svg() -> FileResponse: return _serve_file("icon-maskable.svg")
 
 
-@router.get("/icon-512.svg")
-async def icon_512() -> FileResponse: return _serve_file("icon-512.svg")
+@router.get("/icon-192.png")
+async def icon_192_png() -> FileResponse: return _serve_file("icon-192.png")
+
+
+@router.get("/icon-512.png")
+async def icon_512_png() -> FileResponse: return _serve_file("icon-512.png")
+
+
+@router.get("/icon-maskable-512.png")
+async def icon_maskable_512_png() -> FileResponse:
+    return _serve_file("icon-maskable-512.png")
+
+
+@router.get("/apple-touch-icon.png")
+async def apple_touch_icon() -> FileResponse:
+    return _serve_file("apple-touch-icon.png")
 
 
 @router.get("/mic-worklet.js")
