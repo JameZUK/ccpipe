@@ -45,12 +45,42 @@ class FsConfig:
 
 
 @dataclass
+class MicConfig:
+    """Voice-input behaviour, tunable from Settings → Voice input.
+
+    The user-visible knobs surfacing in the UI:
+      - ``auto_stop_enabled``: whether the client's silence detector
+        fires `mic_stop` automatically on sustained silence. When
+        false, the mic is strictly tap-to-stop.
+      - ``silence_ms``: how long sustained silence must run before the
+        client-side VAD trips (only relevant when auto-stop is on).
+      - ``drain_pad_ms``: extra wall-time the BACKEND waits after the
+        estimated audio-drain completes before writing the release-PTT
+        keystroke to the PTY. Buys time for Pulse's internal buffer
+        + claude's STT finalisation to settle. The key knob if you
+        find tail words still being cut on submission.
+      - ``max_recording_seconds``: client-side hard cap; the mic
+        force-stops after this many seconds even with continuous voice.
+        Safety net for forgotten mics.
+    """
+    auto_stop_enabled: bool = True
+    silence_ms: int = 2500
+    drain_pad_ms: int = 1500
+    max_recording_seconds: int = 60
+
+
+@dataclass
 class AppConfig:
     tts: TtsConfig = field(default_factory=TtsConfig)
     fs: FsConfig = field(default_factory=FsConfig)
+    mic: MicConfig = field(default_factory=MicConfig)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"tts": asdict(self.tts), "fs": asdict(self.fs)}
+        return {
+            "tts": asdict(self.tts),
+            "fs": asdict(self.fs),
+            "mic": asdict(self.mic),
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
@@ -79,7 +109,29 @@ class AppConfig:
             fs.upload_limit_mb = max(1, min(10_240, limit))   # 1MB .. 10GB
         except (TypeError, ValueError):
             pass
-        return cls(tts=tts, fs=fs)
+        mic_data = data.get("mic", {}) if isinstance(data, dict) else {}
+        if not isinstance(mic_data, dict):
+            mic_data = {}
+        mic = MicConfig()
+        if isinstance(mic_data.get("auto_stop_enabled"), bool):
+            mic.auto_stop_enabled = mic_data["auto_stop_enabled"]
+        try:
+            mic.silence_ms = max(200, min(15000, int(
+                mic_data.get("silence_ms", mic.silence_ms))))
+        except (TypeError, ValueError):
+            pass
+        try:
+            mic.drain_pad_ms = max(0, min(10000, int(
+                mic_data.get("drain_pad_ms", mic.drain_pad_ms))))
+        except (TypeError, ValueError):
+            pass
+        try:
+            mic.max_recording_seconds = max(5, min(600, int(
+                mic_data.get("max_recording_seconds",
+                             mic.max_recording_seconds))))
+        except (TypeError, ValueError):
+            pass
+        return cls(tts=tts, fs=fs, mic=mic)
 
 
 def _state_dir() -> Path:

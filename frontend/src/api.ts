@@ -96,3 +96,26 @@ export function getFsConfig(): Promise<FsConfig> {
   }
   return _fsConfigPromise;
 }
+
+// ─── /api/mic/config ──────────────────────────────────────────────────
+// Voice-input behaviour knobs (see backend MicConfig). Not cached —
+// the settings modal mutates this and the mic streamer must see the
+// change immediately. Each fetch is one cheap GET so a fresh round-
+// trip per consumer is fine.
+export interface MicConfig {
+  auto_stop_enabled: boolean;
+  silence_ms: number;
+  drain_pad_ms: number;
+  max_recording_seconds: number;
+}
+
+export function getMicConfig(): Promise<MicConfig> {
+  return apiJson<MicConfig>("/api/mic/config");
+}
+
+export function setMicConfig(patch: Partial<MicConfig>): Promise<MicConfig> {
+  return apiJson<MicConfig>("/api/mic/config", {
+    method: "POST",
+    body: JSON.stringify(patch),
+  });
+}

@@ -12,6 +12,7 @@
 // To open the modal, call openSettings({...}) from anywhere with access
 // to the helpers it needs.
 
+import { getMicConfig, type MicConfig, setMicConfig } from "./api";
 import { changeCredentials, logout as apiLogout } from "./auth";
 import {
   DEFAULT_PREFS,
@@ -66,6 +67,10 @@ export interface SettingsOpts {
   onDisplayPrefsChange: (prefs: DisplayPrefs) => void;
   /** Called after logout / credential change so caller can re-bootstrap. */
   onSessionInvalidated: () => void;
+  /** Called after the user saves voice-input settings so the live mic
+   * streamer can adopt the new VAD / max-record values without waiting
+   * for the next page load. */
+  onMicConfigChange?: (cfg: MicConfig) => void;
 }
 
 let activeOverlay: HTMLDivElement | null = null;
@@ -95,7 +100,7 @@ export function openSettings(opts: SettingsOpts): void {
   const voicePanel = document.createElement("div");
   voicePanel.className = "modal__panel";
   voicePanel.dataset.tab = "voice";
-  voicePanel.append(buildVoiceSection());
+  voicePanel.append(buildVoiceSection(), buildVoiceInputSection(opts));
 
   const accountPanel = document.createElement("div");
   accountPanel.className = "modal__panel";
@@ -365,6 +370,113 @@ function buildVoiceSection(): HTMLElement {
         }),
       });
       if (!res.ok) throw new Error(`status ${res.status}`);
+      status.textContent = "saved";
+      setTimeout(() => { status.textContent = ""; }, 1500);
+    } catch (err) {
+      status.textContent = `save failed: ${(err as Error).message}`;
+      status.classList.add("modal__status--error");
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  return sec;
+}
+
+// ─── Voice input (mic) section ──────────────────────────────────────────
+
+function buildVoiceInputSection(opts: SettingsOpts): HTMLElement {
+  const sec = document.createElement("section");
+  sec.className = "modal__section";
+  sec.innerHTML = `
+    <h2 class="modal__section-title">voice input</h2>
+    <div class="modal__rows">
+      <label class="row">
+        <span class="row__label">Auto-stop on silence
+          <span class="row__hint">stop recording automatically when you stop speaking</span>
+        </span>
+        <input type="checkbox" name="auto_stop" class="checkbox"/>
+      </label>
+      <label class="row">
+        <span class="row__label">Silence before stop
+          <span class="row__hint" data-role="silence-value">2.5s</span>
+        </span>
+        <input type="range" name="silence_ms" min="500" max="6000" step="100" value="2500" class="slider"/>
+      </label>
+      <label class="row">
+        <span class="row__label">Submit pad
+          <span class="row__hint" data-role="drain-value">1.5s — extra wait after recording before claude submits</span>
+        </span>
+        <input type="range" name="drain_pad_ms" min="0" max="5000" step="100" value="1500" class="slider"/>
+      </label>
+      <label class="row">
+        <span class="row__label">Max recording length
+          <span class="row__hint" data-role="max-value">60s</span>
+        </span>
+        <input type="range" name="max_recording_seconds" min="10" max="300" step="5" value="60" class="slider"/>
+      </label>
+    </div>
+    <div class="modal__row-actions">
+      <span class="modal__status" data-role="voice-input-status"></span>
+      <button type="button" class="btn btn--primary" data-role="save">Save voice input</button>
+    </div>
+  `;
+
+  const autoStop = sec.querySelector<HTMLInputElement>("input[name=auto_stop]")!;
+  const silence = sec.querySelector<HTMLInputElement>("input[name=silence_ms]")!;
+  const silenceLabel = sec.querySelector<HTMLElement>("[data-role=silence-value]")!;
+  const drain = sec.querySelector<HTMLInputElement>("input[name=drain_pad_ms]")!;
+  const drainLabel = sec.querySelector<HTMLElement>("[data-role=drain-value]")!;
+  const max = sec.querySelector<HTMLInputElement>("input[name=max_recording_seconds]")!;
+  const maxLabel = sec.querySelector<HTMLElement>("[data-role=max-value]")!;
+  const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
+  const status = sec.querySelector<HTMLElement>("[data-role=voice-input-status]")!;
+
+  const fmtSeconds = (ms: number) => `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)}s`;
+  const updateLabels = () => {
+    silenceLabel.textContent = fmtSeconds(parseInt(silence.value, 10));
+    drainLabel.textContent = `${fmtSeconds(parseInt(drain.value, 10))} — extra wait after recording before claude submits`;
+    maxLabel.textContent = `${max.value}s`;
+  };
+  silence.addEventListener("input", updateLabels);
+  drain.addEventListener("input", updateLabels);
+  max.addEventListener("input", updateLabels);
+  // When auto-stop is off the silence slider has no effect — visually
+  // dim it so the relationship is obvious. Still editable so changing
+  // the value mid-disabled is fine; nothing's saved until Save.
+  const syncSilenceEnabled = () => {
+    silence.disabled = !autoStop.checked;
+    silence.style.opacity = autoStop.checked ? "" : "0.5";
+  };
+  autoStop.addEventListener("change", syncSilenceEnabled);
+
+  (async () => {
+    try {
+      const cfg = await getMicConfig();
+      autoStop.checked = cfg.auto_stop_enabled;
+      silence.value = String(cfg.silence_ms);
+      drain.value = String(cfg.drain_pad_ms);
+      max.value = String(cfg.max_recording_seconds);
+      updateLabels();
+      syncSilenceEnabled();
+    } catch (err) {
+      status.textContent = `failed to load: ${(err as Error).message}`;
+      status.classList.add("modal__status--error");
+    }
+  })();
+
+  saveBtn.addEventListener("click", async () => {
+    status.classList.remove("modal__status--error");
+    status.textContent = "saving…";
+    saveBtn.disabled = true;
+    try {
+      const next = await setMicConfig({
+        auto_stop_enabled: autoStop.checked,
+        silence_ms: parseInt(silence.value, 10),
+        drain_pad_ms: parseInt(drain.value, 10),
+        max_recording_seconds: parseInt(max.value, 10),
+      });
+      opts.onMicConfigChange?.(next);
       status.textContent = "saved";
       setTimeout(() => { status.textContent = ""; }, 1500);
     } catch (err) {

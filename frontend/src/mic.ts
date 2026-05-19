@@ -10,6 +10,24 @@
 
 import { FRAME_MIC_PCM, TerminalSocket } from "./ws";
 
+export interface MicStreamerConfig {
+  /** Whether the client-side VAD trips an automatic stop on sustained
+   * silence. When false the mic is strictly tap-to-stop. */
+  autoStopEnabled: boolean;
+  /** Sustained silence (ms) required before the VAD trips. */
+  silenceMs: number;
+  /** Hard cap on a single recording. After this many seconds the mic
+   * force-stops even with continuous voice; safety net for forgotten
+   * mics, mirrors the backend bound. */
+  maxRecordingSeconds: number;
+}
+
+export const DEFAULT_MIC_CONFIG: MicStreamerConfig = {
+  autoStopEnabled: true,
+  silenceMs: 2500,
+  maxRecordingSeconds: 60,
+};
+
 export class MicStreamer {
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
@@ -21,43 +39,57 @@ export class MicStreamer {
 
   // Voice-activity-detection: poll the analyser's time-domain
   // amplitude at a small interval; if it stays below the gate for
-  // SILENCE_MS, fire onSilence. Lets the UI auto-finalise a recording
-  // the user forgot about, before the mic streams forever into a dead
-  // WS.
+  // `cfg.silenceMs`, fire onSilence. The release-PTT timing is now
+  // owned by the backend (drain estimate + drain_pad_ms), so the
+  // silence gate only has to be long enough to keep mid-utterance
+  // pauses from tripping it — the trailing-tail problem is the
+  // backend's responsibility.
   //
-  // Tuning history:
-  //   - Original 1500 ms / 0.02 RMS: stopped too aggressively. Natural
-  //     mid-utterance pauses and quiet syllables tripped the
-  //     silence-accumulator before the user was done.
-  //   - 2500 ms / 0.012 RMS: still cut off the *tail* of utterances
-  //     where the user's voice softened at sentence-end. Specifically
-  //     reproduced as "the words 'the' and 'sentence' are missing"
-  //     when those trailing words were below the RMS gate.
-  //
-  // Current shape:
-  //   - RMS gate lowered to 0.008 so quieter sustained material counts
-  //     as voice. Just above typical room-silence floor with AGC on.
-  //   - Peak-amplitude gate added (0.10) alongside RMS. Voiceless
-  //     consonants ("s", "t", "th", "p") have very low average energy
-  //     but distinctive peaks; RMS alone smooths them into "silence".
-  //     Tracking the max absolute sample in each window catches those
-  //     bursts and resets the silence timer through the word.
-  //   - Either gate above its threshold counts as voice.
-  // The user can still tap the mic explicitly to submit immediately.
+  // Threshold tuning:
+  //   - RMS gate at 0.008: just above the room-silence floor with
+  //     AGC on. Quieter sustained material still counts as voice.
+  //   - Peak gate at 0.10: voiceless consonants ("s", "t", "th",
+  //     "p") have low average energy but distinctive amplitude
+  //     spikes; RMS alone smooths them into "silence", peak rescues
+  //     them. Either gate above threshold counts as voice.
   private vadInterval: number | null = null;
   private vadSilenceStart: number | null = null;
   private vadHasHadVoice = false;
   private static readonly VAD_POLL_MS = 100;
-  private static readonly VAD_SILENCE_MS = 2500;
   private static readonly VAD_THRESHOLD = 0.008;      // RMS, 0-1 scale
   private static readonly VAD_PEAK_THRESHOLD = 0.10;  // peak |sample|, 0-1
 
+  // Force-stop timer for `maxRecordingSeconds`. Cleared on _teardown.
+  private maxRecordTimer: number | null = null;
+
+  private cfg: MicStreamerConfig = { ...DEFAULT_MIC_CONFIG };
+
   /** Callback fired after a sustained silence is detected. The receiver
    * should treat it like the user releasing PTT — stop recording + send
-   * /voice the second time to submit. */
+   * mic_stop so the backend can release /voice's PTT after drain. */
   onSilence: (() => void) | null = null;
 
   constructor(private readonly socket: TerminalSocket) {}
+
+  /** Apply new VAD / max-record settings. Safe to call at any time;
+   * a running recording adopts the new silence threshold on the next
+   * VAD tick (existing accumulator is preserved). The max-record
+   * timer is restarted from "now" rather than "recording-start" —
+   * acceptable for a settings-modal save that's an explicit user
+   * action; not pretending to be a continuation. */
+  setConfig(cfg: MicStreamerConfig): void {
+    this.cfg = { ...cfg };
+    if (this.state === "running") {
+      // Re-arm the max-record timer with the new value.
+      this._armMaxRecordTimer();
+      // Auto-stop toggle flip: tear down or stand up the VAD interval.
+      if (cfg.autoStopEnabled && this.vadInterval === null) {
+        this._startVad();
+      } else if (!cfg.autoStopEnabled && this.vadInterval !== null) {
+        this._stopVad();
+      }
+    }
+  }
 
   /** Currently running and capturing. */
   get isRunning(): boolean {
@@ -120,7 +152,8 @@ export class MicStreamer {
       // Note: deliberately not connecting to ctx.destination — we don't
       // want to hear our own mic.
       this.state = "running";
-      this._startVad();
+      if (this.cfg.autoStopEnabled) this._startVad();
+      this._armMaxRecordTimer();
     } catch (err) {
       this.state = "idle";
       await this._teardown();
@@ -165,7 +198,7 @@ export class MicStreamer {
         this.vadSilenceStart = now;
         return;
       }
-      if (now - this.vadSilenceStart >= MicStreamer.VAD_SILENCE_MS) {
+      if (now - this.vadSilenceStart >= this.cfg.silenceMs) {
         this._stopVad();
         try { this.onSilence?.(); } catch (e) { console.warn("VAD cb:", e); }
       }
@@ -179,10 +212,36 @@ export class MicStreamer {
     }
   }
 
+  /** (Re-)arm the safety-net timer that fires onSilence after
+   * `cfg.maxRecordingSeconds` of continuous recording. Clears any
+   * existing timer first so a setConfig() call mid-recording doesn't
+   * stack timers. */
+  private _armMaxRecordTimer(): void {
+    if (this.maxRecordTimer !== null) {
+      clearTimeout(this.maxRecordTimer);
+      this.maxRecordTimer = null;
+    }
+    const seconds = Math.max(1, this.cfg.maxRecordingSeconds);
+    this.maxRecordTimer = window.setTimeout(() => {
+      this.maxRecordTimer = null;
+      if (this.state !== "running") return;
+      console.info(`mic max-recording cap (${seconds}s) hit; auto-stopping`);
+      try { this.onSilence?.(); } catch (e) { console.warn("max-rec cb:", e); }
+    }, seconds * 1000);
+  }
+
+  private _clearMaxRecordTimer(): void {
+    if (this.maxRecordTimer !== null) {
+      clearTimeout(this.maxRecordTimer);
+      this.maxRecordTimer = null;
+    }
+  }
+
   private async _stop(): Promise<void> {
     if (this.state === "idle" || this.state === "stopping") return;
     this.state = "stopping";
     this._stopVad();
+    this._clearMaxRecordTimer();
     await this._teardown();
     this.state = "idle";
   }

@@ -118,7 +118,30 @@ async def _build_tts_filter(tmux_session: str):
     return _accept_cwd
 
 
+async def _release_ptt_after(pty_proc: PtyProcess, delay_seconds: float) -> None:
+    """Sleep for `delay_seconds`, then write the meta+k keystroke into
+    `pty_proc` so claude's /voice exits push-to-talk and submits the
+    captured utterance. Scheduled as a fire-and-forget task by the
+    mic_stop handler — if the WS disconnects before this fires,
+    pty_proc.write() short-circuits (fd is None) so we don't try to
+    poke a recycled descriptor."""
+    try:
+        await asyncio.sleep(max(0.0, delay_seconds))
+        # \x1b k = ESC k = meta+k = the binding ccpipe installs into
+        # ~/.claude/keybindings.json for the voice:pushToTalk action.
+        pty_proc.write(b"\x1bk")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("scheduled release-PTT after %.2fs failed", delay_seconds)
+
+
 async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
+    # Two scopes in this function (mic_stop dispatch + finally cleanup)
+    # both assign to _mic_owner. Python requires `global` to come before
+    # any read of the name in the same function, so hoist it here once
+    # rather than scattering per-block declarations.
+    global _mic_owner
     await websocket.accept()
 
     # Auto-create the session if it doesn't exist yet.
@@ -337,6 +360,37 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                     except Exception:
                         pass
                     continue
+                # mic_stop: the client has torn down its mic and wants
+                # claude's /voice push-to-talk released. We CAN'T just
+                # forward the release keystroke immediately because
+                # audio captured in the last ~few-hundred-ms is still
+                # in flight through the pipe → Pulse → claude STT, and
+                # claude's STT itself needs another ~1-2s to finalise
+                # transcription. So we estimate the pipeline drain
+                # based on bytes-written stats from _mic_writer, add
+                # the configured pad, and write the release keystroke
+                # to the PTY ourselves after waiting that long. The
+                # client is no longer involved in the release timing.
+                if '"type":"mic_stop"' in text or '"type": "mic_stop"' in text:
+                    if _mic_owner is mic_token:
+                        # Use a local module reference so reload-during-
+                        # dev (importlib.reload) picks up edits.
+                        from . import config as _app_config
+                        cfg = _app_config.load().mic
+                        drain_s = _mic_writer.estimate_drain_seconds()
+                        pad_s = cfg.drain_pad_ms / 1000.0
+                        total = drain_s + pad_s
+                        log.info(
+                            "mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs",
+                            _mic_writer.bytes_written,
+                            _mic_writer.drops, drain_s, pad_s, total,
+                        )
+                        _mic_writer.reset()
+                        _mic_owner = None
+                        asyncio.create_task(
+                            _release_ptt_after(pty_proc, total)
+                        )
+                    continue
                 _handle_client_text(text, pty_proc)
             elif (data := msg.get("bytes")) is not None:
                 _handle_client_binary(data, pty_proc, mic_limiter, mic_token)
@@ -347,7 +401,6 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     finally:
         # Release the mic if this WS was the owner so the next connection
         # can claim it.
-        global _mic_owner
         if _mic_owner is mic_token:
             _mic_owner = None
         tmux_sub.cancel()
@@ -559,6 +612,12 @@ def _handle_client_binary(data: bytes, pty_proc: PtyProcess,
         # samples into the pipe and produce garbled audio downstream.
         global _mic_owner
         if _mic_owner is None:
+            # New owner — zero the stats so estimate_drain_seconds()
+            # below reflects only this recording. Without this, a prior
+            # recording's bytes_written/first_write_ts would leak into
+            # the next mic_stop's drain calculation if the owning WS
+            # disconnected before sending mic_stop.
+            _mic_writer.reset()
             _mic_owner = mic_token
         if _mic_owner is not mic_token:
             return

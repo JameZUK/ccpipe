@@ -15,6 +15,7 @@ import { TerminalSocket } from "./ws";
 //   - settings / file-panel / session-picker are large (758 + 752 + 629
 //     LOC) and gated behind a button or a no-last-session bootstrap.
 //   - xterm, mic, tts, waveform are loaded when a terminal view attaches.
+import { getMicConfig, type MicConfig } from "./api";
 import type { MicStreamer as MicStreamerType } from "./mic";
 import type { TtsPlayer as TtsPlayerType } from "./tts";
 import * as wakeLock from "./wake-lock";
@@ -269,6 +270,7 @@ async function attachTerminal(session: string): Promise<void> {
       authRequired,
       onDisplayPrefsChange: (p) => terminalApi?.applyPrefs(p),
       onSessionInvalidated: () => { socket.close(); bootstrap(); },
+      onMicConfigChange: (cfg) => { applyMicConfig(cfg); },
     });
   };
 
@@ -421,6 +423,13 @@ async function attachTerminal(session: string): Promise<void> {
   // the bug we're trying to fix.
   let bottomOnNextOutput = false;
   let mic: MicStreamerType | null = null;
+  const applyMicConfig = (cfg: MicConfig): void => {
+    mic?.setConfig({
+      autoStopEnabled: cfg.auto_stop_enabled,
+      silenceMs: cfg.silence_ms,
+      maxRecordingSeconds: cfg.max_recording_seconds,
+    });
+  };
   // Pass the session name so mute state is scoped per-session — muting
   // one conversation no longer silences a sibling tab.
   const tts: TtsPlayerType = new TtsPlayer(session);
@@ -500,24 +509,12 @@ async function attachTerminal(session: string): Promise<void> {
   // utterances; 200 ms gives the chain comfortable headroom while
   // still being imperceptible from the user's tap-to-speak rhythm.
   const TRIGGER_TO_AUDIO_DELAY_MS = 200;
-  // Wait between tearing the mic down and sending the second meta+k
-  // (release-PTT). Two things need to settle in this window:
-  //   1. Audio frames captured immediately before mic.stop() are
-  //      still in transit (browser send-queue → WS → backend write
-  //      → Pulse pipe-source → claude's read buffer). Releasing PTT
-  //      too quickly causes claude to stop listening before those
-  //      frames arrive.
-  //   2. Claude's STT has a lookahead/buffer that takes ~1–2s to
-  //      finalize the transcription of the in-flight utterance. The
-  //      release-PTT signal halts that finalization, so it must
-  //      come AFTER the STT has had time to finish. Without this
-  //      delay the tail of the utterance gets dropped on claude's
-  //      side even though we captured + delivered the audio.
-  // 2500 ms gives both layers comfortable headroom. The earlier
-  // 1500 ms still let the STT cut off occasional tail words on
-  // longer utterances; another second of post-mic-stop wait makes
-  // the release-PTT firmly land after STT finalisation.
-  const AUDIO_TO_TRIGGER_DELAY_MS = 2500;
+  // The release-PTT timing on stop used to live here as a fixed
+  // post-stop delay (AUDIO_TO_TRIGGER_DELAY_MS). The backend now
+  // owns it: on `mic_stop` it estimates pipeline drain from
+  // bytes-written stats and adds the configured drain_pad_ms, then
+  // writes the release keystroke itself. So the client just sends
+  // `mic_stop` and walks away.
 
   let recording = false;
   const stateSubs: Array<(r: boolean) => void> = [];
@@ -564,16 +561,14 @@ async function attachTerminal(session: string): Promise<void> {
   const toggleMic = async (): Promise<void> => {
     if (!micAvailable) return;
     if (recording) {
-      // Stop: tear down browser mic, then tell /voice (second tap → submit).
+      // Stop: tear down browser mic, then hand the release-PTT timing
+      // off to the backend via mic_stop. The backend knows how many
+      // bytes are still draining through Pulse and how much pad to
+      // add for claude's STT finalisation — far more accurate than
+      // any fixed client-side delay.
       setRecording(false);
       try { await mic?.stop(); } catch {}
-      // See AUDIO_TO_TRIGGER_DELAY_MS comment for the why. We wait for
-      // (a) in-flight audio to drain through the pipeline and (b)
-      // claude's STT to finish processing the utterance, BEFORE
-      // releasing PTT. Without this the tail of the utterance gets
-      // truncated even though the audio was captured + delivered.
-      await new Promise((r) => setTimeout(r, AUDIO_TO_TRIGGER_DELAY_MS));
-      socket.send({ type: "input", data: VOICE_TRIGGER });
+      socket.send({ type: "mic_stop" });
       void wakeLock.release();
     } else {
       setRecording(true);
@@ -676,7 +671,15 @@ async function attachTerminal(session: string): Promise<void> {
       setMicAvailable(!!(msg.voice && secure));
       if (msg.voice && !secure) showHttpsBanner();
 
-      if (micAvailable && !mic) mic = new MicStreamer(socket);
+      if (micAvailable && !mic) {
+        mic = new MicStreamer(socket);
+        // Fetch the persisted voice-input settings and apply once
+        // they land. Mic stays at safe defaults until the round-trip
+        // finishes; a slow GET doesn't block the UI from working.
+        void getMicConfig()
+          .then((cfg) => applyMicConfig(cfg))
+          .catch((e) => { console.warn("mic config fetch failed:", e); });
+      }
       if (!mobile) {
         // Desktop FAB updates here. Mobile composer subscribes to
         // setMicAvailable via the adapter and updates itself.

@@ -41,7 +41,12 @@ export type ClientMessage =
   | { type: "ping" }
   // Mirror of the client mute state. Server skips the Kokoro round-trip
   // and TTS audio fan-out for any subscription whose `muted` is true.
-  | { type: "tts_mute"; value: boolean };
+  | { type: "tts_mute"; value: boolean }
+  // Sent after the browser mic has been torn down. The server estimates
+  // the audio drain time from bytes-written stats, adds the configured
+  // pad, and writes claude's release-PTT keystroke to the PTY itself
+  // after that delay — the client no longer schedules it.
+  | { type: "mic_stop" };
 
 // Binary frame type prefixes (must match backend ws.py). Every binary
 // frame is now tagged so a PTY byte that happens to look like a TTS
