@@ -201,6 +201,10 @@ proxy host.
   systemd drop-in, troubleshooting.
 - [`docs/development.md`](docs/development.md) — dev workflow, layout,
   WebSocket protocol, tests.
+- [`docs/debugging.md`](docs/debugging.md) — diagnostic playbook for
+  the PTY → WebSocket byte stream (the "gap until I refresh" class
+  of symptom): journal stats, live counter endpoint, regression
+  tests, reproducer recipe.
 - [`docs/threat-model.md`](docs/threat-model.md) — design-level threat
   model (post-pen-test).
 - [`SECURITY.md`](SECURITY.md) — reporting vulnerabilities.

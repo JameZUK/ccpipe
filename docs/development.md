@@ -88,6 +88,8 @@ systemd/
 docs/
   deployment.md       Reverse proxy + TLS + firewall + troubleshooting
   configuration.md    Env vars + voice setup + login + state files
+  debugging.md        PTY → WS stream debug playbook (byte accounting,
+                      /api/debug/sessions, doctor regression modes)
   development.md      This file
   threat-model.md     Design-level threat model (post-pen-test)
 ```
@@ -117,6 +119,27 @@ Server → client text frames (JSON):
 Server → client binary frames (1-byte prefix):
 - `0x00` — raw PTY output
 - `0x02` — encoded TTS audio chunk
+
+## Debugging the PTY → WebSocket stream
+
+If you see (or a user reports) terminal content disappearing until a
+page refresh restores it, the diagnostic playbook lives in
+[`docs/debugging.md`](debugging.md). Short version:
+
+1. `journalctl --user -u ccpipe.service -f | grep "ws closed\|send_bytes(pty) failed"`
+   — every WS close logs flow stats; `bytes_lost > 0` is the smoking
+   gun.
+2. `curl -b cookies https://<host>/api/debug/sessions | jq` — live
+   per-WS byte counters for in-flight connections.
+3. `python scripts/scrollback-doctor.py --realistic` — comprehensive
+   byte-pattern regression test (SGR, cursor, UTF-8, burst, etc.).
+4. `pytest backend/tests/test_ws_byte_accounting.py` — pins the
+   `read == sent + lost` invariant and no-silent-drop contract.
+
+The full debugging guide covers the reproducer (briefly DROP `:8080`
+via iptables to induce a forced drop and verify recovery), how to
+read the counters, and what to look at when `bytes_lost == 0` but
+the symptom persists.
 
 ## Source of truth for the voice-input pipeline
 
