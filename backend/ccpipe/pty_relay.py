@@ -47,6 +47,13 @@ class PtyProcess:
         # task needs to push. asyncio.Event.set() is loop-thread-safe
         # so write() can call it directly from the receive loop.
         self._drain_signal: asyncio.Event = asyncio.Event()
+        # Read pipeline. The master-fd reader is registered ONCE in
+        # start() (not per-read()), which removes two epoll_ctl
+        # syscalls + a future allocation per PTY chunk on the hot
+        # output path. Chunks land in this queue; read() just drains
+        # it. EOF is signalled by an empty bytes sentinel.
+        self._read_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._read_eof = False
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -73,6 +80,9 @@ class PtyProcess:
         loop.create_task(self._wait_for_exit())
         # Drain pending writes asynchronously when the FD is writable.
         self._drain_task = loop.create_task(self._drain_writes())
+        # Register the master-fd reader ONCE for the PTY's lifetime.
+        # Chunks land in self._read_queue and read() awaits the queue.
+        loop.add_reader(master_fd, self._on_master_readable)
 
     async def _wait_for_exit(self) -> None:
         pid = self._pid
@@ -105,34 +115,39 @@ class PtyProcess:
         if self._master_fd is not None:
             self._set_winsize(cols, rows)
 
-    async def read(self, max_bytes: int = 65536) -> bytes:
-        """Read available output. Returns b'' on EOF."""
-        assert self._master_fd is not None
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[bytes] = loop.create_future()
+    def _on_master_readable(self) -> None:
+        """Persistent reader callback. Fires whenever the kernel says
+        the PTY master fd is readable; pushes whatever's available into
+        ``self._read_queue``. Stays registered for the PTY's lifetime
+        so the hot output path doesn't pay add_reader + remove_reader
+        + create_future per chunk.
 
-        def _on_readable() -> None:
-            try:
-                data = os.read(self._master_fd, max_bytes)
-            except BlockingIOError:
-                return
-            except OSError:
-                data = b""
-            try:
-                loop.remove_reader(self._master_fd)
-            except Exception:
-                pass
-            if not fut.done():
-                fut.set_result(data)
-
-        loop.add_reader(self._master_fd, _on_readable)
+        EOF is signalled by an empty payload landing in the queue;
+        once seen we stop putting further chunks even if the kernel
+        keeps firing the readiness signal.
+        """
+        fd = self._master_fd
+        if fd is None or self._read_eof:
+            return
         try:
-            return await fut
-        finally:
-            try:
-                loop.remove_reader(self._master_fd)
-            except Exception:
-                pass
+            data = os.read(fd, 65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b""
+        if not data:
+            self._read_eof = True
+        self._read_queue.put_nowait(data)
+
+    async def read(self, max_bytes: int = 65536) -> bytes:
+        """Pop the next available output chunk from the queue.
+
+        Returns b'' on EOF. The ``max_bytes`` argument is honoured by
+        the persistent reader callback (which always reads up to 64
+        KiB); we keep the parameter for backwards compatibility with
+        existing callers but it's effectively informational now.
+        """
+        return await self._read_queue.get()
 
     def write(self, data: bytes) -> None:
         """Write to the PTY master. After terminate() this is a no-op so
@@ -249,6 +264,16 @@ class PtyProcess:
             try:
                 loop.remove_reader(fd)
             except (ValueError, KeyError):
+                pass
+        # Wake any pump() awaiting read() with an EOF marker. The
+        # reader is gone now so no more chunks will arrive; without
+        # this, pump's `await queue.get()` would block until the
+        # outer task cancellation propagates.
+        if not self._read_eof:
+            self._read_eof = True
+            try:
+                self._read_queue.put_nowait(b"")
+            except Exception:
                 pass
 
         # 2. SIGTERM and wait briefly for the child to exit cleanly.

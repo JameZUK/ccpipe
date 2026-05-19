@@ -90,6 +90,19 @@ def reset_throttle_state() -> None:
 
 def _login_throttle_ok(ip: str) -> bool:
     now = time.monotonic()
+    # Sweep stale entries BEFORE the throttle decision so a sustained
+    # flood that always trips the limit doesn't leak entries forever.
+    # Previously the GC sat at the bottom of the function, gated on
+    # the success path — under attack we'd return False well before
+    # reaching it and the per-IP dict grew with each distinct source.
+    cutoff = now - _LOGIN_BUCKET_WINDOW_S
+    if len(_login_attempts) > 256:
+        for k in list(_login_attempts.keys()):
+            b = _login_attempts[k]
+            while b and b[0] < cutoff:
+                b.pop(0)
+            if not b:
+                _login_attempts.pop(k, None)
     # ── Global window ──
     g_cutoff = now - _GLOBAL_LOGIN_WINDOW_S
     while _global_login_attempts and _global_login_attempts[0] < g_cutoff:
@@ -97,7 +110,6 @@ def _login_throttle_ok(ip: str) -> bool:
     if len(_global_login_attempts) >= _GLOBAL_LOGIN_MAX:
         return False
     # ── Per-IP window ──
-    cutoff = now - _LOGIN_BUCKET_WINDOW_S
     bucket = _login_attempts.setdefault(ip, [])
     while bucket and bucket[0] < cutoff:
         bucket.pop(0)
@@ -107,12 +119,6 @@ def _login_throttle_ok(ip: str) -> bool:
         return False
     bucket.append(now)
     _global_login_attempts.append(now)
-    # Opportunistic GC of empty IP entries — keeps the dict from
-    # accumulating one entry per distinct attacker source IP forever.
-    if len(_login_attempts) > 256:
-        for k, b in list(_login_attempts.items()):
-            if not b:
-                _login_attempts.pop(k, None)
     return True
 
 

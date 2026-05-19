@@ -12,15 +12,22 @@ the backend's live counters in a single log line.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..auth import AuthDep
+from ..auth import AuthDep, CsrfDep
 from ..ws import _active_counters
+
+# Sanity caps for the frontend snapshot body. The schema is free-form
+# so a misbehaving page (e.g. an XSS in a content modal) couldn't pipe
+# arbitrary-sized blobs into the operator's journal; this gates that.
+_SNAPSHOT_MAX_PAYLOAD_BYTES = 256 * 1024     # ~quarter MiB serialized
+_SNAPSHOT_MAX_NOTE_BYTES = 1024
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -79,7 +86,7 @@ class FrontendSnapshot(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-@router.post("/api/debug/snapshot", dependencies=[AuthDep])
+@router.post("/api/debug/snapshot", dependencies=[AuthDep, CsrfDep])
 async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
     """Log a frontend-captured diagnostic snapshot alongside the
     server's live counters for the same session.
@@ -89,6 +96,17 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
     client can render "what the server saw" in the same modal that
     captured the report.
     """
+    # Cap payload + note sizes before doing anything else with them.
+    # The note is reflected into the log line; the payload would be
+    # too if uncapped.
+    if len(body.note) > _SNAPSHOT_MAX_NOTE_BYTES:
+        raise HTTPException(status_code=413, detail="note too large")
+    try:
+        payload_bytes = len(json.dumps(body.payload, default=str))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="payload not serialisable")
+    if payload_bytes > _SNAPSHOT_MAX_PAYLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="payload too large")
     now = time.monotonic()
     matches = [c for c in _active_counters if c.session == body.session]
     backend: dict[str, object] = {}

@@ -397,14 +397,23 @@ class TtsService:
     async def _process_file(self, path: Path) -> None:
         if not self._enabled:
             return
-        # Defense in depth: refuse symlinks under the projects dir and
-        # check that the resolved path is still contained. Otherwise a
-        # symlink dropped under ~/.claude/projects/ could redirect us at
-        # an attacker-influenced JSONL.
+        # Defense in depth: refuse symlinks anywhere along the path
+        # (not just the leaf) and check that the resolved path is still
+        # inside the projects dir. A symlink in an ancestor that points
+        # outside the projects tree would slip past the original leaf-
+        # only check: e.g. /home/x/.claude/projects/proj-x is a symlink
+        # to /tmp/loot and /tmp/loot/session.jsonl is an attacker-
+        # writable file — resolved would land inside the canonical
+        # projects dir via relative_to() only if the resolve happens
+        # to come back inside it (it doesn't here, but the leaf-only
+        # check would have allowed the path if it did).
         try:
-            if path.is_symlink():
-                log.warning("tts: refusing symlinked transcript at %s", path)
-                return
+            for ancestor in (path, *path.parents):
+                if ancestor == self.projects_dir or ancestor == self.projects_dir.parent:
+                    break
+                if ancestor.is_symlink():
+                    log.warning("tts: refusing path with symlinked ancestor %s", ancestor)
+                    return
             resolved = path.resolve()
             resolved.relative_to(self.projects_dir.resolve())
         except (OSError, ValueError):
