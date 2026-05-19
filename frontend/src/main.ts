@@ -249,15 +249,16 @@ async function attachTerminal(session: string): Promise<void> {
   filesBtn.title = "Files";
   filesBtn.innerHTML = FOLDER_SVG;
   filesBtn.addEventListener("click", async () => {
-    // Resolve the fs jail root before opening so we land inside it —
-    // the previous hardcoded "/home" was the parent of the default
-    // root and got rejected by every fs endpoint with a 403.
+    // Prefer the session's working directory (the project root the
+    // user is actively in) so the panel opens where they're working
+    // rather than at the fs jail root. Falls back to the fs root if
+    // hello hasn't arrived yet or the server couldn't resolve it.
     const { getFsConfig } = await import("./api");
     const [{ openFilePanel }, cfg] = await Promise.all([
       import("./file-panel"),
       getFsConfig().catch(() => ({ root: "/" } as { root: string })),
     ]);
-    openFilePanel(document.body, { initialPath: cfg.root });
+    openFilePanel(document.body, { initialPath: sessionCwd ?? cfg.root });
   });
 
   const settingsBtn = document.createElement("button");
@@ -422,6 +423,12 @@ async function attachTerminal(session: string): Promise<void> {
   // the TOP once the replay processes microseconds later), exactly
   // the bug we're trying to fix.
   let bottomOnNextOutput = false;
+  // Working directory of this tmux session as reported by the
+  // server's hello. Used to default file/directory-browse dialogs
+  // (statusbar Files pill, mobile composer's folder button) to the
+  // project root the user is actually working in, rather than the
+  // fs jail root. Null until hello arrives (or on resolve failure).
+  let sessionCwd: string | null = null;
   let mic: MicStreamerType | null = null;
   const applyMicConfig = (cfg: MicConfig): void => {
     mic?.setConfig({
@@ -667,6 +674,11 @@ async function attachTerminal(session: string): Promise<void> {
       // correct state for the live tail that follows.
       bottomOnNextOutput = true;
       sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(msg.session)}`;
+      // Cache the session's working dir so the Files pill + the
+      // mobile composer's folder button default to the project root
+      // instead of $HOME. Falls through to the fs config root if the
+      // server couldn't resolve it.
+      sessionCwd = msg.cwd ?? null;
       const secure = isSecureContext();
       setMicAvailable(!!(msg.voice && secure));
       if (msg.voice && !secure) showHttpsBanner();
@@ -781,6 +793,7 @@ async function attachTerminal(session: string): Promise<void> {
       },
       onConnectionChange,
       onAvailabilityChange: onMicAvailabilityChange,
+      getSessionCwd: () => sessionCwd,
     });
   } else {
     // Desktop FAB: same tap-to-toggle behaviour

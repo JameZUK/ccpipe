@@ -7,7 +7,7 @@
 
 import { getFsConfig } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
-import { MIC_SVG, STOP_SVG } from "./icons";
+import { FOLDER_SVG, MIC_SVG, STOP_SVG } from "./icons";
 import { commitPendingShare, discardPendingShare, peekPendingShare } from "./main";
 import { TerminalSocket } from "./ws";
 import type { Waveform } from "./waveform";
@@ -40,6 +40,11 @@ export interface MobileMicAdapter {
    * hello arrives, or if voice support is toggled later). The callback
    * fires once immediately with the current value. Returns unsubscribe. */
   onAvailabilityChange(cb: (available: boolean) => void): () => void;
+  /** Returns the session's current working directory if known, else
+   * null. Called lazily so the value reflects the most recent hello
+   * even after a WS reconnect. Used to default the composer's folder
+   * picker to the project root rather than the fs jail root. */
+  getSessionCwd?(): string | null;
 }
 
 export interface MobileUI {
@@ -69,24 +74,29 @@ export function mountMobileUI(parent: HTMLElement,
   waveCanvas.className = "composer__wave";
   inputbox.append(textarea, waveCanvas);
 
-  // "Attach a file path" — opens the dir browser focused on the user's
-  // home, navigates to a dir or types a path, and pastes the chosen
-  // path into the composer. Useful for handing claude a project root or
-  // a specific filename without typing it byte-by-byte on a phone.
+  // "Insert a file or directory path" — opens the dir browser focused
+  // on the user's home, navigates to a dir or types a path, and
+  // splices the chosen path into the composer. Useful for handing
+  // claude a project root or a specific filename without typing it
+  // byte-by-byte on a phone. Icon is a folder, not the historical
+  // paperclip — paperclip implies "attach file contents" which is
+  // exactly what this doesn't do.
   const attachBtn = document.createElement("button");
   attachBtn.type = "button";
   attachBtn.className = "composer__attach";
-  attachBtn.title = "Insert file or directory path";
-  attachBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05 12.25 20.24a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95L9.78 18.46a2 2 0 0 1-2.83-2.83L15.5 7.07"/></svg>`;
+  attachBtn.title = "Insert a file or folder path";
+  attachBtn.innerHTML = FOLDER_SVG;
   attachBtn.addEventListener("click", async (e) => {
     e.preventDefault();
-    // Open the browser at the fs jail root rather than the legacy
-    // hardcoded "/home" — the jail root is whatever CCPIPE_FS_ROOT
-    // is set to (or the operator's home by default), and /home itself
-    // is the parent of the default jail so the browser used to 403
-    // on first open. cached, so cheap on repeat presses.
-    let initialPath = "/";
-    try { initialPath = (await getFsConfig()).root; } catch { /* keep "/" */ }
+    // Open the browser at the session's working directory (the
+    // project root the user is actively in) when available — that's
+    // almost always what they want. Falls back to the fs jail root
+    // if the cwd isn't yet known (hello hasn't arrived) or the
+    // server couldn't resolve it.
+    let initialPath = mic.getSessionCwd?.() ?? null;
+    if (!initialPath) {
+      try { initialPath = (await getFsConfig()).root; } catch { initialPath = "/"; }
+    }
     openDirectoryBrowser(document.body, {
       initialPath,
       onPick: (p) => {
