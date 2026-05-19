@@ -10,7 +10,44 @@ import {
   loadDisplayPrefs,
   saveSessionFontSize,
 } from "./display-prefs";
+import { isMobileLayout } from "./mobile";
+import { resolveTerminalFontFamily } from "./terminal-fonts";
 import { TerminalSocket } from "./ws";
+
+/** Pick the terminal-font preference matching the current device.
+ * Two prefs are stored — desktop and mobile — because what reads well
+ * on a 27" monitor is rarely what reads well on a phone. The mobile
+ * default leans on a legibility-tuned bundled font; desktop sticks to
+ * the OS native mono. The dropdown UI in settings.ts edits both. */
+function pickFontIdForDevice(prefs: DisplayPrefs): string {
+  return isMobileLayout() ? prefs.terminalFontMobile : prefs.terminalFontDesktop;
+}
+
+/** Promise that resolves when the browser has loaded the primary
+ * font in `family` at `size`. Used by applyPrefs to delay the
+ * post-font-change resize until xterm can actually measure cells
+ * with the NEW font's glyph metrics (resizing while the fallback
+ * stack is still being rendered produces miscounted cols/rows that
+ * snap to the right values a frame later when the woff2 finishes).
+ *
+ * Returns immediately if `family` is a bare system stack (no quoted
+ * custom font name) or if document.fonts isn't supported. Errors
+ * from load() are swallowed — the worst outcome is one extra fit
+ * tick when the text reflows on its own. */
+function ensureTerminalFontReady(family: string, size: number): Promise<void> {
+  if (typeof document === "undefined" || !document.fonts?.load) {
+    return Promise.resolve();
+  }
+  // Take the first family name from the comma-separated stack —
+  // that's the custom font we're waiting on. System-stack-only
+  // selections start with a bare keyword like `ui-monospace` and
+  // need no load wait.
+  const primary = family.split(",")[0].trim();
+  if (!primary.startsWith("'") && !primary.startsWith('"')) {
+    return Promise.resolve();
+  }
+  return document.fonts.load(`${size}px ${primary}`).then(() => {}, () => {});
+}
 
 export function createTerminal(container: HTMLElement, socket: TerminalSocket,
                                 initialPrefs: DisplayPrefs = loadDisplayPrefs(),
@@ -19,7 +56,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // accents. The full ANSI 16 are overridden so TUI output (Claude Code uses
   // warm yellow / orange heavily) sits in the same hue family as the chrome.
   const term = new Terminal({
-    fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+    fontFamily: resolveTerminalFontFamily(pickFontIdForDevice(initialPrefs)),
     fontSize: initialPrefs.fontSize,
     lineHeight: initialPrefs.lineHeight,
     letterSpacing: initialPrefs.letterSpacing,
@@ -94,10 +131,18 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // Upgrade to the WebGL renderer when available. 2-5x faster on Claude
   // Code's busy TUI redraws; falls back silently to the default DOM
   // renderer if the addon fails to attach (no WebGL2, context lost, etc.).
+  //
+  // The addon instance escapes the try-block scope because
+  // applyPrefs() needs to call webgl.clearTextureAtlas() after a font
+  // change. xterm's WebGL renderer caches glyphs in a texture atlas
+  // keyed on the OLD font; without an explicit clear, post-change
+  // renders paint old-shape glyphs at the new cell positions, which
+  // looks exactly like "the terminal didn't reflow for the new font".
+  let webgl: WebglAddon | null = null;
   let webglActive = false;
   try {
-    const webgl = new WebglAddon();
-    webgl.onContextLoss(() => { webgl.dispose(); webglActive = false; });
+    webgl = new WebglAddon();
+    webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; webglActive = false; });
     term.loadAddon(webgl);
     webglActive = true;
   } catch (e) {
@@ -485,12 +530,47 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    * through scheduleResize() instead so the debounce + double-rAF
    * pattern lets xterm re-measure first. */
   const applyPrefs = (next: DisplayPrefs): void => {
+    // Apply non-font-family options immediately — they don't need
+    // a woff2 to be loaded before xterm can measure correctly.
     term.options.fontSize = next.fontSize;
     term.options.lineHeight = next.lineHeight;
     term.options.letterSpacing = next.letterSpacing;
     term.options.cursorBlink = next.cursorBlink;
     term.options.cursorStyle = next.cursorStyle;
     scheduleResize();
+
+    const nextFontFamily = resolveTerminalFontFamily(pickFontIdForDevice(next));
+    if (nextFontFamily === term.options.fontFamily) return;
+
+    // Three things need to happen, in this order, for a runtime font
+    // change to land cleanly without a page reload:
+    //
+    //   1. Pre-load the woff2 before assigning to xterm. xterm.js's
+    //      CharSizeService runs a SYNCHRONOUS DOM measurement on
+    //      assignment and caches the result; if the font isn't yet
+    //      loaded at that moment, the measurement reads the fallback
+    //      stack and the wrong cell width sticks.
+    //   2. Clear the WebGL texture atlas. The WebGL renderer caches
+    //      rasterised glyphs in a texture atlas keyed on the OLD
+    //      font; without an explicit clear the renderer happily
+    //      paints old-shape glyphs even after fontFamily has changed,
+    //      which manifests as "the terminal didn't reflow for the
+    //      new font" exactly as reported.
+    //   3. Request a full refresh and a fit. refresh() re-rasters
+    //      every visible row against the now-loaded font; fit() picks
+    //      up the new cell metrics and resizes cols/rows + the server.
+    //
+    // For system fonts (no quoted custom family) step 1 resolves
+    // immediately so the user sees no extra latency in the common
+    // "I picked System mono" case.
+    void ensureTerminalFontReady(nextFontFamily, next.fontSize).then(() => {
+      term.options.fontFamily = nextFontFamily;
+      if (webglActive && webgl) {
+        try { webgl.clearTextureAtlas(); } catch {}
+      }
+      try { term.refresh(0, term.rows - 1); } catch {}
+      scheduleResize();
+    });
   };
 
   /** Clear scrollback + visible AND reset terminal state so the next

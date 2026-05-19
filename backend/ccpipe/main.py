@@ -279,13 +279,16 @@ async def _head_to_get(request: Request, call_next):
 async def _security_headers(request: Request, call_next):
     response = await call_next(request)
     headers = response.headers
-    # Tight CSP; the frontend is single-bundle, fonts come from Google
-    # (whitelisted), and audio data is delivered via WS rather than HTTP.
+    # Tight CSP; the frontend is single-bundle, ALL fonts are
+    # self-hosted under /fonts/ (see @font-face blocks in styles.css —
+    # the Google Fonts CDN allowance was dropped when the bundled
+    # terminal-font selector landed), and audio data is delivered via
+    # WS rather than HTTP.
     headers.setdefault("Content-Security-Policy", (
         "default-src 'self'; "
         "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "
         "img-src 'self' data:; "
         "media-src 'self' blob:; "
         # 'self' in connect-src covers same-origin ws:/wss: under modern

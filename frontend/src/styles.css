@@ -3,6 +3,118 @@
    warm-dark · all-mono · parchment-on-charcoal · one signal accent
    ───────────────────────────────────────────────────────────────────────── */
 
+/* ─── Self-hosted fonts ─────────────────────────────────────────────────
+ * Font files live in src/assets/fonts/ (NOT in public/) so Vite's CSS
+ * plugin resolves their url() references as standard module assets —
+ * the woff2 files get hashed filenames and land in dist/assets/, with
+ * the rewritten url() paths in the bundled CSS pointing at them. The
+ * earlier public/ + <link href="/fonts/fonts.css"> arrangement looked
+ * cleaner but tripped a documented-but-confusing Vite behaviour where
+ * a public-dir CSS file referenced from HTML <link> gets pulled into
+ * the asset pipeline anyway, with the source path preserved in the
+ * output (dist/fonts/frontend/public/fonts/…). Keeping the
+ * declarations here, with relative paths into src/assets/fonts/, is
+ * the path Vite handles cleanly without any post-build fix-up.
+ *
+ * Lazy loading is unchanged: declaring @font-face doesn't trigger a
+ * download — the woff2 only fetches when CSS actually applies its
+ * font-family to rendered text. font-display: swap renders the
+ * system fallback immediately and swaps in the custom font when it
+ * lands. So the user pays the bandwidth for the font(s) they pick
+ * in Settings → Display and nothing else.
+ */
+@font-face {
+  font-family: 'Major Mono Display';
+  src: url('./assets/fonts/major-mono-display.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'DM Mono';
+  src: url('./assets/fonts/dm-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./assets/fonts/jetbrains-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fira Code';
+  src: url('./assets/fonts/fira-code.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('./assets/fonts/ibm-plex-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Cascadia Code';
+  src: url('./assets/fonts/cascadia-code.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Hack';
+  src: url('./assets/fonts/hack.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Source Code Pro';
+  src: url('./assets/fonts/source-code-pro.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('./assets/fonts/geist-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Iosevka';
+  src: url('./assets/fonts/iosevka.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Roboto Mono';
+  src: url('./assets/fonts/roboto-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Atkinson Hyperlegible Mono';
+  src: url('./assets/fonts/atkinson-hyperlegible-mono.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Cousine';
+  src: url('./assets/fonts/cousine.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
 

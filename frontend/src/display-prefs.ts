@@ -2,6 +2,8 @@
 // localStorage so each browser/device has its own — these aren't worth
 // syncing through the server.
 
+import { isKnownFontId } from "./terminal-fonts";
+
 const LS_KEY = "ccpipe.display.v1";
 
 export type CursorStyle = "bar" | "block" | "underline";
@@ -12,6 +14,16 @@ export interface DisplayPrefs {
   letterSpacing: number;   // 0..3 px
   cursorStyle: CursorStyle;
   cursorBlink: boolean;
+  // Terminal font is split desktop / mobile because what reads well
+  // on a 27" screen is rarely what reads well on a phone. The
+  // resolver in `terminal-fonts.ts` maps these ids onto the CSS
+  // font-family string xterm receives, and the same ids drive the
+  // two Settings → Display dropdowns. Defaults below pick a sane
+  // starting point per device class without forcing a download
+  // (system mono) on desktop, while preferring a legibility-tuned
+  // bundled font on mobile.
+  terminalFontDesktop: string;
+  terminalFontMobile: string;
 }
 
 export const DEFAULT_PREFS: DisplayPrefs = {
@@ -20,6 +32,8 @@ export const DEFAULT_PREFS: DisplayPrefs = {
   letterSpacing: 0,
   cursorStyle: "bar",
   cursorBlink: true,
+  terminalFontDesktop: "system",
+  terminalFontMobile: "jetbrains-mono",
 };
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -35,6 +49,15 @@ function sanitize(p: Partial<DisplayPrefs>): DisplayPrefs {
       ? (p.cursorStyle as CursorStyle)
       : DEFAULT_PREFS.cursorStyle,
     cursorBlink: typeof p.cursorBlink === "boolean" ? p.cursorBlink : DEFAULT_PREFS.cursorBlink,
+    // Validate against the known font catalogue — an unknown id (e.g.
+    // a font we removed in a later version) falls back to the
+    // device-appropriate default rather than blanking the terminal.
+    terminalFontDesktop: isKnownFontId(p.terminalFontDesktop as string)
+      ? (p.terminalFontDesktop as string)
+      : DEFAULT_PREFS.terminalFontDesktop,
+    terminalFontMobile: isKnownFontId(p.terminalFontMobile as string)
+      ? (p.terminalFontMobile as string)
+      : DEFAULT_PREFS.terminalFontMobile,
   };
 }
 

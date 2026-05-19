@@ -14,6 +14,7 @@
 
 import { getMicConfig, type MicConfig, setMicConfig } from "./api";
 import { changeCredentials, logout as apiLogout } from "./auth";
+import { TERMINAL_FONTS } from "./terminal-fonts";
 import {
   DEFAULT_PREFS,
   DisplayPrefs,
@@ -572,6 +573,14 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
   const sec = document.createElement("section");
   sec.className = "modal__section";
   const prefs = loadDisplayPrefs();
+  // Build the font-option list once — same options for both
+  // selectors, but each remembers its own selection so a user can
+  // run System mono on their desktop and JetBrains Mono on their
+  // phone (or vice versa). Mobile-friendly fonts get a glyph hint
+  // to nudge users on small screens.
+  const fontOptionsHTML = (selected: string) => TERMINAL_FONTS.map(f =>
+    `<option value="${f.id}"${f.id === selected ? " selected" : ""}>${f.label}${f.mobileFriendly ? " ★" : ""}</option>`
+  ).join("");
   sec.innerHTML = `
     <h2 class="modal__section-title">display</h2>
     <div class="modal__rows">
@@ -586,6 +595,22 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
       <label class="row">
         <span class="row__label">Letter spacing <span class="row__hint" data-role="letterSpacing-value">${prefs.letterSpacing}px</span></span>
         <input type="range" name="letterSpacing" min="0" max="3" step="0.5" value="${prefs.letterSpacing}" class="slider"/>
+      </label>
+      <label class="row">
+        <span class="row__label">Terminal font · desktop
+          <span class="row__hint" data-role="terminalFontDesktop-hint"></span>
+        </span>
+        <select name="terminalFontDesktop" class="select">
+          ${fontOptionsHTML(prefs.terminalFontDesktop)}
+        </select>
+      </label>
+      <label class="row">
+        <span class="row__label">Terminal font · mobile
+          <span class="row__hint" data-role="terminalFontMobile-hint">★ marks fonts tuned for small screens</span>
+        </span>
+        <select name="terminalFontMobile" class="select">
+          ${fontOptionsHTML(prefs.terminalFontMobile)}
+        </select>
       </label>
       <label class="row">
         <span class="row__label">Cursor style</span>
@@ -639,6 +664,34 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
   sec.querySelector<HTMLInputElement>("input[name=cursorBlink]")!
     .addEventListener("change", (e) => {
       apply({ ...working, cursorBlink: (e.target as HTMLInputElement).checked });
+    });
+
+  // Terminal-font selectors. On change, update the live hint with
+  // the catalogue's one-liner about the picked font and apply the
+  // pref — terminal.ts's applyPrefs re-resolves the family from the
+  // device-appropriate id so the live xterm flips fonts immediately
+  // without a page reload.
+  const updateFontHint = (target: "Desktop" | "Mobile", id: string) => {
+    const hintEl = sec.querySelector<HTMLElement>(
+      `[data-role=terminalFont${target}-hint]`);
+    if (!hintEl) return;
+    const font = TERMINAL_FONTS.find(f => f.id === id);
+    hintEl.textContent = font?.hint ?? "";
+  };
+  updateFontHint("Desktop", prefs.terminalFontDesktop);
+  updateFontHint("Mobile",  prefs.terminalFontMobile);
+
+  sec.querySelector<HTMLSelectElement>("select[name=terminalFontDesktop]")!
+    .addEventListener("change", (e) => {
+      const id = (e.target as HTMLSelectElement).value;
+      updateFontHint("Desktop", id);
+      apply({ ...working, terminalFontDesktop: id });
+    });
+  sec.querySelector<HTMLSelectElement>("select[name=terminalFontMobile]")!
+    .addEventListener("change", (e) => {
+      const id = (e.target as HTMLSelectElement).value;
+      updateFontHint("Mobile", id);
+      apply({ ...working, terminalFontMobile: id });
     });
 
   sec.querySelector<HTMLButtonElement>("[data-role=reset]")!
