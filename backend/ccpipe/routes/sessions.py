@@ -443,7 +443,13 @@ async def claude_sessions(cwd: str) -> dict[str, Any]:
         return {"sessions": []}
 
     running = _running_claude_session_ids()
-    out: list[dict[str, Any]] = []
+    # Collect the viable JSONL paths first, then fan-out the per-file
+    # header reads in parallel. The previous serial loop blocked one
+    # `to_thread` round-trip per JSONL — at hundreds of entries that's
+    # measurable; gather() collapses to a single event-loop wait while
+    # the executor handles file I/O concurrently. Sorting + truncation
+    # happens after.
+    viable: list[tuple[str, Path, int, int]] = []
     for jsonl in projects_dir.glob("*.jsonl"):
         sid = jsonl.stem
         if not _UUID_RE.match(sid):
@@ -454,12 +460,16 @@ async def claude_sessions(cwd: str) -> dict[str, Any]:
             stat = jsonl.stat()
         except OSError:
             continue
-        first_msg = await asyncio.to_thread(_read_first_real_user_message, jsonl)
-        out.append({
-            "id": sid,
-            "mtime": int(stat.st_mtime),
-            "size": stat.st_size,
-            "firstUserMessage": first_msg,
-        })
+        viable.append((sid, jsonl, int(stat.st_mtime), stat.st_size))
+
+    first_msgs = await asyncio.gather(*(
+        asyncio.to_thread(_read_first_real_user_message, path)
+        for (_, path, _, _) in viable
+    ))
+
+    out: list[dict[str, Any]] = [
+        {"id": sid, "mtime": mtime, "size": size, "firstUserMessage": first}
+        for (sid, _, mtime, size), first in zip(viable, first_msgs)
+    ]
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return {"sessions": out[:50]}

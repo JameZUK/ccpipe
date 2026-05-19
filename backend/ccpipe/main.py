@@ -7,6 +7,7 @@ and the lifespan that starts/stops the long-lived background services
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -124,17 +125,25 @@ async def _restore_sticky_sessions() -> None:
     if not entries:
         return
     restore_cmd = _sticky.build_restore_command()
-    for name, info in entries.items():
-        cwd = info.get("cwd")
-        if not cwd:
-            continue
+
+    async def _restore_one(name: str, cwd: str) -> None:
         try:
             if await _tmux.session_exists(name):
-                continue
+                return
             await _tmux.create_session(name, command=restore_cmd, cwd=cwd)
             log.info("sticky: restored session %r in %s", name, cwd)
         except Exception:
             log.exception("sticky: failed to restore session %r", name)
+
+    # Restore in parallel — each entry does one tmux subprocess
+    # spawn per check + create. With 8 sticky sessions the serial
+    # version stacked 16 tmux invocations end to end; gather()
+    # collapses that to one event-loop tick of overhead.
+    await asyncio.gather(*(
+        _restore_one(name, cwd)
+        for name, info in entries.items()
+        if (cwd := info.get("cwd"))
+    ))
 
 
 @asynccontextmanager

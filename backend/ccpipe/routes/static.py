@@ -39,7 +39,17 @@ def mount_static(app: FastAPI) -> None:
 
 
 def _serve_file(relative: str) -> FileResponse:
-    target = _frontend_dist() / relative
+    dist = _frontend_dist()
+    target = (dist / relative).resolve()
+    # Containment guard: every current caller passes a constant string
+    # so traversal isn't reachable today, but if a future caller wired
+    # a request-derived path through here, "/" + "/etc/passwd" /
+    # relative would silently resolve outside dist. Refuse anything
+    # that doesn't sit inside the configured frontend directory.
+    try:
+        target.relative_to(dist.resolve())
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not found")
     if not target.exists():
         raise HTTPException(
             status_code=503,

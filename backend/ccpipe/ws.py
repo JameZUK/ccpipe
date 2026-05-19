@@ -702,6 +702,15 @@ async def _wait_for_initial_resize(websocket: WebSocket
     """
     cols, rows = _FALLBACK_COLS, _FALLBACK_ROWS
     leftover: list[str] = []
+    # Defense in depth: cap how much pre-resize chatter we'll buffer
+    # before bailing. Legitimate clients send at most one or two pre-
+    # resize messages (a TTS mute mirror, an immediate input frame);
+    # a flooder could otherwise pre-fill the leftover list with up to
+    # 64 KiB × _INITIAL_RESIZE_TIMEOUT_S worth of text before the PTY
+    # is even spawned.
+    _LEFTOVER_MAX_ENTRIES = 16
+    _LEFTOVER_MAX_BYTES = 64 * 1024
+    leftover_bytes = 0
     deadline = asyncio.get_event_loop().time() + _INITIAL_RESIZE_TIMEOUT_S
     while True:
         remaining = deadline - asyncio.get_event_loop().time()
@@ -727,7 +736,13 @@ async def _wait_for_initial_resize(websocket: WebSocket
             except (KeyError, ValueError, TypeError):
                 pass
             return cols, rows, leftover
+        if len(leftover) >= _LEFTOVER_MAX_ENTRIES:
+            continue
+        tlen = len(text.encode("utf-8"))
+        if leftover_bytes + tlen > _LEFTOVER_MAX_BYTES:
+            continue
         leftover.append(text)
+        leftover_bytes += tlen
 
 
 def _is_session_still_authed(websocket: WebSocket) -> bool:

@@ -130,8 +130,41 @@ def _sync_rename_session(old: str, new: str) -> bool:
     return True
 
 
+# Small cache around list_sessions() to coalesce bursts. tmux's
+# `list-sessions` spawns a fresh subprocess every call (~5 ms);
+# without coalescing, the picker reload-on-mutation pattern stacks
+# multiple calls in rapid succession (the picker calls refresh()
+# after every create / rename / kill / sticky-toggle). 250 ms is well
+# below human-perceivable staleness for the session list.
+_LIST_SESSIONS_CACHE_TTL_S = 0.25
+_list_sessions_cache: tuple[float, list[TmuxSession]] | None = None
+_list_sessions_lock = asyncio.Lock()
+
+
 async def list_sessions() -> list[TmuxSession]:
-    return await asyncio.to_thread(_sync_list_sessions)
+    global _list_sessions_cache
+    now = asyncio.get_event_loop().time()
+    cached = _list_sessions_cache
+    if cached is not None and now - cached[0] < _LIST_SESSIONS_CACHE_TTL_S:
+        return cached[1]
+    async with _list_sessions_lock:
+        # Re-check inside the lock: a concurrent caller may have just
+        # populated the cache while we were queued.
+        cached = _list_sessions_cache
+        now = asyncio.get_event_loop().time()
+        if cached is not None and now - cached[0] < _LIST_SESSIONS_CACHE_TTL_S:
+            return cached[1]
+        fresh = await asyncio.to_thread(_sync_list_sessions)
+        _list_sessions_cache = (now, fresh)
+        return fresh
+
+
+def invalidate_list_sessions_cache() -> None:
+    """Drop any cached session list so the very next list_sessions()
+    call returns fresh. Tests and the lifespan teardown call this to
+    avoid carrying state across reinitialisation."""
+    global _list_sessions_cache
+    _list_sessions_cache = None
 
 
 _TMUX_QUERY_TIMEOUT_S = 5.0

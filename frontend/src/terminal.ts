@@ -469,10 +469,19 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // descendant handler) and drive viewport.scrollTop ourselves.
   let pillCleanup: (() => void) | null = null;
   let scrollCleanup: (() => void) | null = null;
+  // Handle for the retry timer below. Tracked so dispose() can clear
+  // it; otherwise a setTimeout fired after dispose would call
+  // querySelector against a possibly-still-mounted container and
+  // attach listeners to a viewport whose terminal is disposed.
+  let wireRetryTimer: number | null = null;
 
   const wireScrollAffordances = () => {
+    if (disposed) return;
     const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
-    if (!viewport) { setTimeout(wireScrollAffordances, 40); return; }
+    if (!viewport) {
+      wireRetryTimer = window.setTimeout(wireScrollAffordances, 40);
+      return;
+    }
 
     // Track at-bottom state for the live-pill visibility. We used to
     // also persist scroll offset to localStorage here so a refresh
@@ -737,6 +746,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     getDebugState, dumpBuffer,
     dispose: () => {
       disposed = true;
+      if (wireRetryTimer !== null) { clearTimeout(wireRetryTimer); wireRetryTimer = null; }
       pillCleanup?.();
       scrollCleanup?.();
       if (pending !== null) { clearTimeout(pending); pending = null; }

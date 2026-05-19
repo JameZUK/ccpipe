@@ -22,9 +22,16 @@ import * as wakeLock from "./wake-lock";
 
 const app = document.getElementById("app")!;
 
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/sw.js").catch(() => {});
-}
+// The service worker registration was a no-op (sw.js fetch handler
+// was empty); dropping the registration saves a network round-trip
+// on every cold load. If we ever want offline support / hashed
+// asset caching, this is where it'd come back — for now ccpipe is
+// online-only by design.
+//
+// Existing installs still have the SW registered. The next cache
+// purge (or eight days of inactivity → CacheStorage eviction) will
+// clean it up; nothing in the SW intercepts fetches so there's no
+// staleness risk in the meantime.
 
 // ─── OS-chrome (taskbar) compensation ────────────────────────────────────
 // When the browser window extends behind an OS taskbar — e.g. fullscreen
@@ -770,13 +777,21 @@ async function attachTerminal(session: string): Promise<void> {
   // + xterm buffer state + scrollback tail) and pop the debug modal.
   // The same affordance is mirrored in Settings → Debug for keyboard-
   // less users; both paths go through the same captureSnapshot()
-  // helper so the report shape stays consistent.
+  // helper so the report shape stays consistent. The disposed flag
+  // closes a race where a previous attachTerminal()'s listener
+  // survives long enough to fire AFTER its terminalApi has been
+  // disposed — touching term.cols / term.buffer.active on a disposed
+  // terminal throws. The ccpipe:dispose handler below sets it before
+  // removing the listener.
+  let debugListenerDisposed = false;
   const onDebugKey = (e: KeyboardEvent) => {
+    if (debugListenerDisposed) return;
     if (!e.ctrlKey || !e.shiftKey) return;
     if (e.key !== "D" && e.key !== "d") return;
     e.preventDefault();
     e.stopPropagation();
     void import("./debug").then(({ captureSnapshot, showDebugModal }) => {
+      if (debugListenerDisposed) return;
       const snap = captureSnapshot({ session, terminal: terminalApi, socket });
       showDebugModal(snap);
     });
@@ -787,6 +802,7 @@ async function attachTerminal(session: string): Promise<void> {
   const unsubPrefs = onDisplayPrefsChange((p) => terminalApi.applyPrefs(p));
   view.addEventListener("ccpipe:dispose", () => {
     unsubPrefs();
+    debugListenerDisposed = true;
     document.removeEventListener("keydown", onDebugKey);
     // Close the socket FIRST so its lifecycle hooks (online /
     // visibilitychange) stop firing and a zombie reconnect can't add a

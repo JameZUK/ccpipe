@@ -29,11 +29,19 @@ import json
 import logging
 import os
 import shlex
+import threading
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 STICKY_FILE_ENV = "CCPIPE_STICKY_FILE"
+
+# Serialises load → mutate → save inside set_sticky / clear / rename
+# so two concurrent tabs flipping the same session's sticky flag at
+# the same instant can't drop one update. The lock is held only for
+# the duration of one small JSON file I/O, which is fine on the
+# event loop because the file is tiny (a few KB max).
+_state_lock = threading.Lock()
 
 
 def _state_dir() -> Path:
@@ -96,9 +104,10 @@ def is_sticky(name: str) -> bool:
 
 
 def set_sticky(name: str, cwd: str) -> None:
-    data = load()
-    data[name] = {"cwd": cwd}
-    _save(data)
+    with _state_lock:
+        data = load()
+        data[name] = {"cwd": cwd}
+        _save(data)
 
 
 def clear(name: str) -> None:
@@ -106,20 +115,22 @@ def clear(name: str) -> None:
     Called by the kill/delete path so a user-initiated removal of a
     session also drops the sticky flag — otherwise the session would
     quietly come back on the next backend restart."""
-    data = load()
-    if name in data:
-        del data[name]
-        _save(data)
+    with _state_lock:
+        data = load()
+        if name in data:
+            del data[name]
+            _save(data)
 
 
 def rename(old: str, new: str) -> None:
     """Move the sticky entry from ``old`` to ``new`` so a rename
     preserves the sticky flag. No-op if ``old`` wasn't sticky."""
-    data = load()
-    if old in data:
-        data[new] = data[old]
-        del data[old]
-        _save(data)
+    with _state_lock:
+        data = load()
+        if old in data:
+            data[new] = data[old]
+            del data[old]
+            _save(data)
 
 
 def sticky_names() -> set[str]:
