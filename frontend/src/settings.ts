@@ -137,7 +137,7 @@ export function openSettings(opts: SettingsOpts): void {
   });
   panels[initial].classList.add("modal__panel--active");
 
-  modal.append(buildHeader(), tabs, displayPanel, voicePanel, accountPanel, buildAboutFooter());
+  modal.append(buildHeader(), tabs, displayPanel, voicePanel, accountPanel, debugPanel, buildAboutFooter());
 
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
