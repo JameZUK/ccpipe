@@ -8,7 +8,12 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <!-- PNG-only favicons. SVG favicon removed because Firefox Android
+         was using it as a fallback bitmap when creating PWA shortcuts
+         (via createWithAdaptiveBitmap), producing a blank white tile
+         on launchers that apply their own mask — Smart Launcher in
+         particular. Chrome installs PWAs as WebAPKs and isn't
+         affected. Browser tabs handle the PNGs fine. -->
     <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
     <!-- iOS doesn't reliably render SVG apple-touch-icons; use the
