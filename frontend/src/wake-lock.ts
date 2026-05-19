@@ -16,32 +16,41 @@ type Sentinel = { released: boolean; release: () => Promise<void> };
 let activeSentinel: Sentinel | null = null;
 let refCount = 0;
 let visibilityHooked = false;
+// Tracks an in-flight acquire so concurrent callers (e.g. a user
+// gesture firing at the same instant as the visibilitychange handler
+// post-tab-switch) don't both await `wakeLock.request("screen")` —
+// without this, the second resolver clobbers `activeSentinel` and
+// orphans the first sentinel (no release ever sent to the OS).
+let acquireInFlight: Promise<void> | null = null;
 
 const supported = typeof navigator !== "undefined"
   && "wakeLock" in navigator
   && typeof (navigator as unknown as { wakeLock: { request: unknown } }).wakeLock.request === "function";
 
-async function _acquireUnderlying(): Promise<void> {
-  if (!supported || activeSentinel) return;
-  try {
-    const s = await (navigator as unknown as {
-      wakeLock: { request(type: "screen"): Promise<Sentinel> };
-    }).wakeLock.request("screen");
-    activeSentinel = s;
-    // The browser auto-releases when the tab hides; re-acquire next time
-    // it becomes visible if anyone still holds a ref.
-    if (!visibilityHooked) {
-      visibilityHooked = true;
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible" && refCount > 0 && !activeSentinel) {
-          void _acquireUnderlying();
-        }
-      });
+function _acquireUnderlying(): Promise<void> {
+  if (!supported || activeSentinel) return Promise.resolve();
+  if (acquireInFlight) return acquireInFlight;
+  acquireInFlight = (async () => {
+    try {
+      const s = await (navigator as unknown as {
+        wakeLock: { request(type: "screen"): Promise<Sentinel> };
+      }).wakeLock.request("screen");
+      activeSentinel = s;
+      if (!visibilityHooked) {
+        visibilityHooked = true;
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible" && refCount > 0 && !activeSentinel) {
+            void _acquireUnderlying();
+          }
+        });
+      }
+    } catch (err) {
+      console.warn("wake-lock acquire failed:", err);
+    } finally {
+      acquireInFlight = null;
     }
-  } catch (err) {
-    // permissions or transient OS failure — log once, otherwise quiet.
-    console.warn("wake-lock acquire failed:", err);
-  }
+  })();
+  return acquireInFlight;
 }
 
 async function _releaseUnderlying(): Promise<void> {

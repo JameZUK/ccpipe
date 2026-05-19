@@ -277,6 +277,12 @@ export function mountMobileUI(parent: HTMLElement,
   micBtn.addEventListener("pointerup", (e) => {
     if (e.pointerId !== activePointer) return;
     activePointer = null;
+    // releasePointerCapture explicitly: without it, a mid-press tap
+    // (isHolding === false) cancels the timer and clears
+    // activePointer but leaves the captured pointer dangling. iOS
+    // WebKit logs a warning and may route the next pointer event to
+    // the wrong element.
+    try { micBtn.releasePointerCapture(e.pointerId); } catch {}
     if (isHolding) {
       isHolding = false;
       mic.onMicEvent("hold-end");
@@ -288,6 +294,7 @@ export function mountMobileUI(parent: HTMLElement,
   micBtn.addEventListener("pointercancel", (e) => {
     if (e.pointerId !== activePointer) return;
     activePointer = null;
+    try { micBtn.releasePointerCapture(e.pointerId); } catch {}
     if (isHolding) {
       isHolding = false;
       mic.onMicEvent("hold-end");
@@ -413,6 +420,11 @@ export function mountMobileUI(parent: HTMLElement,
   // if the finger slides off (pointercancel) or the OS reclaims focus.
   const REPEAT_DELAY_MS = 400;
   const REPEAT_INTERVAL_MS = 30;
+  // Collected so dispose() can kill any held-key repeat that would
+  // otherwise outlive the UI (closures pin socket.send). Each entry
+  // is the per-button stop() closure; calling it clears that
+  // button's initial + repeat timers.
+  const modifierStopFns: Array<() => void> = [];
   for (const k of KEYS) {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -436,6 +448,7 @@ export function mountMobileUI(parent: HTMLElement,
       if (initialTimer !== null) { clearTimeout(initialTimer); initialTimer = null; }
       if (repeatTimer !== null) { clearInterval(repeatTimer); repeatTimer = null; }
     };
+    modifierStopFns.push(stop);
     btn.addEventListener("pointerdown", (e) => {
       // Primary button only. Mouse right-click and touch-secondary
       // shouldn't fire.
@@ -538,6 +551,12 @@ export function mountMobileUI(parent: HTMLElement,
       unsubConn();
       unsubAvail();
       waveform?.dispose();
+      // Kill any in-flight modifier-key repeat timers before removing
+      // the DOM — otherwise a held-down repeating key keeps firing
+      // socket.send() against a disposed UI until the user lifts.
+      for (const stop of modifierStopFns) {
+        try { stop(); } catch {}
+      }
       composer.remove();
       modifierRow.remove();
     },
