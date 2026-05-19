@@ -500,6 +500,23 @@ async function attachTerminal(session: string): Promise<void> {
   // utterances; 200 ms gives the chain comfortable headroom while
   // still being imperceptible from the user's tap-to-speak rhythm.
   const TRIGGER_TO_AUDIO_DELAY_MS = 200;
+  // Wait between tearing the mic down and sending the second meta+k
+  // (release-PTT). Two things need to settle in this window:
+  //   1. Audio frames captured immediately before mic.stop() are
+  //      still in transit (browser send-queue → WS → backend write
+  //      → Pulse pipe-source → claude's read buffer). Releasing PTT
+  //      too quickly causes claude to stop listening before those
+  //      frames arrive.
+  //   2. Claude's STT has a lookahead/buffer that takes ~1–2s to
+  //      finalize the transcription of the in-flight utterance. The
+  //      release-PTT signal halts that finalization, so it must
+  //      come AFTER the STT has had time to finish. Without this
+  //      delay the tail of the utterance gets dropped on claude's
+  //      side even though we captured + delivered the audio.
+  // 1500 ms gives both layers comfortable headroom and is small
+  // enough that the user-perceived latency between "I stopped
+  // talking" and "claude submitted" stays acceptable.
+  const AUDIO_TO_TRIGGER_DELAY_MS = 1500;
 
   let recording = false;
   const stateSubs: Array<(r: boolean) => void> = [];
@@ -549,6 +566,12 @@ async function attachTerminal(session: string): Promise<void> {
       // Stop: tear down browser mic, then tell /voice (second tap → submit).
       setRecording(false);
       try { await mic?.stop(); } catch {}
+      // See AUDIO_TO_TRIGGER_DELAY_MS comment for the why. We wait for
+      // (a) in-flight audio to drain through the pipeline and (b)
+      // claude's STT to finish processing the utterance, BEFORE
+      // releasing PTT. Without this the tail of the utterance gets
+      // truncated even though the audio was captured + delivered.
+      await new Promise((r) => setTimeout(r, AUDIO_TO_TRIGGER_DELAY_MS));
       socket.send({ type: "input", data: VOICE_TRIGGER });
       void wakeLock.release();
     } else {
