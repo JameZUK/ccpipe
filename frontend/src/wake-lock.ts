@@ -35,6 +35,16 @@ function _acquireUnderlying(): Promise<void> {
       const s = await (navigator as unknown as {
         wakeLock: { request(type: "screen"): Promise<Sentinel> };
       }).wakeLock.request("screen");
+      // Race: if release() landed between acquire() and our promise
+      // resolving, refCount is now 0. Storing the sentinel here would
+      // leak the OS lock — release() already ran, saw activeSentinel
+      // was still null (we were in flight), and returned. Drop the
+      // sentinel immediately so the screen actually goes back to
+      // its normal sleep behaviour.
+      if (refCount === 0) {
+        try { await s.release(); } catch {}
+        return;
+      }
       activeSentinel = s;
       if (!visibilityHooked) {
         visibilityHooked = true;

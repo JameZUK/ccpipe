@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import fcntl
 import logging
@@ -64,6 +65,10 @@ class PtyProcess:
         # full. Reported through PtyProcess.bytes_dropped() so the
         # WS layer can fold it into its WsCounters.bytes_lost.
         self._read_dropped = 0
+        # Tracks the cumulative-dropped value at the most recent
+        # "warning emitted" point so we can fire one log line per
+        # MiB of loss regardless of chunk-size cadence.
+        self._last_drop_reported = 0
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -158,9 +163,26 @@ class PtyProcess:
             # from the user's perspective.
             if data:
                 self._read_dropped += len(data)
-                if self._read_dropped % (1 << 20) < len(data):
+                # Warn once per MiB of cumulative drops. Track the
+                # last reported value separately so a bursty drop
+                # pattern doesn't skip MiB-boundary crossings (the
+                # previous `% (1<<20) < len(data)` heuristic missed
+                # warnings when chunk sizes didn't line up with the
+                # modulo).
+                if self._read_dropped - self._last_drop_reported >= (1 << 20):
+                    self._last_drop_reported = self._read_dropped
                     log.warning("pty read queue full; dropped a chunk "
                                 "(cumulative=%d bytes)", self._read_dropped)
+            else:
+                # EOF marker race: os.read returned b"" exactly when
+                # the queue was full. Without recovery, _read_eof is
+                # set but no sentinel reaches the queue and pump
+                # blocks forever on get(). Drain one slot and re-push
+                # the EOF so the next read() call returns b"".
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    self._read_queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    self._read_queue.put_nowait(b"")
 
     def bytes_dropped(self) -> int:
         """Total bytes dropped because the read queue was saturated.
@@ -258,6 +280,18 @@ class PtyProcess:
                     return
                 log.warning("pty drain write transient error: %s; will retry", exc)
                 n = 0
+                # Brief cooldown before the next attempt. Otherwise a
+                # persistent transient errno (ENOMEM under memory
+                # pressure) pins a CPU core: add_writer fires the
+                # callback immediately because the FD is already
+                # writable, the next iteration hits the same errno,
+                # repeat. 50 ms is short enough not to noticeably
+                # delay a real recovery and long enough to keep CPU
+                # off the floor.
+                try:
+                    await asyncio.sleep(0.05)
+                except asyncio.CancelledError:
+                    raise
             if n > 0:
                 del self._write_buffer[:n]
                 if not self._write_buffer:
