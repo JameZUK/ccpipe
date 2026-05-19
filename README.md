@@ -1,19 +1,22 @@
 # ccpipe
 
-Personal web interface to Claude Code, via tmux. Text + voice;
-PWA-installable.
+ccpipe is a web front-end for [Claude Code](https://claude.com/claude-code)
+sessions running in tmux. Install it on the workstation, server, or VM
+where you already run `claude` from a terminal; ccpipe attaches a
+browser tab to that same tmux session over a WebSocket.
 
-- Browser → WSS → FastAPI → `tmux attach -t <session>` → `claude` (the
-  TUI)
-- Multiple browsers attach to the same tmux session simultaneously
-  (laptop + phone mirror)
-- The unmodified `claude` binary holds the OAuth token; the backend
-  never touches credentials
-- Voice in: browser mic → AudioWorklet (16 kHz PCM) → backend →
-  Pulse/PipeWire pipe-source → `claude /voice`
-- Voice out: tail `~/.claude/projects/**/*.jsonl` → Kokoro-FastAPI →
-  stream MP3 back
-- Username + password gate, optional TOTP
+Real-world example: a headless dev VM in a homelab — no monitor, no
+soundcard, no microphone. SSH in once to start `claude` inside tmux,
+then `systemctl --user start ccpipe`. From then on, opening
+`https://your-host` on a phone or laptop gives you the live terminal:
+keystrokes, scrollback, `/voice` dictation, spoken replies. The VM
+needs no audio hardware — the microphone is a software-only Pulse
+pipe-source that ccpipe writes PCM into, and TTS plays back in the
+browser.
+
+Terminal stack unchanged: tmux owns the session, xterm.js renders it,
+the unmodified `claude` CLI does the API work. ccpipe is the bridge in
+the middle.
 
 ## Architecture
 
