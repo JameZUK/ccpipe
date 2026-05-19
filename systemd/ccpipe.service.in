@@ -87,7 +87,11 @@ RestartSec=3
 # shared with Pulse in the real /tmp.
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=read-write
+# ProtectHome is intentionally NOT set — ccpipe needs read-write
+# access to ~/.local/state/ccpipe (credentials, config, sticky map)
+# and ~/.claude (settings_patch, sticky restore, TTS transcript
+# tail). The valid values for ProtectHome= are true/false/read-only/
+# tmpfs; "read-write" isn't a thing and unset means "default access".
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
