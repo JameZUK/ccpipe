@@ -1,12 +1,34 @@
+<!-- ccpipe app icon — "any" purpose.
+     Spark mark from the login screen (4 diamond petals + amber core)
+     on the warm-charcoal palette background, with a soft radial halo
+     for depth. Rounded corners (rx=96 ≈ 18.75%) for in-browser
+     favicons and Android home screens where the launcher doesn't
+     apply its own mask. The maskable variant (icon-maskable.svg)
+     drops the rounded corners and shrinks the mark to fit Android's
+     adaptive-icon safe zone. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#f5a524" stop-opacity="0.22"/>
+      <stop offset="55%"  stop-color="#f5a524" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#f5a524" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background — ccpipe charcoal, rounded corners. -->
   <rect width="512" height="512" rx="96" fill="#0d0c08"/>
-  <text x="50%" y="50%"
-        text-anchor="middle"
-        dominant-baseline="central"
-        font-family="'Major Mono Display', ui-monospace, monospace"
-        font-size="140"
-        letter-spacing="14"
-        fill="#e8dfc8">
-    cc<tspan dx="0" dy="0" fill="#f5a524">·</tspan>p
-  </text>
+  <!-- Amber halo, painted over the background to give the spark depth -->
+  <rect width="512" height="512" rx="96" fill="url(#halo)"/>
+
+  <!-- Spark mark — 4 vertical-diamond petals rotated 0/45/90/135°
+       around the centre, plus an amber core. Petals extend ±150 from
+       centre (60% of canvas) so the mark reads clearly at thumbnail
+       sizes without crowding the corners. -->
+  <g transform="translate(256 256)">
+    <path d="M0 -150 L20 0 L0 150 L-20 0 Z" fill="#f5a524"/>
+    <path d="M0 -150 L20 0 L0 150 L-20 0 Z" fill="#f5a524" transform="rotate(45)"/>
+    <path d="M0 -150 L20 0 L0 150 L-20 0 Z" fill="#f5a524" transform="rotate(90)"/>
+    <path d="M0 -150 L20 0 L0 150 L-20 0 Z" fill="#f5a524" transform="rotate(135)"/>
+    <circle cx="0" cy="0" r="16" fill="#f5a524"/>
+  </g>
 </svg>

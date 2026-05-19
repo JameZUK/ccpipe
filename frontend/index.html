@@ -9,7 +9,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <link rel="apple-touch-icon" href="/icon-512.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+    <!-- iOS doesn't reliably render SVG apple-touch-icons; use the
+         180×180 PNG that rsvg-convert generated from icon.svg. iOS
+         applies its own rounded-corner mask on top. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <!-- All fonts are self-hosted. The @font-face declarations are
          in src/styles.css and reference src/assets/fonts/<id>.woff2
          (Vite hashes those into dist/assets/ during build). woff2
