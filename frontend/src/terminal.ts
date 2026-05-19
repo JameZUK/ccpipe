@@ -561,6 +561,13 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    * stale cell dimensions and compute the wrong rows/cols. Route
    * through scheduleResize() instead so the debounce + double-rAF
    * pattern lets xterm re-measure first. */
+  // Track the last-applied cursor colour id so applyPrefs() can
+  // skip the theme reassignment when only an unrelated pref (font
+  // size, blink, etc.) changed. Theme assignment forces xterm to
+  // invalidate the renderer's colour caches — cheap but not free,
+  // and unnecessary on the common slider-drag path.
+  let lastAppliedCursorColor = initialPrefs.cursorColor;
+
   const applyPrefs = (next: DisplayPrefs): void => {
     // Apply non-font-family options immediately — they don't need
     // a woff2 to be loaded before xterm can measure correctly.
@@ -574,11 +581,16 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // Cursor colour rides on xterm's theme object. We must hand a
     // FRESH object — mutating term.options.theme in place doesn't
     // trigger xterm's renderer-update handler. Preserve the rest of
-    // the theme by spreading the current value.
-    term.options.theme = {
-      ...term.options.theme,
-      cursor: resolveCursorColor(next.cursorColor),
-    };
+    // the theme by spreading the current value. Only rebuild when
+    // the colour actually changed; otherwise we're invalidating
+    // the renderer's colour caches for no reason.
+    if (next.cursorColor !== lastAppliedCursorColor) {
+      term.options.theme = {
+        ...term.options.theme,
+        cursor: resolveCursorColor(next.cursorColor),
+      };
+      lastAppliedCursorColor = next.cursorColor;
+    }
     scheduleResize();
 
     const nextFontFamily = resolveTerminalFontFamily(pickFontIdForDevice(next));

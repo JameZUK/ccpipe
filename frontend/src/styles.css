@@ -1203,11 +1203,6 @@ a:hover { color: var(--fg); }
   height: 0.85rem;
   flex-shrink: 0;
 }
-.pill__icon {
-  width: 0.85rem;
-  height: 0.85rem;
-}
-
 .pill--icon {
   padding: var(--s-1) var(--s-2);
 }
