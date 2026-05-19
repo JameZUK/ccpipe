@@ -19,24 +19,38 @@ export class MicStreamer {
   private pending: Promise<void> = Promise.resolve();
   private state: "idle" | "starting" | "running" | "stopping" = "idle";
 
-  // Voice-activity-detection: poll the analyser's time-domain RMS at a
-  // small interval; if it stays below the threshold for SILENCE_MS, fire
-  // onSilence. Lets the UI auto-finalise a recording the user forgot
-  // about, before the mic streams forever into a dead WS.
+  // Voice-activity-detection: poll the analyser's time-domain
+  // amplitude at a small interval; if it stays below the gate for
+  // SILENCE_MS, fire onSilence. Lets the UI auto-finalise a recording
+  // the user forgot about, before the mic streams forever into a dead
+  // WS.
   //
-  // Tuning history: the original 1500 ms / 0.02 threshold pair stopped
-  // too aggressively — natural mid-utterance pauses (breath, "uhh…",
-  // sub-sentence hesitation) and quiet trailing syllables both dropped
-  // below the gate fast enough that the silence-accumulator fired
-  // before the user was actually done. Bumped to 2500 ms and 0.012 RMS
-  // so the VAD is a tail-cleanup safety net, not a speech-finaliser.
+  // Tuning history:
+  //   - Original 1500 ms / 0.02 RMS: stopped too aggressively. Natural
+  //     mid-utterance pauses and quiet syllables tripped the
+  //     silence-accumulator before the user was done.
+  //   - 2500 ms / 0.012 RMS: still cut off the *tail* of utterances
+  //     where the user's voice softened at sentence-end. Specifically
+  //     reproduced as "the words 'the' and 'sentence' are missing"
+  //     when those trailing words were below the RMS gate.
+  //
+  // Current shape:
+  //   - RMS gate lowered to 0.008 so quieter sustained material counts
+  //     as voice. Just above typical room-silence floor with AGC on.
+  //   - Peak-amplitude gate added (0.10) alongside RMS. Voiceless
+  //     consonants ("s", "t", "th", "p") have very low average energy
+  //     but distinctive peaks; RMS alone smooths them into "silence".
+  //     Tracking the max absolute sample in each window catches those
+  //     bursts and resets the silence timer through the word.
+  //   - Either gate above its threshold counts as voice.
   // The user can still tap the mic explicitly to submit immediately.
   private vadInterval: number | null = null;
   private vadSilenceStart: number | null = null;
   private vadHasHadVoice = false;
   private static readonly VAD_POLL_MS = 100;
   private static readonly VAD_SILENCE_MS = 2500;
-  private static readonly VAD_THRESHOLD = 0.012;  // RMS, 0-1 scale
+  private static readonly VAD_THRESHOLD = 0.008;      // RMS, 0-1 scale
+  private static readonly VAD_PEAK_THRESHOLD = 0.10;  // peak |sample|, 0-1
 
   /** Callback fired after a sustained silence is detected. The receiver
    * should treat it like the user releasing PTT — stop recording + send
@@ -122,17 +136,23 @@ export class MicStreamer {
     this.vadInterval = window.setInterval(() => {
       if (!this.analyser || this.state !== "running") return;
       this.analyser.getByteTimeDomainData(buf);
-      // RMS of (sample - 128) / 128, then averaged. Cheap and works
-      // for our needs — speech sits comfortably above 0.02, silence
-      // hovers near 0.005-0.01.
+      // Two gates: sustained energy (RMS) and brief loud bursts
+      // (peak). Either one counts as voice. RMS alone smooths
+      // voiceless consonants into silence; the peak gate rescues
+      // them. See VAD_THRESHOLD / VAD_PEAK_THRESHOLD comments above
+      // for the tuning rationale.
       let sum = 0;
+      let peak = 0;
       for (let i = 0; i < buf.length; i++) {
         const v = (buf[i] - 128) / 128;
         sum += v * v;
+        const a = v < 0 ? -v : v;
+        if (a > peak) peak = a;
       }
       const rms = Math.sqrt(sum / buf.length);
       const now = performance.now();
-      if (rms >= MicStreamer.VAD_THRESHOLD) {
+      if (rms >= MicStreamer.VAD_THRESHOLD
+          || peak >= MicStreamer.VAD_PEAK_THRESHOLD) {
         this.vadHasHadVoice = true;
         this.vadSilenceStart = null;
         return;

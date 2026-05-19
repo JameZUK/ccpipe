@@ -513,10 +513,11 @@ async function attachTerminal(session: string): Promise<void> {
   //      come AFTER the STT has had time to finish. Without this
   //      delay the tail of the utterance gets dropped on claude's
   //      side even though we captured + delivered the audio.
-  // 1500 ms gives both layers comfortable headroom and is small
-  // enough that the user-perceived latency between "I stopped
-  // talking" and "claude submitted" stays acceptable.
-  const AUDIO_TO_TRIGGER_DELAY_MS = 1500;
+  // 2500 ms gives both layers comfortable headroom. The earlier
+  // 1500 ms still let the STT cut off occasional tail words on
+  // longer utterances; another second of post-mic-stop wait makes
+  // the release-PTT firmly land after STT finalisation.
+  const AUDIO_TO_TRIGGER_DELAY_MS = 2500;
 
   let recording = false;
   const stateSubs: Array<(r: boolean) => void> = [];
