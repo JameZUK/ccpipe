@@ -90,6 +90,11 @@ async def icon_192_png() -> FileResponse: return _serve_file("icon-192.png")
 async def icon_512_png() -> FileResponse: return _serve_file("icon-512.png")
 
 
+@router.get("/icon-maskable-192.png")
+async def icon_maskable_192_png() -> FileResponse:
+    return _serve_file("icon-maskable-192.png")
+
+
 @router.get("/icon-maskable-512.png")
 async def icon_maskable_512_png() -> FileResponse:
     return _serve_file("icon-maskable-512.png")
