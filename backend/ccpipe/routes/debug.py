@@ -46,6 +46,14 @@ _DIFF_CAPTURE_TIMEOUT_S = 2.0
 _DIFF_MAX_LINES = 10_000
 
 
+async def _noop_capture() -> list[str] | None:
+    """Awaitable that returns None immediately — used by the parallel
+    capture path when one of the two screens doesn't need a capture
+    so gather() still gets two awaitables and the destructuring lines
+    up cleanly."""
+    return None
+
+
 async def _capture_pane_plain(
     session: str, lines: int, alternate: bool = False,
 ) -> list[str] | None:
@@ -267,23 +275,36 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
             active_type = str(buffers.get("activeType", ""))
             normal_tail = buffers.get("normal") or []
             alt_tail = buffers.get("alternate") or []
-            normal_back = (
-                await _capture_pane_plain(body.session, len(normal_tail) or 1, alternate=False)
-                if isinstance(normal_tail, list) and normal_tail else None
-            )
-            alt_back = (
-                await _capture_pane_plain(body.session, len(alt_tail) or 1, alternate=True)
-                if isinstance(alt_tail, list) and alt_tail else None
-            )
+            # Capture both screens in parallel — sequential awaits
+            # doubled the worst-case snapshot-endpoint latency to
+            # ~4 s (2 × 2 s timeout). gather() collapses to a single
+            # wall-clock wait. Skip the alt-screen capture entirely
+            # when the user isn't on alt-screen — that's the common
+            # case and saves one full subprocess spawn.
+            want_alt = (active_type == "alternate" and
+                        isinstance(alt_tail, list) and bool(alt_tail))
+            want_normal = isinstance(normal_tail, list) and bool(normal_tail)
+            tasks = []
+            if want_normal:
+                tasks.append(_capture_pane_plain(
+                    body.session, len(normal_tail), alternate=False))
+            else:
+                tasks.append(_noop_capture())
+            if want_alt:
+                tasks.append(_capture_pane_plain(
+                    body.session, len(alt_tail), alternate=True))
+            else:
+                tasks.append(_noop_capture())
+            normal_back, alt_back = await asyncio.gather(*tasks)
             diff = {
                 "active_type": active_type,
                 "normal": (
-                    _diff_buffers([str(x) for x in normal_tail], normal_back)
-                    if isinstance(normal_tail, list) and normal_back is not None else None
+                    _diff_buffers(list(normal_tail), normal_back)
+                    if want_normal and normal_back is not None else None
                 ),
                 "alternate": (
-                    _diff_buffers([str(x) for x in alt_tail], alt_back)
-                    if isinstance(alt_tail, list) and alt_back is not None else None
+                    _diff_buffers(list(alt_tail), alt_back)
+                    if want_alt and alt_back is not None else None
                 ),
             }
         else:
@@ -297,7 +318,7 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
                 if back_tail is not None:
                     diff = {
                         "active_type": "unknown (schema-1)",
-                        "normal": _diff_buffers([str(x) for x in front_tail], back_tail),
+                        "normal": _diff_buffers(list(front_tail), back_tail),
                         "alternate": None,
                     }
     # Sanitise the session string for the log line — Pydantic doesn't
