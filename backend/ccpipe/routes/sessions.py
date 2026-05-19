@@ -17,7 +17,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -353,7 +353,13 @@ def _iter_jsonl_as_markdown(path: Path):
     blocks. Used by the export endpoint as a true streaming response
     body."""
     try:
-        f = path.open("rb")
+        # O_NOFOLLOW: caller already resolved the path and confirmed
+        # it sits inside the projects dir, but between that check and
+        # this open() a same-UID actor could race the leaf into a
+        # symlink. Refuse to follow at open time. Matches the
+        # hardening on fs_read / fs_download in routes/fs.py.
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        f = os.fdopen(fd, "rb")
     except OSError:
         return
     try:
@@ -389,8 +395,16 @@ def _iter_jsonl_as_markdown(path: Path):
 
 
 @router.get("/api/claude-sessions/{session_id}/export", dependencies=[AuthDep])
-async def claude_session_export(session_id: str, cwd: str) -> StreamingResponse:
-    """Stream a markdown rendering of a claude session's JSONL transcript."""
+async def claude_session_export(session_id: str, cwd: str,
+                                  request: Request) -> StreamingResponse:
+    """Stream a markdown rendering of a claude session's JSONL transcript.
+
+    Same-origin gate matches the fs GETs: an authenticated browser
+    session would otherwise let a top-level navigation drop the
+    transcript into the operator's Downloads via a malicious link."""
+    sfs = request.headers.get("sec-fetch-site", "").lower()
+    if sfs and sfs != "same-origin":
+        raise HTTPException(status_code=403, detail="cross-origin blocked")
     if not _UUID_RE.match(session_id):
         raise HTTPException(status_code=400, detail="invalid session id")
     if not cwd.startswith("/"):

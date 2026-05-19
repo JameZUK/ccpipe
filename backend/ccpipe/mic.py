@@ -77,13 +77,31 @@ class MicWriter:
             return False
         assert self._fd is not None
         try:
-            os.write(self._fd, data)
-            # Stats — only count successful non-EAGAIN writes. Zero-byte
-            # probes (used to check FD readiness) bump the timestamp but
-            # not the counter.
+            n = os.write(self._fd, data)
+            # Stats — only credit bytes the kernel actually accepted, not
+            # what the caller handed us. A short write means the FIFO
+            # buffer was partially full and the tail was dropped on the
+            # floor; counting it as written would skew
+            # estimate_drain_seconds and cause the backend to release
+            # PTT before all audio had drained. Zero-byte probes (used
+            # to check FD readiness) bump the timestamp but not the
+            # counter.
             if self._first_write_ts is None and data:
                 self._first_write_ts = time.monotonic()
-            self._bytes_written += len(data)
+            self._bytes_written += n
+            if n < len(data):
+                # Short write — count as a drop so the operator-visible
+                # drops/diagnostic counter reflects reality. Don't
+                # buffer-and-retry: subsequent frames keep arriving and
+                # interleaving stale samples into the live stream
+                # produces worse audio than just discarding the tail.
+                self._drops += 1
+                if self._drops == 1 or self._drops % 50 == 0:
+                    log.warning(
+                        "mic pipe short write: wrote %d of %d bytes "
+                        "(cumulative drops=%d); Pulse buffer near full",
+                        n, len(data), self._drops,
+                    )
             return True
         except BrokenPipeError:
             log.info("mic pipe broken; will retry open on next frame")

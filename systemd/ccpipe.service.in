@@ -14,11 +14,28 @@ Type=exec
 # stays in the repo.
 WorkingDirectory=@REPO_ROOT@/backend
 # Default ExecStart binds 0.0.0.0 so an off-host reverse proxy (nginx)
-# can reach the backend over the LAN. When TLS is terminating at that
-# proxy, add a drop-in that resets ExecStart and re-runs uvicorn with
-# `--proxy-headers --forwarded-allow-ips=<proxy-host-IP>`; without
-# the latter the per-IP login throttle treats every request as coming
-# from the proxy. See README §"Reverse proxy" for the exact drop-in.
+# can reach the backend over the LAN.
+#
+# `--proxy-headers --forwarded-allow-ips=127.0.0.1` is included by
+# default for the **co-located** nginx case (proxy on the same host).
+# Without these flags every request appears to come from the proxy's
+# loopback IP and the per-IP login throttle collapses into a single
+# global bucket. With them, uvicorn substitutes X-Forwarded-For when
+# the immediate peer is in the allow-list.
+#
+# For an **off-host** nginx, override via a systemd drop-in that
+# replaces ExecStart with the proxy's LAN IP:
+#     mkdir -p ~/.config/systemd/user/ccpipe.service.d/
+#     cat > ~/.config/systemd/user/ccpipe.service.d/proxy.conf <<'EOF'
+#     [Service]
+#     ExecStart=
+#     ExecStart=@REPO_ROOT@/backend/.venv/bin/uvicorn ccpipe.main:app \
+#         --host 0.0.0.0 --port 8080 \
+#         --timeout-keep-alive 5 --limit-concurrency 200 \
+#         --proxy-headers --forwarded-allow-ips=<nginx-LAN-ip>
+#     EOF
+# See README §"Reverse proxy".
+#
 # Slowloris hardening (pass-3 review #19): cap simultaneous in-flight
 # requests so a single source can't saturate the worker by holding
 # 500+ slow connections, and shorten the keep-alive idle window so an
@@ -28,7 +45,8 @@ WorkingDirectory=@REPO_ROOT@/backend
 ExecStart=@REPO_ROOT@/backend/.venv/bin/uvicorn ccpipe.main:app \
     --host 0.0.0.0 --port 8080 \
     --timeout-keep-alive 5 \
-    --limit-concurrency 200
+    --limit-concurrency 200 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
 
 # Frontend bundle served by FastAPI when this exists
 Environment=CCPIPE_FRONTEND_DIST=@REPO_ROOT@/frontend/dist
@@ -54,6 +72,37 @@ Environment=CCPIPE_TTS_VOICE=bf_emma
 
 Restart=on-failure
 RestartSec=3
+
+# ─── Sandboxing ──────────────────────────────────────────────────────
+# These directives contain a compromised ccpipe process — they don't
+# substitute for the auth gate (an authenticated attacker still has the
+# operator's filesystem reach inside the jail) but they make a remote
+# RCE harder to pivot off the box. Conservative set tuned for the
+# user-service deployment where we still need:
+#   - read+write into ~/.local/state/ccpipe (credentials, config)
+#   - read+write into ~/.claude (settings_patch, sticky restore)
+#   - read+write of /tmp/ccpipe_mic.pipe (the Pulse FIFO)
+#   - subprocess spawn of tmux (system PATH binaries)
+# Anything tighter (PrivateTmp=true) would break the mic — the FIFO is
+# shared with Pulse in the real /tmp.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-write
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Permissive enough for asyncio + subprocess + watchdog inotify; blocks
+# the obvious post-exploitation paths (mount, swap, kexec, ptrace).
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @swap @reboot @raw-io @cpu-emulation @debug @clock @module @obsolete @resources
+# Only loopback + LAN sockets needed; explicitly deny exotic families.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # StandardOutput/Error go to journal by default; view with:
 #   journalctl --user -u ccpipe -f

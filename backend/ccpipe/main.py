@@ -304,6 +304,14 @@ async def _security_headers(request: Request, call_next):
         # CSP3; the wildcard scheme tokens were broader than needed and
         # let a compromised script connect anywhere.
         "connect-src 'self'; "
+        # Explicit fallbacks so a single mis-set default-src can't
+        # silently widen worker/manifest/object reach. object-src 'none'
+        # blocks <object>/<embed>/<applet> outright (no legitimate use
+        # in this app), and worker-src/manifest-src lock the
+        # AudioWorklet + PWA manifest to same-origin.
+        "worker-src 'self'; "
+        "manifest-src 'self'; "
+        "object-src 'none'; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self'"

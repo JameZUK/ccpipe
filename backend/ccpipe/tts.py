@@ -269,20 +269,23 @@ class TtsService:
 
     async def _wait_for_projects_dir(self) -> None:
         """Poll for the projects dir appearing and finish initialising
-        the watcher when it does. Quietly bails on stop(). The 30 s
-        cadence is fine — TTS is operator-facing and the user can
-        always /reload the service if they're impatient."""
+        the watcher when it does. Quietly bails on stop().
+
+        Order is poll-then-sleep: an operator who installs claude
+        immediately after starting ccpipe shouldn't have to wait a
+        full 30 s before TTS starts working. The first iteration's
+        check fires immediately (start() only got here because the
+        dir was missing then, but a race between start() and us
+        getting scheduled is cheap to cover)."""
         while not self._stopped:
-            try:
-                await asyncio.sleep(30.0)
-            except asyncio.CancelledError:
-                return
-            if self._stopped:
-                return
             if self.projects_dir.exists():
                 log.info("TTS projects dir %s now present; resuming setup",
                          self.projects_dir)
                 self._finish_start()
+                return
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
                 return
 
     def _finish_start(self) -> None:

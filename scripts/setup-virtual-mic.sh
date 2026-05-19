@@ -10,6 +10,16 @@
 # - down : unload the module if present and remove the FIFO
 #
 # Idempotent: running 'up' twice has the same effect as once.
+#
+# ─── Multi-user host caveat (out of scope per SECURITY.md) ───────────
+# `pactl load-module module-pipe-source` creates the FIFO with the
+# operator's default umask — typically world-readable. On a shared
+# host where another local user is in the operator's primary group,
+# that user could write audio into the FIFO and have claude
+# transcribe it during a /voice session. ccpipe targets single-user
+# / homelab hosts where this isn't a concern; if you run on a
+# multi-user box, run `chmod 0600 /tmp/ccpipe_mic.pipe` after this
+# script.
 
 set -euo pipefail
 

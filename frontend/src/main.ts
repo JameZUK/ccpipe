@@ -211,7 +211,10 @@ async function attachTerminal(session: string): Promise<void> {
 
   const sessionLabel = document.createElement("div");
   sessionLabel.className = "statusbar__session";
-  sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(session)}`;
+  // DOM-construct rather than escapeHtml + innerHTML — textContent
+  // can't interpolate markup, so a future maintainer can't drop the
+  // escape by accident when copying this snippet around.
+  renderSessionLabel(sessionLabel, session);
 
   const controls = document.createElement("div");
   controls.className = "statusbar__controls";
@@ -689,7 +692,7 @@ async function attachTerminal(session: string): Promise<void> {
       // the first post-hello write puts auto-follow back in the
       // correct state for the live tail that follows.
       bottomOnNextOutput = true;
-      sessionLabel.innerHTML = `<span class="key">@</span> ${escapeHtml(msg.session)}`;
+      renderSessionLabel(sessionLabel, msg.session);
       // Cache the session's working dir so the Files pill + the
       // mobile composer's folder button default to the project root
       // instead of $HOME. Falls through to the fs config root if the
@@ -867,10 +870,18 @@ function flashState(el: HTMLElement, msg: string, ms: number = 2200): void {
   }, ms);
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!
-  ));
+/** Rewrite the statusbar session label as ``<span class="key">@</span>
+ * NAME`` using DOM nodes. The session name itself goes through
+ * textContent so there's no markup interpolation surface — a name
+ * containing ``<`` or ``"`` can't escape into HTML even if the
+ * server's safe_name validation regresses. Replaces the prior
+ * ``escapeHtml + innerHTML`` pattern. */
+function renderSessionLabel(el: HTMLElement, session: string): void {
+  el.textContent = "";
+  const key = document.createElement("span");
+  key.className = "key";
+  key.textContent = "@";
+  el.append(key, " " + session);
 }
 
 // ─── Boot ───────────────────────────────────────────────────────────────

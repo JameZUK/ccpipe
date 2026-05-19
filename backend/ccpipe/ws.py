@@ -71,6 +71,29 @@ _MIC_BUDGET_WINDOW_S = 1.0
 # PTY master's kernel buffer.
 _TEXT_FRAME_MAX_BYTES = 64 * 1024
 
+# Bracket-count ceiling for WS JSON parse. stdlib json.loads is
+# recursive, so a deeply-nested payload like ``[[[…]]]]`` can blow the
+# Python recursion limit and tear down this handler with a logged
+# exception. Our control messages have shape `{type, …}` with at most
+# one nested array (resize cols/rows are scalars), so a count of <=64
+# open brackets is well above legitimate traffic and well below the
+# default 1000-deep recursion limit. Conservative — counts every `{`
+# and `[` including siblings — but the false-positive cost is zero on
+# real ccpipe frames.
+_JSON_BRACKET_CAP = 64
+
+
+def _safe_json_loads(text: str):
+    """``json.loads`` with a cheap pre-screen for nesting depth.
+
+    Refuses input whose total open-bracket count exceeds
+    ``_JSON_BRACKET_CAP`` BEFORE handing the bytes to stdlib json,
+    which would otherwise recurse and trip ``RecursionError``.
+    """
+    if text.count("{") + text.count("[") > _JSON_BRACKET_CAP:
+        raise ValueError("json too deeply nested")
+    return json.loads(text)
+
 
 @dataclass
 class WsCounters:
@@ -511,7 +534,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                 # parse on the hot input path.
                 if '"type":"tts_mute"' in text or '"type": "tts_mute"' in text:
                     try:
-                        payload = json.loads(text)
+                        payload = _safe_json_loads(text)
                         tts_sub.muted = bool(payload.get("value"))
                     except Exception:
                         pass
@@ -556,8 +579,27 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                         pending_releases.add(rel_task)
                         rel_task.add_done_callback(pending_releases.discard)
                     continue
+                # Re-check the session on every non-intercepted text
+                # frame (typically `input`). Without this, a credential
+                # bump (password change, TOTP toggle) only takes effect
+                # on the next 30 s keepalive ping — meaning an attacker
+                # holding an authenticated WS could keep typing into
+                # the PTY for up to one keepalive cycle after the
+                # operator clicked "sign out everywhere". The check is
+                # an in-memory dict lookup + int compare; trivial.
+                if not _is_session_still_authed(websocket):
+                    log.info("ws closed mid-stream: session no longer authorized (input)")
+                    await websocket.close(code=1008, reason="session revoked")
+                    break
                 _handle_client_text(text, pty_proc)
             elif (data := msg.get("bytes")) is not None:
+                # Same revoked-credential gate as for text frames — a
+                # session whose cred_version has bumped should stop
+                # being able to push mic PCM into the FIFO too.
+                if not _is_session_still_authed(websocket):
+                    log.info("ws closed mid-stream: session no longer authorized (binary)")
+                    await websocket.close(code=1008, reason="session revoked")
+                    break
                 _handle_client_binary(data, pty_proc, mic_limiter, mic_token)
     except WebSocketDisconnect:
         pass
@@ -639,6 +681,23 @@ _HISTORY_CAPTURE_TIMEOUT_S = 2.0
 # than this would fall out of the browser's buffer anyway.
 _HISTORY_MAX_LINES = 10_000
 
+# Tiny per-session cache for the most recent capture-pane output, so
+# that a mobile reconnect storm (Wi-Fi → cellular handoff fires several
+# online/visibility events in quick succession) doesn't pay one full
+# `tmux capture-pane` for each WS attempt. A 1 s window means the
+# served bytes are at most that stale, which is well within tmux's own
+# pane-flush cadence. Keyed by session name; the few-KiB output per
+# entry caps the memory cost.
+_HISTORY_CACHE_TTL_S = 1.0
+_history_cache: dict[str, tuple[float, bytes]] = {}
+
+
+def _clear_history_cache() -> None:
+    """Drop any cached capture-pane output. Called by the tests
+    between runs so a stale entry from one test case doesn't bypass
+    the subprocess mock in the next one."""
+    _history_cache.clear()
+
 
 async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     """Return the full tmux pane content (scrollback + visible) as
@@ -666,6 +725,15 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     Returns empty bytes on any failure or when the pane is empty.
     """
     del viewport_rows  # accepted for backwards compat; intentionally unused
+    # Coalesce repeated captures within the TTL window. A mobile
+    # reconnect storm can fire several attaches in quick succession;
+    # without this each one pays a tmux subprocess + several MB of
+    # capture output. Mutation is on the asyncio loop thread so no
+    # lock is needed.
+    now = time.monotonic()
+    cached = _history_cache.get(session)
+    if cached is not None and now - cached[0] < _HISTORY_CACHE_TTL_S:
+        return cached[1]
     try:
         proc = await asyncio.create_subprocess_exec(
             tmux.TMUX_BIN, "capture-pane",
@@ -702,6 +770,17 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     normalised = out.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     if not normalised.endswith(b"\r\n"):
         normalised += b"\r\n"
+    # Cache for the coalesce window. Periodic eviction of stale entries
+    # keeps the dict bounded — a session whose name is renamed/killed
+    # ages out within TTL; until then we just have one stale ~MB entry.
+    _history_cache[session] = (now, normalised)
+    # Opportunistic GC: when the dict gets non-trivial, drop entries
+    # older than 10× the TTL. Avoids unbounded growth in long-running
+    # processes with many distinct session names over the lifetime.
+    if len(_history_cache) > 64:
+        cutoff = now - _HISTORY_CACHE_TTL_S * 10
+        for k in [k for k, (t, _) in _history_cache.items() if t < cutoff]:
+            _history_cache.pop(k, None)
     return normalised
 
 
@@ -739,8 +818,8 @@ async def _wait_for_initial_resize(websocket: WebSocket
         if text is None:
             continue
         try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
+            parsed = _safe_json_loads(text)
+        except (json.JSONDecodeError, ValueError):
             continue
         if parsed.get("type") == "resize":
             try:
@@ -777,15 +856,15 @@ def _is_ping(text: str) -> bool:
     if '"type":"ping"' not in text and '"type": "ping"' not in text:
         return False
     try:
-        return json.loads(text).get("type") == "ping"
-    except (json.JSONDecodeError, AttributeError):
+        return _safe_json_loads(text).get("type") == "ping"
+    except (json.JSONDecodeError, ValueError, AttributeError):
         return False
 
 
 def _handle_client_text(text: str, pty_proc: PtyProcess) -> None:
     try:
-        msg = json.loads(text)
-    except json.JSONDecodeError:
+        msg = _safe_json_loads(text)
+    except (json.JSONDecodeError, ValueError):
         log.warning("non-JSON text frame: %r", text[:200])
         return
     match msg.get("type"):

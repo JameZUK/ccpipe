@@ -31,6 +31,32 @@ const ICONS = {
 
 const VERSION = "0.1.0";
 
+/** Recursively strip <script> child elements and any attribute whose
+ * name starts with "on" from an SVG element tree.
+ *
+ * SVG that ends up in the live DOM via DOM operations (appendChild /
+ * importNode) honours <script> (executes the script on insertion)
+ * and on* attributes (treats them as event handlers), so the same
+ * `default-src 'self'` CSP that blocks string-eval doesn't help
+ * here. Called before the QR SVG is attached during TOTP enrolment.
+ *
+ * Acts in place on the source element so the caller can then
+ * importNode the cleaned tree. */
+function sanitizeSvgTree(el: Element): void {
+  // Drop scripts and the rarely-supported but historically dangerous
+  // <foreignObject> nested HTML escape hatch.
+  el.querySelectorAll("script, foreignObject").forEach((n) => n.remove());
+  const walk = (node: Element) => {
+    for (const attr of Array.from(node.attributes)) {
+      if (attr.name.toLowerCase().startsWith("on")) {
+        node.removeAttribute(attr.name);
+      }
+    }
+    for (const child of Array.from(node.children)) walk(child);
+  };
+  walk(el);
+}
+
 type TabId = "display" | "voice" | "account" | "debug";
 const LS_LAST_TAB = "ccpipe.settings.tab";
 const DEFAULT_TAB: TabId = "display";
@@ -927,6 +953,14 @@ function _renderEnrollForm(host: HTMLElement, done: () => void): void {
         // malformed; in that case we just skip the QR (the manual
         // secret fallback below still renders).
         if (svgEl && svgEl.nodeName.toLowerCase() === "svg") {
+          // Defence-in-depth: SVG <script> elements DO execute when
+          // inserted into the live DOM, and any SVG attribute whose
+          // name starts with "on" is honoured as an event handler.
+          // The current qrcode-lib build emits only <path>/<rect> so
+          // this is unreachable today, but stripping them keeps a
+          // future lib change from silently introducing XSS through
+          // this path.
+          sanitizeSvgTree(svgEl);
           qrWrap.appendChild(document.importNode(svgEl, true));
         }
       }

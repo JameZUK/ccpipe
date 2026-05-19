@@ -20,7 +20,18 @@ from unittest.mock import patch
 
 import pytest
 
-from ccpipe.ws import _capture_session_history
+from ccpipe.ws import _capture_session_history, _clear_history_cache
+
+
+@pytest.fixture(autouse=True)
+def _reset_capture_cache():
+    """Drop any cached capture-pane output between tests so each one
+    starts from a clean slate. Without this the 1 s coalesce window
+    that benefits reconnect storms in production causes one test's
+    cached output to bypass the next test's subprocess mock."""
+    _clear_history_cache()
+    yield
+    _clear_history_cache()
 
 
 class _FakeProc:

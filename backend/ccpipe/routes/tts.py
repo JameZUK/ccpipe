@@ -27,6 +27,27 @@ def _kokoro_url() -> str:
     return os.environ.get("CCPIPE_KOKORO_URL", "http://localhost:8880").rstrip("/")
 
 
+# Shared module-level client for the on-demand Kokoro POSTs. Lazily
+# constructed because httpx.AsyncClient requires a running event loop.
+# Without pooling, each /api/tts/speak (the replay-pill path) and
+# /api/tts/preview (the settings "Test" button) paid a fresh TCP +
+# TLS handshake; with a hot loopback Kokoro that's marginal cost,
+# but it's free to fix and the pool also means we honour Kokoro's
+# keep-alive properly. The streaming-TTS path inside TtsService
+# already has its own pooled client; this one covers only the
+# one-shot routes here.
+_shared_http: httpx.AsyncClient | None = None
+
+
+def _get_http() -> httpx.AsyncClient:
+    global _shared_http
+    if _shared_http is None or _shared_http.is_closed:
+        _shared_http = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=2.0, read=60.0, write=10.0, pool=2.0),
+        )
+    return _shared_http
+
+
 class TtsConfigBody(BaseModel):
     voice: str | None = None
     speech_rate: float | None = Field(default=None, ge=0.5, le=2.0)
@@ -87,28 +108,26 @@ async def tts_config_set(body: TtsConfigBody) -> dict[str, object]:
     return dict(cfg.to_dict()["tts"])
 
 
-async def _open_kokoro_stream(payload: dict) -> tuple[httpx.AsyncClient, object, httpx.Response]:
-    """Open a streaming POST to Kokoro and return (client, stream_cm,
-    response) ready for the caller to iterate. Raises HTTPException on
-    failure so a Kokoro 5xx becomes a 502 BEFORE any StreamingResponse
-    headers reach the client."""
-    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=2.0, read=60.0,
-                                                      write=10.0, pool=2.0))
+async def _open_kokoro_stream(payload: dict) -> tuple[object, httpx.Response]:
+    """Open a streaming POST to Kokoro and return (stream_cm, response)
+    ready for the caller to iterate. Uses the shared module-level
+    client so connections to Kokoro get pooled across replay/preview
+    calls. Raises HTTPException on failure so a Kokoro 5xx becomes a
+    502 BEFORE any StreamingResponse headers reach the client."""
+    client = _get_http()
     try:
         stream_cm = client.stream("POST", f"{_kokoro_url()}/v1/audio/speech",
                                     json=payload)
         resp = await stream_cm.__aenter__()
     except httpx.HTTPError as exc:
-        await client.aclose()
         raise HTTPException(status_code=502, detail=f"kokoro unreachable: {exc}")
     if resp.status_code != 200:
         await stream_cm.__aexit__(None, None, None)
-        await client.aclose()
         raise HTTPException(status_code=502, detail="kokoro error")
-    return client, stream_cm, resp
+    return stream_cm, resp
 
 
-def _stream_then_close(client: httpx.AsyncClient, stream_cm: object,
+def _stream_then_close(stream_cm: object,
                         resp: httpx.Response) -> StreamingResponse:
     async def stream():
         try:
@@ -116,9 +135,10 @@ def _stream_then_close(client: httpx.AsyncClient, stream_cm: object,
                 if chunk:
                     yield chunk
         finally:
+            # Close the per-request stream context — but NOT the shared
+            # client, which other requests are still using.
             try: await stream_cm.__aexit__(None, None, None)
             except Exception: pass
-            await client.aclose()
     return StreamingResponse(stream(), media_type="audio/mpeg")
 
 
@@ -141,8 +161,8 @@ async def tts_speak(body: SpeakBody) -> StreamingResponse:
         "speed": cfg.tts.speech_rate,
         "response_format": "mp3",
     }
-    client, stream_cm, resp = await _open_kokoro_stream(payload)
-    return _stream_then_close(client, stream_cm, resp)
+    stream_cm, resp = await _open_kokoro_stream(payload)
+    return _stream_then_close(stream_cm, resp)
 
 
 @router.get("/api/tts/preview", dependencies=[AuthDep])
@@ -173,5 +193,5 @@ async def tts_preview(request: Request, voice: str,
         "speed": cfg.tts.speech_rate,
         "response_format": "mp3",
     }
-    client, stream_cm, resp = await _open_kokoro_stream(payload)
-    return _stream_then_close(client, stream_cm, resp)
+    stream_cm, resp = await _open_kokoro_stream(payload)
+    return _stream_then_close(stream_cm, resp)

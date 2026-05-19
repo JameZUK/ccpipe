@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -32,6 +32,26 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 FS_ROOT_ENV = "CCPIPE_FS_ROOT"
+
+
+def _require_same_origin(request: Request) -> None:
+    """Belt-and-braces gate against cross-origin credentialed GETs.
+
+    CORS already blocks cross-origin reads of JSON / octet-stream
+    responses and SameSite=Lax keeps the session cookie off cross-site
+    subresource fetches, so today's main risk is a top-level
+    navigation (``<a target=_top href='…/api/fs/download?path=…'>``)
+    silently dropping a file into the operator's Downloads folder.
+    Sec-Fetch-Site is set by every modern browser; rejecting anything
+    that isn't ``same-origin`` closes that vector without affecting
+    legitimate in-app calls (which always carry the header value
+    ``same-origin``). Matches the gate on ``/api/tts/preview``."""
+    sfs = request.headers.get("sec-fetch-site", "").lower()
+    if sfs and sfs != "same-origin":
+        raise HTTPException(status_code=403, detail="cross-origin blocked")
+
+
+SameOriginDep = Depends(_require_same_origin)
 
 # Paths underneath the root that we refuse to expose. Deliberately
 # narrow: ccpipe is a personal admin tool, so .ssh / .aws / .gnupg /
@@ -232,7 +252,7 @@ class FsPathBody(BaseModel):
 
 # ─── Routes ────────────────────────────────────────────────────────────────
 
-@router.get("/api/fs/list", dependencies=[AuthDep])
+@router.get("/api/fs/list", dependencies=[AuthDep, SameOriginDep])
 async def fs_list(path: str, show_hidden: int = 0,
                    files: int = 0) -> dict[str, Any]:
     """List entries under *path*. ``files=0`` (default) returns only
@@ -252,7 +272,7 @@ async def fs_list(path: str, show_hidden: int = 0,
     }
 
 
-@router.get("/api/fs/read", dependencies=[AuthDep])
+@router.get("/api/fs/read", dependencies=[AuthDep, SameOriginDep])
 async def fs_read(path: str) -> dict[str, Any]:
     """Return the file content as UTF-8 text. Rejects binary files and
     anything larger than the editor cap so we don't have to stream
@@ -388,7 +408,7 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
     return {"path": str(final), "size": received}
 
 
-@router.get("/api/fs/download", dependencies=[AuthDep])
+@router.get("/api/fs/download", dependencies=[AuthDep, SameOriginDep])
 async def fs_download(path: str) -> StreamingResponse:
     """Stream a file back to the browser as
     ``Content-Disposition: attachment``. No size cap — downloads are
@@ -479,7 +499,7 @@ async def fs_mkdir(body: FsPathBody) -> dict[str, str]:
     return {"path": str(final.resolve())}
 
 
-@router.get("/api/fs/config", dependencies=[AuthDep])
+@router.get("/api/fs/config", dependencies=[AuthDep, SameOriginDep])
 async def fs_config_get() -> dict[str, Any]:
     """Surfacing the upload cap + resolved fs root to the UI.
 
