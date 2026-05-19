@@ -277,16 +277,36 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   const vv = (window as any).visualViewport as VisualViewport | undefined;
   vv?.addEventListener("resize", scheduleResize);
 
-  // First fit only after fonts have loaded; otherwise cell metrics drift.
-  // Two fits: once immediately when fonts.ready resolves, then a second
-  // pass 200ms later to mop up any late layout shifts (banners, custom
-  // chrome height, the initial scrollbar appearing, etc.). This double
-  // pass is INITIAL-LOAD only because that's where font/layout settling
-  // is observable — runtime resize events go through ResizeObserver,
-  // which fires for each real layout change.
+  // First fit only after fonts have loaded; otherwise cell metrics
+  // drift. CRITICAL: just calling sendResize() / fit.fit() here isn't
+  // enough when the active font is a custom woff2 — xterm's
+  // CharSizeService caches the cell width from whatever font was
+  // actually rendered at Terminal-construction time, which is almost
+  // always the FALLBACK (the woff2 hasn't downloaded by then). Once
+  // fonts.ready fires, the woff2 is loaded but xterm doesn't
+  // automatically re-measure, so fit() proposes rows/cols against
+  // stale cell metrics and the terminal lays out with extra empty
+  // rows at the bottom (= "big space at the bottom" symptom). The
+  // fix mirrors applyPrefs's runtime-swap path:
+  //
+  //   1. clearTextureAtlas() drops the WebGL renderer's glyph cache
+  //      (built against the fallback) so the next refresh rasterises
+  //      from the now-loaded font.
+  //   2. term.refresh() triggers that re-rasterisation and forces
+  //      xterm to re-measure cells with the new font.
+  //   3. sendResize() picks up the corrected cell metrics.
+  //
+  // Two fits: once after the refresh, then a 200ms safety pass to
+  // mop up late layout shifts (banners, mobile URL-bar transitions,
+  // etc.).
   const fontsReady = (document as any).fonts?.ready as Promise<unknown> | undefined;
   if (fontsReady) {
     fontsReady.then(() => {
+      if (disposed) return;
+      if (webglActive && webgl) {
+        try { webgl.clearTextureAtlas(); } catch {}
+      }
+      try { term.refresh(0, term.rows - 1); } catch {}
       sendResize();
       window.setTimeout(() => {
         if (!disposed) sendResize();
