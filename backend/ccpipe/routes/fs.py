@@ -177,6 +177,17 @@ def _scan_dir_entries(resolved: Path, show_hidden: bool,
                     break
                 if not show_hidden and e.name.startswith("."):
                     continue
+                # Dir-only mode (the picker): use scandir's d_type via
+                # e.is_dir(follow_symlinks=False) which on ext4/btrfs/
+                # tmpfs is a NO-syscall check — and skip non-dirs
+                # without ever stat()ing them. For a directory full of
+                # source files this halves the syscall load again.
+                if not include_files:
+                    try:
+                        if not e.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
                 # One stat call per entry, with the type derived from
                 # st_mode — previously is_dir(...) + stat(...) made
                 # 2 syscalls per file. On a 2000-entry directory that's

@@ -92,7 +92,11 @@ def reset_throttle_state() -> None:
     _global_login_attempts.clear()
 
 
+_last_full_sweep = 0.0
+
+
 def _login_throttle_ok(ip: str) -> bool:
+    global _last_full_sweep
     now = time.monotonic()
     # Sweep stale entries BEFORE the throttle decision so a sustained
     # flood that always trips the limit doesn't leak entries forever.
@@ -100,7 +104,13 @@ def _login_throttle_ok(ip: str) -> bool:
     # the success path — under attack we'd return False well before
     # reaching it and the per-IP dict grew with each distinct source.
     cutoff = now - _LOGIN_BUCKET_WINDOW_S
-    if len(_login_attempts) > 256:
+    # Wall-clock-gated full sweep: once we cross the 256-key threshold,
+    # walking the whole dict every login call becomes the new
+    # bottleneck — at 10k keys that's a 10k iteration per request.
+    # Cap to one full sweep per second; bursty floods still get GC'd
+    # within their own window without the per-call overhead.
+    if len(_login_attempts) > 256 and now - _last_full_sweep > 1.0:
+        _last_full_sweep = now
         for k in list(_login_attempts.keys()):
             b = _login_attempts[k]
             while b and b[0] < cutoff:
@@ -118,8 +128,8 @@ def _login_throttle_ok(ip: str) -> bool:
     while bucket and bucket[0] < cutoff:
         bucket.popleft()
     if len(bucket) >= _LOGIN_BUCKET_MAX:
-        if not bucket:
-            _login_attempts.pop(ip, None)
+        # (dead-code branch removed: bucket cannot be empty if we
+        # just checked it >= _LOGIN_BUCKET_MAX which is > 0)
         return False
     bucket.append(now)
     _global_login_attempts.append(now)

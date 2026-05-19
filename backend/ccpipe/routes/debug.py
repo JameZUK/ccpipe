@@ -296,6 +296,15 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
             else:
                 tasks.append(_noop_capture())
             normal_back, alt_back = await asyncio.gather(*tasks)
+            # Treat an all-blank tmux alt-screen capture as "no alt
+            # state" — tmux's alternate buffer survives after a TUI
+            # exits (vim's contents persist for minutes after :q),
+            # producing a confusing "0/N match" panel for content
+            # that nobody actually has on screen.
+            if alt_back is not None and not any(
+                (line or "").strip() for line in alt_back
+            ):
+                alt_back = None
             diff = {
                 "active_type": active_type,
                 "normal": (
