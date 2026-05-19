@@ -22,6 +22,15 @@ import type { TerminalSocket } from "./ws";
 export interface DebugCapableTerminal {
   getDebugState(): Record<string, unknown>;
   dumpBuffer(maxLines?: number): string[];
+  /** Dump xterm's main + alternate buffers separately. The diff tool
+   * compares like-to-like against tmux's two screens so alt-screen
+   * apps (claude code's TUI) don't produce spurious "everything is
+   * different" results. */
+  dumpAllBuffers?: (maxLines?: number) => {
+    activeType: string;
+    normal: string[];
+    alternate: string[];
+  };
 }
 
 export interface DebugCaptureOpts {
@@ -35,7 +44,7 @@ export interface DebugCaptureOpts {
 }
 
 export interface DebugSnapshot {
-  schema: 1;
+  schema: 2;
   capturedAt: string;          // ISO timestamp
   performanceNow: number;      // monotonic, for cross-frame correlation
   session: string;
@@ -45,14 +54,27 @@ export interface DebugSnapshot {
   viewport: { innerWidth: number; innerHeight: number; devicePixelRatio: number };
   terminal: Record<string, unknown>;
   socket: Record<string, unknown>;
+  /** Backwards-compat: the active-buffer tail (same as schema 1).
+   * New snapshots should prefer ``buffers`` below for diff purposes. */
   buffer: { lineCount: number; tail: string[] };
+  /** schema-2: both xterm buffers + which is currently active.
+   * Alt-screen apps (claude code's TUI, vim) switch between them
+   * and a diff comparing across them is meaningless. */
+  buffers?: {
+    activeType: string;
+    normal: string[];
+    alternate: string[];
+  };
 }
 
 export function captureSnapshot(opts: DebugCaptureOpts): DebugSnapshot {
   const maxLines = opts.maxBufferLines ?? 500;
   const tail = opts.terminal.dumpBuffer(maxLines);
+  const buffers = opts.terminal.dumpAllBuffers
+    ? opts.terminal.dumpAllBuffers(maxLines)
+    : undefined;
   return {
-    schema: 1,
+    schema: 2,
     capturedAt: new Date().toISOString(),
     performanceNow: performance.now(),
     session: opts.session,
@@ -67,6 +89,7 @@ export function captureSnapshot(opts: DebugCaptureOpts): DebugSnapshot {
     terminal: opts.terminal.getDebugState(),
     socket: opts.socket.getDebugState(),
     buffer: { lineCount: tail.length, tail },
+    buffers,
   };
 }
 
@@ -75,20 +98,23 @@ export interface DiffMismatchExample {
   frontend: string;
   backend: string;
 }
+export interface DiffResult {
+  lines_compared: number;
+  frontend_lines: number;
+  backend_lines: number;
+  matches: number;
+  mismatches: number;
+  mismatch_examples: DiffMismatchExample[];
+}
 export interface DebugSnapshotAck {
   backend: Record<string, unknown>;
   active_sessions_for_name: number;
-  /** Content diff: backend re-runs `tmux capture-pane` for this
-   * session and compares the rendered lines to the frontend's
-   * buffer tail. null when the capture failed (no session, tmux
-   * unreachable, etc.) or when there were no lines to compare. */
+  /** Content diff. Schema-2 has separate normal + alternate
+   * sub-diffs; schema-1 has only `normal` with `alternate: null`. */
   content_diff: {
-    lines_compared: number;
-    frontend_lines: number;
-    backend_lines: number;
-    matches: number;
-    mismatches: number;
-    mismatch_examples: DiffMismatchExample[];
+    active_type: string;
+    normal: DiffResult | null;
+    alternate: DiffResult | null;
   } | null;
 }
 
@@ -233,25 +259,32 @@ function formatAck(ack: DebugSnapshotAck): string {
     lines.push("");
     lines.push("─── content diff ───");
     lines.push("  unavailable (no tail to compare or capture-pane failed)");
-  } else {
-    const pct = d.lines_compared
-      ? Math.round((d.matches / d.lines_compared) * 1000) / 10
+    return lines.join("\n");
+  }
+  lines.push("");
+  lines.push(`─── content diff (active: ${d.active_type}) ───`);
+  for (const [label, sub] of [
+    ["normal screen", d.normal] as const,
+    ["alternate screen", d.alternate] as const,
+  ]) {
+    if (!sub) {
+      lines.push(`  ${label}: not captured`);
+      continue;
+    }
+    const pct = sub.lines_compared
+      ? Math.round((sub.matches / sub.lines_compared) * 1000) / 10
       : 0;
-    lines.push("");
-    lines.push("─── content diff (xterm vs tmux capture-pane) ───");
-    lines.push(`  compared: ${d.lines_compared} lines from bottom`);
-    lines.push(`  matches:  ${d.matches} / ${d.lines_compared} (${pct}%)`);
-    lines.push(`  frontend buffer tail: ${d.frontend_lines} lines`);
-    lines.push(`  backend capture-pane: ${d.backend_lines} lines`);
-    if (d.mismatch_examples.length) {
-      lines.push("  first mismatches (line# counted from bottom):");
-      for (const ex of d.mismatch_examples) {
-        lines.push(`    [${ex.line_from_bottom}]`);
-        lines.push(`      front: ${truncate(ex.frontend, 100)}`);
-        lines.push(`      back:  ${truncate(ex.backend, 100)}`);
+    lines.push(`  ${label}: ${sub.matches}/${sub.lines_compared} match (${pct}%)`
+               + `  · frontend=${sub.frontend_lines}L backend=${sub.backend_lines}L`);
+    if (sub.mismatch_examples.length) {
+      lines.push("    first mismatches (line# counted from bottom):");
+      for (const ex of sub.mismatch_examples) {
+        lines.push(`      [${ex.line_from_bottom}]`);
+        lines.push(`        front: ${truncate(ex.frontend, 100)}`);
+        lines.push(`        back:  ${truncate(ex.backend, 100)}`);
       }
-    } else if (d.mismatches === 0 && d.lines_compared > 0) {
-      lines.push("  all compared lines agree.");
+    } else if (sub.mismatches === 0 && sub.lines_compared > 0) {
+      lines.push("    all compared lines agree.");
     }
   }
   return lines.join("\n");

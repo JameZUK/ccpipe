@@ -46,11 +46,20 @@ _DIFF_CAPTURE_TIMEOUT_S = 2.0
 _DIFF_MAX_LINES = 10_000
 
 
-async def _capture_pane_plain(session: str, lines: int) -> list[str] | None:
+async def _capture_pane_plain(
+    session: str, lines: int, alternate: bool = False,
+) -> list[str] | None:
     """Run `tmux capture-pane -p -t <session> -S -<lines>` and return
     the plain-text lines. No -e flag: we want the *rendered* text so
     it lines up with xterm's translateToString(true) output for a
     line-by-line diff.
+
+    ``alternate=True`` adds the `-a` flag so tmux returns the
+    alternate screen instead of the main pane. Alt-screen TUIs
+    (claude code, vim, less) keep their live UI here while the
+    main screen accumulates scrollback; comparing the wrong screen
+    against xterm's wrong buffer produces 90%+ false-positive
+    mismatches.
 
     Returns None on any failure or empty output (caller can render
     "backend capture failed" rather than a confusing empty diff).
@@ -69,15 +78,20 @@ async def _capture_pane_plain(session: str, lines: int) -> list[str] | None:
     if validated == CONTROL_SESSION_NAME:
         return None
     n = min(max(1, int(lines)), _DIFF_MAX_LINES)
+    cmd = [
+        tmux.TMUX_BIN, "capture-pane",
+        "-t", validated,
+        "-p",                  # print to stdout
+        "-S", f"-{n}",         # start N lines back from current
+        # No -E: capture extends through visible bottom, so the
+        # result is "the last N rendered lines tmux knows about".
+    ]
+    if alternate:
+        cmd.append("-a")
     async with _SNAPSHOT_SUBPROCESS_SEMAPHORE:
         try:
             proc = await asyncio.create_subprocess_exec(
-                tmux.TMUX_BIN, "capture-pane",
-                "-t", validated,
-                "-p",                  # print to stdout
-                "-S", f"-{n}",         # start N lines back from current
-                # No -E: capture extends through visible bottom, so the
-                # result is "the last N rendered lines tmux knows about".
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -238,15 +252,51 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
     # check misses — corrupted escape sequences, scrollback eviction
     # off-by-one, multi-byte codepoints split across frames — where
     # the wire was fine but the rendered content diverged.
+    #
+    # Schema-2 snapshots include both xterm buffers (normal + alt).
+    # Compare like-to-like against tmux's two screens — alt-screen
+    # TUIs (claude code, vim) switch between buffers constantly and
+    # comparing across them just produces noise.
     diff: dict[str, Any] | None = None
-    try:
-        front_tail = body.payload.get("buffer", {}).get("tail")
-    except AttributeError:
-        front_tail = None
-    if body.session and isinstance(front_tail, list) and front_tail:
-        backend_tail = await _capture_pane_plain(body.session, len(front_tail))
-        if backend_tail is not None:
-            diff = _diff_buffers([str(x) for x in front_tail], backend_tail)
+    if body.session:
+        buffers = body.payload.get("buffers") if isinstance(body.payload, dict) else None
+        if isinstance(buffers, dict):
+            active_type = str(buffers.get("activeType", ""))
+            normal_tail = buffers.get("normal") or []
+            alt_tail = buffers.get("alternate") or []
+            normal_back = (
+                await _capture_pane_plain(body.session, len(normal_tail) or 1, alternate=False)
+                if isinstance(normal_tail, list) and normal_tail else None
+            )
+            alt_back = (
+                await _capture_pane_plain(body.session, len(alt_tail) or 1, alternate=True)
+                if isinstance(alt_tail, list) and alt_tail else None
+            )
+            diff = {
+                "active_type": active_type,
+                "normal": (
+                    _diff_buffers([str(x) for x in normal_tail], normal_back)
+                    if isinstance(normal_tail, list) and normal_back is not None else None
+                ),
+                "alternate": (
+                    _diff_buffers([str(x) for x in alt_tail], alt_back)
+                    if isinstance(alt_tail, list) and alt_back is not None else None
+                ),
+            }
+        else:
+            # Schema-1 fallback: legacy snapshots have only ``buffer.tail``
+            # which is the active-buffer dump. Compare against whichever
+            # screen tmux is currently presenting (the default, no -a).
+            front_tail = (body.payload.get("buffer", {}) or {}).get("tail") \
+                if isinstance(body.payload, dict) else None
+            if isinstance(front_tail, list) and front_tail:
+                back_tail = await _capture_pane_plain(body.session, len(front_tail))
+                if back_tail is not None:
+                    diff = {
+                        "active_type": "unknown (schema-1)",
+                        "normal": _diff_buffers([str(x) for x in front_tail], back_tail),
+                        "alternate": None,
+                    }
     # Sanitise the session string for the log line — Pydantic doesn't
     # constrain it, so a value containing literal "\n" would otherwise
     # forge a second log entry. The note is logged with %r which

@@ -739,10 +739,33 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     };
   };
 
-  /** Dump the last `maxLines` of xterm's buffer (scrollback + visible)
-   * as plain text — what the user actually sees / could scroll to. */
+  /** Dump the last `maxLines` of xterm's currently-active buffer
+   * (scrollback + visible) as plain text — what the user actually
+   * sees / could scroll to. */
   const dumpBuffer = (maxLines = 500): string[] => {
-    const buf = term.buffer.active;
+    return _dumpBuffer(term.buffer.active, maxLines);
+  };
+
+  /** Dump xterm's main AND alternate buffers separately, plus a
+   * marker for which is currently active. The diff tool uses this to
+   * compare like-to-like against tmux's two screens — alt-screen
+   * apps (claude code's TUI, vim, less) frequently switch between
+   * the two, and comparing across them just produces noise. */
+  const dumpAllBuffers = (maxLines = 500): {
+    activeType: string;
+    normal: string[];
+    alternate: string[];
+  } => {
+    return {
+      activeType: term.buffer.active.type,
+      normal: _dumpBuffer(term.buffer.normal, maxLines),
+      alternate: _dumpBuffer(term.buffer.alternate, maxLines),
+    };
+  };
+
+  // Shared helper — given a specific buffer (normal or alternate),
+  // return its last maxLines as rendered text.
+  function _dumpBuffer(buf: typeof term.buffer.active, maxLines: number): string[] {
     const total = buf.length;
     const start = Math.max(0, total - maxLines);
     const out: string[] = [];
@@ -751,11 +774,11 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       out.push(line ? line.translateToString(true) : "");
     }
     return out;
-  };
+  }
 
   return {
     term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom,
-    getDebugState, dumpBuffer,
+    getDebugState, dumpBuffer, dumpAllBuffers,
     dispose: () => {
       disposed = true;
       if (wireRetryTimer !== null) { clearTimeout(wireRetryTimer); wireRetryTimer = null; }
