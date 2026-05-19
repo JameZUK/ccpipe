@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -53,6 +54,18 @@ _mic_owner: object | None = None
 _MIC_MAX_FRAME_BYTES = 32 * 1024            # one WS frame
 _MIC_BUDGET_BYTES = 1 * 1024 * 1024         # sustained 1s window
 _MIC_BUDGET_WINDOW_S = 1.0
+
+# Text-frame ingress caps. The frontend never sends a single text frame
+# larger than a few KB even for big pastes (terminal.ts chunks input at
+# 4 KiB; resize/mic_stop/tts_mute/ping are all tiny). The cap is well
+# above legitimate traffic; an authenticated bad page that tries to
+# stream unbounded text into pty_proc.write is dropped here before the
+# JSON parse on the hot path can happen. Matching sliding-window budget
+# covers the case where someone splits a giant payload across many
+# in-bound frames to stay under _TEXT_FRAME_MAX_BYTES.
+_TEXT_FRAME_MAX_BYTES = 64 * 1024
+_TEXT_BUDGET_BYTES = 4 * 1024 * 1024         # sustained 1s window
+_TEXT_BUDGET_WINDOW_S = 1.0
 
 
 @dataclass
@@ -152,15 +165,28 @@ async def _build_tts_filter(tmux_session: str):
     return _accept_cwd
 
 
-async def _release_ptt_after(pty_proc: PtyProcess, delay_seconds: float) -> None:
+async def _release_ptt_after(
+    pty_proc: PtyProcess,
+    delay_seconds: float,
+    still_authoritative: Callable[[], bool] | None = None,
+) -> None:
     """Sleep for `delay_seconds`, then write the meta+k keystroke into
     `pty_proc` so claude's /voice exits push-to-talk and submits the
-    captured utterance. Scheduled as a fire-and-forget task by the
-    mic_stop handler — if the WS disconnects before this fires,
-    pty_proc.write() short-circuits (fd is None) so we don't try to
-    poke a recycled descriptor."""
+    captured utterance.
+
+    ``still_authoritative`` is checked AFTER the sleep, before writing:
+    if it returns False (the WS that scheduled this release has gone
+    away and another mic-claim happened in the meantime) we skip the
+    write. Without this guard a stale release from session A's earlier
+    /voice interaction can land in session A's reattached client and
+    abort its current /voice — same tmux session, same pty_proc,
+    different mic_token.
+    """
     try:
         await asyncio.sleep(max(0.0, delay_seconds))
+        if still_authoritative is not None and not still_authoritative():
+            log.debug("ptt-release suppressed: handler no longer authoritative")
+            return
         # \x1b k = ESC k = meta+k = the binding ccpipe installs into
         # ~/.claude/keybindings.json for the voice:pushToTalk action.
         pty_proc.write(b"\x1bk")
@@ -240,6 +266,23 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
             except Exception as exc:
                 log.debug("send_json failed: %s", exc)
                 return False
+
+    async def send_pong_unlocked() -> bool:
+        """Send a pong WITHOUT acquiring send_lock.
+
+        Pongs are 14 bytes and the WS frame is atomic at the protocol
+        layer (no fragmentation), so they don't need to serialise
+        against PTY / TTS sends. Without this bypass a slow chunk send
+        holding send_lock can hold the pong past the client's 45s
+        stale-check, forcing a spurious reconnect of an otherwise-
+        healthy socket.
+        """
+        try:
+            await websocket.send_json({"type": "pong"})
+            return True
+        except Exception as exc:
+            log.debug("send_pong failed: %s", exc)
+            return False
 
     async def send_text(text: str) -> bool:
         async with send_lock:
@@ -397,8 +440,18 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
 
     pty_task = asyncio.create_task(_pty_lifecycle())
     mic_limiter = _MicRateLimiter()
+    text_limiter = _TextRateLimiter()
     # Per-WS opaque token used to claim the mic singleton on first use.
     mic_token: object = object()
+    # In-flight PTT-release tasks scheduled by mic_stop. Tracked so we
+    # can cancel them in `finally`: without this, a fast disconnect
+    # right after mic_stop leaves the sleeping release task as the
+    # last reference to its closure; when it fires (~drain_pad_ms
+    # later) it writes Esc k into pty_proc, which on a re-attached
+    # session is a different mic-token's pty (same name, same pty
+    # because tmux sessions persist) and aborts the new voice
+    # interaction.
+    pending_releases: set[asyncio.Task[None]] = set()
 
     try:
         while True:
@@ -406,6 +459,20 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
             if msg.get("type") == "websocket.disconnect":
                 break
             if (text := msg.get("text")) is not None:
+                # Defense-in-depth: cap per-frame and sliding-window
+                # byte rate on inbound text. Legitimate traffic is tiny
+                # (resize/ping/tts_mute) or 4 KiB chunks (input from
+                # terminal.ts INPUT_CHUNK). A hijacked or compromised
+                # tab streaming unbounded JSON would otherwise hit the
+                # `'"type":"tts_mute"' in text` sniff + full json.loads
+                # on every keystroke-sized frame.
+                tlen = len(text.encode("utf-8"))
+                if tlen > _TEXT_FRAME_MAX_BYTES:
+                    log.warning("oversized text frame (%d > %d bytes); dropping",
+                                tlen, _TEXT_FRAME_MAX_BYTES)
+                    continue
+                if not text_limiter.allow(tlen):
+                    continue
                 # Intercept "ping" first so we can reply pong from this
                 # scope where send_json is available. The pong lets the
                 # frontend detect dead-but-not-yet-closed sockets after
@@ -430,10 +497,10 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                     # send_lock contention with the live PTY pump (and
                     # the fix is to bypass / prioritise pong sends).
                     _ping_t0 = time.monotonic()
-                    await send_json({"type": "pong"})
+                    await send_pong_unlocked()
                     _ping_dt_ms = (time.monotonic() - _ping_t0) * 1000
-                    log.info("ping→pong: %.1fms (session=%s frames=%d)",
-                             _ping_dt_ms, session, counters.frames_forwarded)
+                    log.debug("ping→pong: %.1fms (session=%s frames=%d)",
+                              _ping_dt_ms, session, counters.frames_forwarded)
                     continue
                 # Mute state mirror: the client tells us when the user
                 # toggles TTS, so we can skip the Kokoro round-trip
@@ -473,9 +540,18 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                         )
                         _mic_writer.reset()
                         _mic_owner = None
-                        asyncio.create_task(
-                            _release_ptt_after(pty_proc, total)
+                        # Track the release task so the `finally` block
+                        # can cancel it on disconnect, and only write
+                        # Esc k if this handler is still the most-recent
+                        # authoritative owner at fire-time.
+                        rel_task = asyncio.create_task(
+                            _release_ptt_after(
+                                pty_proc, total,
+                                still_authoritative=lambda: _mic_owner is None,
+                            )
                         )
+                        pending_releases.add(rel_task)
+                        rel_task.add_done_callback(pending_releases.discard)
                     continue
                 _handle_client_text(text, pty_proc)
             elif (data := msg.get("bytes")) is not None:
@@ -507,6 +583,13 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         # can claim it.
         if _mic_owner is mic_token:
             _mic_owner = None
+        # Cancel any in-flight PTT-release tasks. Without this they hold
+        # a ref to pty_proc through their closure and fire after the
+        # WS is gone, writing Esc k into the pty — which on a tmux
+        # session that's been re-attached aborts the new client's
+        # /voice interaction (see C2 comment above pending_releases).
+        for rel_task in list(pending_releases):
+            rel_task.cancel()
         tmux_sub.cancel()
         tts_sub.cancel()
         pty_task.cancel()
@@ -706,7 +789,7 @@ def _handle_client_text(text: str, pty_proc: PtyProcess) -> None:
 
 
 def _handle_client_binary(data: bytes, pty_proc: PtyProcess,
-                           limiter: "_MicRateLimiter",
+                           limiter: "_SlidingByteLimiter",
                            mic_token: object) -> None:
     if not data:
         return
@@ -738,33 +821,44 @@ def _handle_client_binary(data: bytes, pty_proc: PtyProcess,
     log.warning("unknown binary frame type: 0x%02x", frame_type)
 
 
-class _MicRateLimiter:
-    """Sliding-window byte budget. One instance per WS connection.
+class _SlidingByteLimiter:
+    """Sliding-window byte budget. One instance per WS connection per
+    direction. Uses a deque + maintained running total so each frame
+    is O(1) amortised."""
 
-    Uses a deque + maintained running total so each frame is O(1)
-    amortised: popleft() is O(1) and we update the total incrementally
-    rather than re-summing the window. Matters at ~50 frames/s of
-    16kHz mono Int16 audio."""
-
-    def __init__(self) -> None:
+    def __init__(self, budget_bytes: int, window_s: float, label: str) -> None:
         self._window: deque[tuple[float, int]] = deque()  # (ts, bytes)
         self._total: int = 0
+        self._budget = budget_bytes
+        self._window_s = window_s
+        self._label = label
 
     def allow(self, n_bytes: int) -> bool:
         # time.monotonic is the right primitive for sync code paths:
         # asyncio.get_event_loop().time() triggers a deprecation when
-        # called outside a running-loop context, and `allow` is invoked
-        # synchronously from _handle_client_binary.
+        # called outside a running-loop context.
         now = time.monotonic()
-        cutoff = now - _MIC_BUDGET_WINDOW_S
+        cutoff = now - self._window_s
         while self._window and self._window[0][0] < cutoff:
             _, expired = self._window.popleft()
             self._total -= expired
-        if self._total + n_bytes > _MIC_BUDGET_BYTES:
-            log.warning("mic rate budget exceeded (%d > %d in %.1fs); dropping",
-                        self._total + n_bytes, _MIC_BUDGET_BYTES,
-                        _MIC_BUDGET_WINDOW_S)
+        if self._total + n_bytes > self._budget:
+            log.warning("%s rate budget exceeded (%d > %d in %.1fs); dropping",
+                        self._label, self._total + n_bytes, self._budget,
+                        self._window_s)
             return False
         self._window.append((now, n_bytes))
         self._total += n_bytes
         return True
+
+
+def _MicRateLimiter() -> _SlidingByteLimiter:
+    """Factory for the mic-PCM byte-rate gate. Kept as a callable so
+    existing call sites keep working with no signature change."""
+    return _SlidingByteLimiter(_MIC_BUDGET_BYTES, _MIC_BUDGET_WINDOW_S, "mic")
+
+
+def _TextRateLimiter() -> _SlidingByteLimiter:
+    """Factory for the text-frame byte-rate gate. See _TEXT_BUDGET_*
+    rationale at the top of the module."""
+    return _SlidingByteLimiter(_TEXT_BUDGET_BYTES, _TEXT_BUDGET_WINDOW_S, "text")
