@@ -301,7 +301,20 @@ def _running_claude_session_ids() -> set[str]:
     sessions_dir = Path.home() / ".claude" / "sessions"
     if not sessions_dir.is_dir():
         return out
+    # Real claude session files are under ~1 KiB; a 16 KiB cap is far
+    # above legitimate values. Without the cap an authenticated client
+    # who can write into ~/.claude/sessions/ could plant a multi-GB
+    # file and read_text() would OOM the worker on every picker open.
+    _MAX_SESSION_FILE_BYTES = 16 * 1024
     for f in sessions_dir.glob("*.json"):
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        if st.st_size > _MAX_SESSION_FILE_BYTES:
+            log.warning("skipping oversized claude session file %s (%d bytes)",
+                        f, st.st_size)
+            continue
         try:
             data = json.loads(f.read_text())
         except (OSError, ValueError):

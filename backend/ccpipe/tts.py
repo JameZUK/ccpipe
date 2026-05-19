@@ -222,6 +222,9 @@ class TtsService:
     _queue: asyncio.Queue[Path] | None = None
     _observer: Observer | None = None
     _worker_task: asyncio.Task[None] | None = None
+    # Set when start() fires before ~/.claude/projects exists; polls
+    # for the dir appearing and finishes setup. Cancelled by stop().
+    _setup_retry_task: asyncio.Task[None] | None = None
     # Debounce timers per path — pulled out of _worker's local so stop()
     # can cancel them before the worker task is cancelled. Without this,
     # a call_later scheduled before stop() can fire after shutdown and
@@ -250,10 +253,41 @@ class TtsService:
             timeout=httpx.Timeout(connect=2.0, read=60.0, write=10.0, pool=2.0),
         )
 
+        # If the projects dir doesn't exist yet (first-run user who
+        # installs claude later), defer setting up the watcher. The
+        # retry task polls the parent dir every 30s and finishes
+        # setup as soon as ~/.claude/projects appears. Previously
+        # `service idle` was permanent until next ccpipe restart.
         if not self.projects_dir.exists():
-            log.warning("TTS projects dir %s missing; service idle", self.projects_dir)
+            log.warning("TTS projects dir %s missing; will retry every 30s",
+                        self.projects_dir)
+            self._setup_retry_task = asyncio.create_task(
+                self._wait_for_projects_dir(), name="tts-projects-retry")
             return
 
+        self._finish_start()
+
+    async def _wait_for_projects_dir(self) -> None:
+        """Poll for the projects dir appearing and finish initialising
+        the watcher when it does. Quietly bails on stop(). The 30 s
+        cadence is fine — TTS is operator-facing and the user can
+        always /reload the service if they're impatient."""
+        while not self._stopped:
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
+                return
+            if self._stopped:
+                return
+            if self.projects_dir.exists():
+                log.info("TTS projects dir %s now present; resuming setup",
+                         self.projects_dir)
+                self._finish_start()
+                return
+
+    def _finish_start(self) -> None:
+        """Watcher setup that depends on projects_dir existing. Split
+        from start() so the retry path can call it later."""
         # Snapshot current EOF for existing files so we don't replay history.
         for p in self.projects_dir.rglob("*.jsonl"):
             try:
@@ -275,6 +309,14 @@ class TtsService:
         # join (timeout below is best-effort) drops its events instead of
         # poking call_soon_threadsafe on a torn-down loop.
         self._stopped = True
+        # Cancel the projects-dir retry poller if start() armed it.
+        if self._setup_retry_task is not None:
+            self._setup_retry_task.cancel()
+            try:
+                await self._setup_retry_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._setup_retry_task = None
         # Cancel debounce timers BEFORE the worker — if any timer's
         # deadline has not yet fired its create_task lambda would
         # otherwise run AFTER stop() completes, against an already-
@@ -702,9 +744,24 @@ class TtsService:
                                 resp.status_code, err_body[:200])
                     return
                 started = False
+                # Defense: cap how much audio we'll relay per utterance.
+                # A misbehaving Kokoro endpoint (or one pointed at an
+                # attacker during a misconfig) could otherwise stream
+                # unbounded bytes through to every TTS subscriber, OOM-
+                # ing the backend and clients. 32 MiB is ~5-10 minutes
+                # of MP3 at typical bitrates — well above any reasonable
+                # single-utterance bound.
+                bytes_yielded = 0
+                _MAX_UTTERANCE_BYTES = 32 * 1024 * 1024
                 async for chunk in resp.aiter_bytes():
                     if not chunk:
                         continue
+                    bytes_yielded += len(chunk)
+                    if bytes_yielded > _MAX_UTTERANCE_BYTES:
+                        log.warning("kokoro stream exceeded %d B for one "
+                                    "utterance; truncating",
+                                    _MAX_UTTERANCE_BYTES)
+                        break
                     if not started:
                         yield ("start", text)
                         started = True

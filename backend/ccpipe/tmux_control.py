@@ -172,7 +172,19 @@ class TmuxControlClient:
         assert proc.stdout is not None
         try:
             while True:
-                line_bytes = await proc.stdout.readline()
+                # 90 s timeout on readline so a frozen-but-alive tmux
+                # (kernel pause, swap thrash) triggers a supervisor
+                # restart instead of wedging every WS's session-event
+                # delivery indefinitely. Tmux emits at least periodic
+                # heartbeat / detach notifications during normal idle,
+                # so 90 s of pure silence is genuinely abnormal.
+                try:
+                    line_bytes = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=90.0)
+                except asyncio.TimeoutError:
+                    log.warning("tmux control-mode silent for 90s — "
+                                "treating as wedged, restarting supervisor")
+                    break
                 if not line_bytes:
                     break
                 line = line_bytes.decode("utf-8", errors="replace").rstrip("\n")
