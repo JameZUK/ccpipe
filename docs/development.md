@@ -1,0 +1,124 @@
+# Development
+
+## Running without the systemd unit
+
+```bash
+# Backend (auto-reload on changes)
+cd backend && . .venv/bin/activate
+uvicorn ccpipe.main:app --reload --port 8080
+
+# Frontend (Vite dev server with proxy to backend)
+cd frontend && npm run dev
+# Visit http://localhost:5173
+```
+
+## Tests
+
+```bash
+cd backend && . .venv/bin/activate
+pip install -e ".[dev]"
+pytest -v
+```
+
+The suite is ~270 cases; about 90 are skipped by default because they
+require live credentials or external services. Set
+`CCPIPE_TEST_PASSWORD`, `CCPIPE_EXTERNAL_BASE`, etc. to enable them
+(see `tests/test_external_security.py` for the env-var list).
+
+## Layout
+
+```
+backend/
+  ccpipe/
+    main.py            App factory: middleware, lifespan, /ws, router wiring
+    auth.py            Argon2id passwords, TOTP, session middleware
+    routes/
+      auth.py          /api/auth/* (login, logout, TOTP, credentials)
+      sessions.py      /api/sessions/*, /api/claude-sessions/*
+      fs.py            /api/fs/* (list, read, write, upload, download, ...)
+      tts.py           /api/tts/* (voices, config, speak, preview)
+      mic.py           /api/mic/config (voice-input timing knobs)
+      static.py        /, /manifest.webmanifest, /sw.js, icons
+    tmux.py            libtmux wrapper for one-shot ops
+    tmux_control.py    Long-lived `tmux -C` listener; pushes events
+    tmux_setup.py      Sets server-wide default-shell etc. at startup
+    ws.py              WebSocket handler, tagged binary frame protocol;
+                       owns backend-orchestrated mic release-PTT timing
+    pty_relay.py       PTY spawn + async read/write
+    mic.py             Mic pipe writer (PCM → /tmp/ccpipe_mic.pipe);
+                       tracks bytes/drops and estimates drain time
+    tts.py             JSONL tail + Kokoro client + audio chunk fan-out
+    settings_patch.py  Idempotently adds voice keys to ~/.claude/settings.json
+  tests/               pytest suite
+  pyproject.toml
+
+frontend/
+  src/
+    main.ts            Entry: session picker → terminal; lazy-loads heavy UI
+    api.ts             Shared fetch helper (CSRF header + same-origin + JSON)
+    session-picker.ts
+    terminal.ts        xterm.js setup, resize, input wiring
+    mobile.ts          Composer bar + modifier-key row for phone/tablet
+    file-panel.ts      Adaptive file browser + inline editor
+    settings.ts        Tabbed settings dialog (Display / Voice / Account)
+    mic.ts             Mic capture: getUserMedia + AudioWorkletNode +
+                       config-driven VAD + max-record cap
+    tts.ts             Chunked audio player + per-session mute
+    ws.ts              WS client; JSON control (input/resize/ping/
+                       tts_mute/mic_stop) + tagged binary frames
+    styles.css
+  public/
+    manifest.webmanifest
+    sw.js              Minimal service worker for PWA install
+    mic-worklet.js     AudioWorkletProcessor: 48k→16k mono Int16 PCM
+  index.html
+  vite.config.ts
+
+nginx/ccpipe.conf      Sample server block
+scripts/
+  setup-virtual-mic.sh Load/unload Pulse module-pipe-source on host (up/down)
+  install.sh           Bundled installer (venv + frontend build + systemd)
+systemd/
+  ccpipe.service              Web service (FastAPI + uvicorn)
+  ccpipe-virtual-mic.service  Loads the Pulse pipe-source at login
+docs/
+  deployment.md       Reverse proxy + TLS + firewall + troubleshooting
+  configuration.md    Env vars + voice setup + login + state files
+  development.md      This file
+  threat-model.md     Design-level threat model (post-pen-test)
+```
+
+## WebSocket protocol
+
+Client → server text frames (JSON):
+- `{"type":"input","data":"…"}` — raw bytes to the PTY
+- `{"type":"resize","cols":N,"rows":N}` — terminal size
+- `{"type":"ping"}` — keepalive
+- `{"type":"tts_mute","value":bool}` — mirror of client mute state so
+  the server can skip Kokoro round-trips while the user isn't listening
+- `{"type":"mic_stop"}` — the client tore down its mic; server
+  computes drain + pad and writes release-PTT to the PTY itself
+
+Client → server binary frames are prefixed with a 1-byte channel tag:
+- `0x01` — Int16 PCM mic audio (16 kHz mono)
+
+Server → client text frames (JSON):
+- `hello` — session name + TTS + voice availability
+- `session_event` — tmux control-mode forwarded events
+- `session_gone` — tmux session closed
+- `tts_start` / `tts_end` — frame the audio that follows
+- `pong` — keepalive reply
+- `pty_exited` — PTY child closed
+
+Server → client binary frames (1-byte prefix):
+- `0x00` — raw PTY output
+- `0x02` — encoded TTS audio chunk
+
+## Source of truth for the voice-input pipeline
+
+The release-PTT timing lives in `backend/ccpipe/ws.py` —
+`_release_ptt_after()` and the `mic_stop` handler. The drain estimate
+math is in `backend/ccpipe/mic.py::MicWriter.estimate_drain_seconds()`.
+The four user-tunable knobs are defined in
+`backend/ccpipe/config.py::MicConfig`. If you're touching any of those,
+read all three.
