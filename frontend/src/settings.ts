@@ -1049,30 +1049,41 @@ function _renderDisableForm(host: HTMLElement, done: () => void): void {
 function buildDebugSection(opts: SettingsOpts): HTMLElement {
   const sec = document.createElement("section");
   sec.className = "modal__section";
+  // Structure mirrors the other sections (rows + sibling action bar)
+  // so the layout is consistent. The body text lives inside a row's
+  // label area, which is how other "explainer + action" pairs in the
+  // settings modal are shaped.
   sec.innerHTML = `
     <h2 class="modal__section-title">debug</h2>
     <div class="modal__rows">
-      <p class="row__hint">
-        Captures a JSON snapshot of WebSocket counters, xterm buffer
-        state, and the last 500 lines of scrollback. Useful when a
-        scrollback / sizing regression happens — paste the snapshot
-        into a report so the failure mode is reproducible. Keyboard
-        shortcut: Ctrl+Shift+D.
-      </p>
-      <div class="modal__row-actions" data-role="debug-actions">
-        <button type="button" class="btn" data-role="capture">
-          Capture diagnostic snapshot
-        </button>
+      <div class="row row--stacked">
+        <span class="row__label">Diagnostic snapshot
+          <span class="row__hint">
+            Captures WebSocket counters, xterm buffer state, and the
+            last 500 lines of scrollback as a single JSON blob. Use
+            when a scrollback / sizing regression happens so the
+            failure mode is reproducible. Keyboard shortcut:
+            Ctrl+Shift+D.
+          </span>
+        </span>
       </div>
+    </div>
+    <div class="modal__row-actions">
+      <span class="modal__status" data-role="debug-status"></span>
+      <button type="button" class="btn btn--primary" data-role="capture">
+        Capture snapshot
+      </button>
     </div>
   `;
   const captureBtn = sec.querySelector<HTMLButtonElement>("[data-role=capture]")!;
+  const status = sec.querySelector<HTMLElement>("[data-role=debug-status]")!;
   if (!opts.onCaptureDebugSnapshot) {
     // Settings can be opened from contexts where there's no active
     // terminal (e.g. session picker). Disable the affordance with a
     // hint rather than silently no-op'ing the button.
     captureBtn.disabled = true;
     captureBtn.title = "Attach a session first";
+    status.textContent = "(no active session)";
   } else {
     captureBtn.addEventListener("click", () => {
       opts.onCaptureDebugSnapshot!();
