@@ -15,6 +15,11 @@ type SessionInfo = {
   // will be auto-recreated on backend restart. Drives the pin glyph
   // on the row and the kebab menu's toggle label.
   sticky: boolean;
+  // Unix timestamp of the most recent pane activity in any window of
+  // this session (tmux's #{session_activity}). Drives the picker
+  // sort: a session that just had input or output bubbles to the
+  // top of its sticky / non-sticky group automatically.
+  activity: number;
 };
 
 type ClaudeSession = {
@@ -505,9 +510,18 @@ export function renderSessionPicker(
       return;
     }
     list.className = "picker__list";
+    // Sort: sticky first, then by most recent activity (tmux's
+    // #{session_activity}), with created-desc as the tiebreaker for
+    // brand-new sessions that haven't seen any output yet (both
+    // would have activity ≈ created). A currently-attached session
+    // naturally sits at the top of its group because attaching
+    // updates session_activity — no special case needed.
     sessions
       .slice()
-      .sort((a, b) => Number(b.attached) - Number(a.attached) || b.created - a.created)
+      .sort((a, b) =>
+        Number(b.sticky) - Number(a.sticky)
+        || b.activity - a.activity
+        || b.created - a.created)
       .forEach((s, i) => list.append(renderSessionRow(s, i)));
   };
 

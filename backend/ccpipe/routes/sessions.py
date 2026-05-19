@@ -60,6 +60,11 @@ class SessionInfo(BaseModel):
     # restart. Surfaced so the UI can render a pin indicator and flip
     # the kebab menu label between "make sticky" / "make ephemeral".
     sticky: bool = False
+    # Unix timestamp of the most recent pane output in this session
+    # (tmux's #{session_activity}). Drives the picker's "last use"
+    # ordering so a session that's actively producing output bubbles
+    # to the top of its sticky / non-sticky group.
+    activity: int = 0
 
 
 class CreateSessionBody(BaseModel):
@@ -96,6 +101,7 @@ def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str]) -> SessionInfo
         attached=s.attached,
         created=s.created,
         sticky=s.name in sticky_names,
+        activity=s.activity,
     )
 
 

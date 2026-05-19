@@ -34,6 +34,12 @@ class TmuxSession:
     windows: int
     attached: bool
     created: int  # unix timestamp
+    # Unix timestamp of the most recent pane output in any window of
+    # this session — tmux's #{session_activity}. Drives the picker's
+    # "last use" ordering: a session that just had output / input
+    # bubbles to the top of its group automatically. Zero when tmux
+    # doesn't expose it (older tmux, or libtmux fallback).
+    activity: int = 0
 
 
 def _server() -> libtmux.Server:
@@ -55,6 +61,7 @@ def _sync_list_sessions() -> list[TmuxSession]:
             windows=int(s.session_windows or 0),
             attached=int(s.session_attached or 0) > 0,
             created=int(s.session_created or 0),
+            activity=int(getattr(s, "session_activity", 0) or 0),
         ))
     return result
 
