@@ -2358,4 +2358,21 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
     border-radius: 0;
     border: none;
   }
+  /* On narrow viewports the foot's actions cluster (new dir + use this
+   * directory) is wider than the status-on-left / actions-on-right
+   * row can accommodate — the "use this directory" label alone takes
+   * most of the width, so `space-between` pushes the "new dir" button
+   * off-screen to the right. Stack the rows so both buttons are
+   * always visible. */
+  .dir-browser__foot {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--s-2);
+  }
+  .dir-browser__actions {
+    justify-content: flex-end;
+  }
+  .dir-browser__status {
+    flex: 0 1 auto;
+  }
 }
