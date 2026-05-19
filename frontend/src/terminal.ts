@@ -673,8 +673,54 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     }, 100);
   };
 
+  // ── Diagnostic helpers ──────────────────────────────────────────────
+  // Used by the debug-snapshot affordance to give us a client-side view
+  // of the xterm buffer at the moment the user reports a problem. The
+  // snapshot pairs this with a WS-counter snapshot from the same
+  // instant so we can see whether a missing scrollback line is "the
+  // server never sent it" vs "the server sent it but xterm didn't
+  // park it in scrollback".
+  const getDebugState = (): Record<string, unknown> => {
+    const buf = term.buffer.active;
+    const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
+    return {
+      cols: term.cols,
+      rows: term.rows,
+      bufferType: term.buffer.active.type,
+      // buffer.length = scrollback + visible rows; this is the total
+      // line count we'd dump from dumpBuffer().
+      bufferLength: buf.length,
+      baseY: buf.baseY,
+      cursorY: buf.cursorY,
+      cursorX: buf.cursorX,
+      viewportY: buf.viewportY,
+      renderer: webglActive ? "webgl" : "dom",
+      viewportScrollTop: viewport?.scrollTop ?? null,
+      viewportScrollHeight: viewport?.scrollHeight ?? null,
+      viewportClientHeight: viewport?.clientHeight ?? null,
+      // Distance from live tail in pixels. 0 = at the bottom.
+      offsetFromBottom:
+        viewport ? viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop : null,
+    };
+  };
+
+  /** Dump the last `maxLines` of xterm's buffer (scrollback + visible)
+   * as plain text — what the user actually sees / could scroll to. */
+  const dumpBuffer = (maxLines = 500): string[] => {
+    const buf = term.buffer.active;
+    const total = buf.length;
+    const start = Math.max(0, total - maxLines);
+    const out: string[] = [];
+    for (let i = start; i < total; i++) {
+      const line = buf.getLine(i);
+      out.push(line ? line.translateToString(true) : "");
+    }
+    return out;
+  };
+
   return {
     term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom,
+    getDebugState, dumpBuffer,
     dispose: () => {
       disposed = true;
       pillCleanup?.();

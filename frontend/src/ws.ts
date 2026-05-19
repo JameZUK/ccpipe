@@ -123,6 +123,24 @@ export class TerminalSocket {
   private readonly reconnectNowMinIntervalMs = 250;
   private removeLifecycleHooks: (() => void) | null = null;
 
+  // ── Diagnostic counters ─────────────────────────────────────────────
+  // Tracked so the debug-snapshot affordance can give us a client-side
+  // view that's directly comparable with the backend's WsCounters for
+  // the same WS handler. Bytes refer to PTY payload bytes (the FRAME_
+  // PTY_OUTPUT channel tag byte is stripped before counting).
+  private bytesReceived = 0;
+  private framesReceived = 0;
+  private helloCount = 0;
+  private lastHelloAt = 0;
+  private lastStreamReadyAt = 0;
+  // History bytes are the FRAME_PTY_OUTPUT bytes received between hello
+  // and stream_ready — i.e. the pane replay. Tracked as its own field
+  // so a snapshot can answer "how big was the history blob the server
+  // sent on this attach?" without us having to grep the journal.
+  private historyBytesInFlight = 0;
+  private lastHistoryBytes = 0;
+  private receivingHistory = false;
+
   constructor(
     // url is a fixed string now — the previous form took an isReconnect
     // flag to vary the URL (skip_history=1) on retries. That's gone; the
@@ -194,9 +212,21 @@ export class TerminalSocket {
               // measures setup time, not network. The accurate
               // moment is `stream_ready`, sent immediately before
               // the server enters its main receive loop.
+              this.helloCount += 1;
+              this.lastHelloAt = Date.now();
+              this.receivingHistory = true;
+              this.historyBytesInFlight = 0;
               this.handlers.onHello(parsed as unknown as ServerHello);
               return;
             case "stream_ready":
+              // History blob is now fully sent. Freeze the running
+              // total as the canonical "history bytes received on
+              // this attach" so it survives subsequent live output.
+              if (this.receivingHistory) {
+                this.lastHistoryBytes = this.historyBytesInFlight;
+                this.receivingHistory = false;
+              }
+              this.lastStreamReadyAt = Date.now();
               // Server has finished history-send and is one statement
               // from `while True: await receive()`. But on the CLIENT
               // side xterm.js is probably still parsing the history-
@@ -266,9 +296,14 @@ export class TerminalSocket {
       const buf = new Uint8Array(ev.data as ArrayBuffer);
       if (buf.length === 0) return;
       switch (buf[0]) {
-        case FRAME_PTY_OUTPUT:
-          this.handlers.onOutput(buf.subarray(1));
+        case FRAME_PTY_OUTPUT: {
+          const payload = buf.subarray(1);
+          this.framesReceived += 1;
+          this.bytesReceived += payload.length;
+          if (this.receivingHistory) this.historyBytesInFlight += payload.length;
+          this.handlers.onOutput(payload);
           return;
+        }
         case FRAME_TTS_AUDIO:
           this.handlers.onTtsAudio?.(buf.subarray(1));
           return;
@@ -405,6 +440,46 @@ export class TerminalSocket {
     this.removeLifecycleHooks?.();
     this.removeLifecycleHooks = null;
     this.ws?.close();
+  }
+
+  /** Snapshot of socket state for the debug-snapshot affordance.
+   *
+   * Mirrors backend ``WsCounters`` semantics where possible
+   * (``bytesReceived`` is the client-side counterpart of the server's
+   * ``bytes_sent_ws``), plus reconnect-state fields that only the
+   * client knows. Plain values only — JSON-serialisable so the
+   * snapshot can be POSTed as-is.
+   */
+  getDebugState(): Record<string, unknown> {
+    const now = Date.now();
+    return {
+      url: this.url,
+      readyState: this.ws?.readyState ?? null,
+      readyStateLabel:
+        this.ws?.readyState === WebSocket.CONNECTING ? "connecting" :
+        this.ws?.readyState === WebSocket.OPEN ? "open" :
+        this.ws?.readyState === WebSocket.CLOSING ? "closing" :
+        this.ws?.readyState === WebSocket.CLOSED ? "closed" :
+        "none",
+      closed: this.closed,
+      hadOpenedOnce: this.hadOpenedOnce,
+      retryAttempt: this.retryAttempt,
+      reconnectDelayMs: this.reconnectDelayMs,
+      pendingRetry: this.pendingRetry !== null,
+      lastReceivedAt: this.lastReceivedAt,
+      msSinceLastReceived: this.lastReceivedAt ? now - this.lastReceivedAt : null,
+      lastPingSentAt: this.lastPingSentAt,
+      framesReceived: this.framesReceived,
+      bytesReceived: this.bytesReceived,
+      helloCount: this.helloCount,
+      lastHelloAt: this.lastHelloAt,
+      msSinceLastHello: this.lastHelloAt ? now - this.lastHelloAt : null,
+      lastStreamReadyAt: this.lastStreamReadyAt,
+      receivingHistory: this.receivingHistory,
+      historyBytesInFlight: this.historyBytesInFlight,
+      lastHistoryBytes: this.lastHistoryBytes,
+      latestResize: this.latestResize,
+    };
   }
 
   /** Force an immediate reconnect attempt — cancels any scheduled backoff

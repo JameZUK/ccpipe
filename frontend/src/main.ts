@@ -272,6 +272,15 @@ async function attachTerminal(session: string): Promise<void> {
       onDisplayPrefsChange: (p) => terminalApi?.applyPrefs(p),
       onSessionInvalidated: () => { socket.close(); bootstrap(); },
       onMicConfigChange: (cfg) => { applyMicConfig(cfg); },
+      onCaptureDebugSnapshot: () => {
+        if (!terminalApi) return;
+        // Lazy import keeps the debug module out of the main bundle —
+        // it's only loaded when the user actually opens the affordance.
+        void import("./debug").then(({ captureSnapshot, showDebugModal }) => {
+          const snap = captureSnapshot({ session, terminal: terminalApi, socket });
+          showDebugModal(snap);
+        });
+      },
     });
   };
 
@@ -757,10 +766,28 @@ async function attachTerminal(session: string): Promise<void> {
   resetTerminal = terminalApi.resetBuffer;
   scrollTerminalToBottom = terminalApi.scrollToBottom;
 
+  // Ctrl+Shift+D — capture a frontend diagnostic snapshot (WS counters
+  // + xterm buffer state + scrollback tail) and pop the debug modal.
+  // The same affordance is mirrored in Settings → Debug for keyboard-
+  // less users; both paths go through the same captureSnapshot()
+  // helper so the report shape stays consistent.
+  const onDebugKey = (e: KeyboardEvent) => {
+    if (!e.ctrlKey || !e.shiftKey) return;
+    if (e.key !== "D" && e.key !== "d") return;
+    e.preventDefault();
+    e.stopPropagation();
+    void import("./debug").then(({ captureSnapshot, showDebugModal }) => {
+      const snap = captureSnapshot({ session, terminal: terminalApi, socket });
+      showDebugModal(snap);
+    });
+  };
+  document.addEventListener("keydown", onDebugKey);
+
   // Cross-tab pref sync: if another tab changes display settings, mirror them here.
   const unsubPrefs = onDisplayPrefsChange((p) => terminalApi.applyPrefs(p));
   view.addEventListener("ccpipe:dispose", () => {
     unsubPrefs();
+    document.removeEventListener("keydown", onDebugKey);
     // Close the socket FIRST so its lifecycle hooks (online /
     // visibilitychange) stop firing and a zombie reconnect can't add a
     // second subscription on the backend — which the user hears as

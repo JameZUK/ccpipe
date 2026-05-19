@@ -31,7 +31,7 @@ const ICONS = {
 
 const VERSION = "0.1.0";
 
-type TabId = "display" | "voice" | "account";
+type TabId = "display" | "voice" | "account" | "debug";
 const LS_LAST_TAB = "ccpipe.settings.tab";
 const DEFAULT_TAB: TabId = "display";
 
@@ -73,6 +73,12 @@ export interface SettingsOpts {
    * streamer can adopt the new VAD / max-record values without waiting
    * for the next page load. */
   onMicConfigChange?: (cfg: MicConfig) => void;
+  /** Capture a diagnostic snapshot of the live terminal + WS + buffer
+   * state and pop the debug modal. Provided by main.ts (closure over
+   * the active session's socket + terminalApi); the Debug section
+   * here just renders a button that invokes it. The same affordance
+   * is also bound to Ctrl+Shift+D in main.ts. */
+  onCaptureDebugSnapshot?: () => void;
 }
 
 let activeOverlay: HTMLDivElement | null = null;
@@ -109,10 +115,16 @@ export function openSettings(opts: SettingsOpts): void {
   accountPanel.dataset.tab = "account";
   accountPanel.append(buildAccountSection(opts), buildTwoFactorSection());
 
+  const debugPanel = document.createElement("div");
+  debugPanel.className = "modal__panel";
+  debugPanel.dataset.tab = "debug";
+  debugPanel.append(buildDebugSection(opts));
+
   const panels: Record<TabId, HTMLElement> = {
     display: displayPanel,
     voice: voicePanel,
     account: accountPanel,
+    debug: debugPanel,
   };
 
   const initial = loadLastTab();
@@ -180,6 +192,7 @@ function buildTabs(initial: TabId, onChange: (next: TabId) => void): HTMLElement
     { id: "display", label: "display" },
     { id: "voice",   label: "voice"   },
     { id: "account", label: "account" },
+    { id: "debug",   label: "debug"   },
   ];
   const buttons: HTMLButtonElement[] = [];
   for (const it of items) {
@@ -1025,6 +1038,48 @@ function _renderDisableForm(host: HTMLElement, done: () => void): void {
       btn.disabled = false;
     }
   });
+}
+
+// ─── Debug section ──────────────────────────────────────────────────────
+// Single button that hands control back to main.ts's
+// onCaptureDebugSnapshot callback (which has the live socket +
+// terminalApi in its closure). Same affordance is bound to
+// Ctrl+Shift+D as a quicker route — see main.ts.
+
+function buildDebugSection(opts: SettingsOpts): HTMLElement {
+  const sec = document.createElement("section");
+  sec.className = "modal__section";
+  sec.innerHTML = `
+    <h2 class="modal__section-title">debug</h2>
+    <div class="modal__rows">
+      <p class="row__hint">
+        Captures a JSON snapshot of WebSocket counters, xterm buffer
+        state, and the last 500 lines of scrollback. Useful when a
+        scrollback / sizing regression happens — paste the snapshot
+        into a report so the failure mode is reproducible. Keyboard
+        shortcut: Ctrl+Shift+D.
+      </p>
+      <div class="modal__row-actions" data-role="debug-actions">
+        <button type="button" class="btn" data-role="capture">
+          Capture diagnostic snapshot
+        </button>
+      </div>
+    </div>
+  `;
+  const captureBtn = sec.querySelector<HTMLButtonElement>("[data-role=capture]")!;
+  if (!opts.onCaptureDebugSnapshot) {
+    // Settings can be opened from contexts where there's no active
+    // terminal (e.g. session picker). Disable the affordance with a
+    // hint rather than silently no-op'ing the button.
+    captureBtn.disabled = true;
+    captureBtn.title = "Attach a session first";
+  } else {
+    captureBtn.addEventListener("click", () => {
+      opts.onCaptureDebugSnapshot!();
+      closeSettings();
+    });
+  }
+  return sec;
 }
 
 // ─── About footer ───────────────────────────────────────────────────────
