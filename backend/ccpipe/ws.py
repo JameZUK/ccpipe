@@ -55,17 +55,21 @@ _MIC_MAX_FRAME_BYTES = 32 * 1024            # one WS frame
 _MIC_BUDGET_BYTES = 1 * 1024 * 1024         # sustained 1s window
 _MIC_BUDGET_WINDOW_S = 1.0
 
-# Text-frame ingress caps. The frontend never sends a single text frame
-# larger than a few KB even for big pastes (terminal.ts chunks input at
-# 4 KiB; resize/mic_stop/tts_mute/ping are all tiny). The cap is well
-# above legitimate traffic; an authenticated bad page that tries to
-# stream unbounded text into pty_proc.write is dropped here before the
-# JSON parse on the hot path can happen. Matching sliding-window budget
-# covers the case where someone splits a giant payload across many
-# in-bound frames to stay under _TEXT_FRAME_MAX_BYTES.
+# Per-text-frame size cap. The frontend never sends a single text
+# frame larger than a few KB even for big pastes — terminal.ts chunks
+# input at 4 KiB and resize/mic_stop/tts_mute/ping are tiny — so 64
+# KiB is well above legitimate traffic. An authenticated bad page
+# that tries to stream unbounded text into pty_proc.write is dropped
+# here before the JSON parse on the hot path can happen.
+#
+# We DON'T also impose a sliding-window byte-rate cap on top: a large
+# paste (e.g. a multi-megabyte log) chunks into many 4 KiB frames in
+# rapid succession, which a 4 MiB/s budget would silently truncate
+# mid-paste — exactly the "paste broke" symptom the C3 fix produced.
+# Defense-in-depth against sustained streaming is handled downstream
+# by pty_relay's _WRITE_BUFFER_LIMIT (4 MiB) which backpressures the
+# PTY master's kernel buffer.
 _TEXT_FRAME_MAX_BYTES = 64 * 1024
-_TEXT_BUDGET_BYTES = 4 * 1024 * 1024         # sustained 1s window
-_TEXT_BUDGET_WINDOW_S = 1.0
 
 
 @dataclass
@@ -440,7 +444,6 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
 
     pty_task = asyncio.create_task(_pty_lifecycle())
     mic_limiter = _MicRateLimiter()
-    text_limiter = _TextRateLimiter()
     # Per-WS opaque token used to claim the mic singleton on first use.
     mic_token: object = object()
     # In-flight PTT-release tasks scheduled by mic_stop. Tracked so we
@@ -459,19 +462,19 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
             if msg.get("type") == "websocket.disconnect":
                 break
             if (text := msg.get("text")) is not None:
-                # Defense-in-depth: cap per-frame and sliding-window
-                # byte rate on inbound text. Legitimate traffic is tiny
-                # (resize/ping/tts_mute) or 4 KiB chunks (input from
-                # terminal.ts INPUT_CHUNK). A hijacked or compromised
-                # tab streaming unbounded JSON would otherwise hit the
-                # `'"type":"tts_mute"' in text` sniff + full json.loads
-                # on every keystroke-sized frame.
+                # Per-frame size cap. Frontend chunks input at 4 KiB
+                # and control messages are tiny, so 64 KiB is well
+                # above legitimate traffic. A hijacked page streaming
+                # unbounded JSON would otherwise hit the substring
+                # sniffs + full json.loads on every keystroke-sized
+                # frame. The downstream pty_relay write buffer is
+                # the real backpressure for sustained streaming —
+                # we don't also impose a sliding-window byte budget
+                # because that silently truncates large pastes.
                 tlen = len(text.encode("utf-8"))
                 if tlen > _TEXT_FRAME_MAX_BYTES:
                     log.warning("oversized text frame (%d > %d bytes); dropping",
                                 tlen, _TEXT_FRAME_MAX_BYTES)
-                    continue
-                if not text_limiter.allow(tlen):
                     continue
                 # Intercept "ping" first so we can reply pong from this
                 # scope where send_json is available. The pong lets the
@@ -871,9 +874,3 @@ def _MicRateLimiter() -> _SlidingByteLimiter:
     """Factory for the mic-PCM byte-rate gate. Kept as a callable so
     existing call sites keep working with no signature change."""
     return _SlidingByteLimiter(_MIC_BUDGET_BYTES, _MIC_BUDGET_WINDOW_S, "mic")
-
-
-def _TextRateLimiter() -> _SlidingByteLimiter:
-    """Factory for the text-frame byte-rate gate. See _TEXT_BUDGET_*
-    rationale at the top of the module."""
-    return _SlidingByteLimiter(_TEXT_BUDGET_BYTES, _TEXT_BUDGET_WINDOW_S, "text")
