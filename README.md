@@ -81,6 +81,56 @@ friction than it solved.
 - nginx or Caddy for TLS termination (sample in `nginx/ccpipe.conf`)
 - PulseAudio or PipeWire (only needed for voice)
 
+## Platform support
+
+The server side has been built for and tested on **Linux**. The
+browser client works on any modern browser (Linux, macOS, Windows,
+Android, iOS) — that side is OS-agnostic.
+
+| Target | Server-side status |
+|---|---|
+| Linux | Fully tested, this is what's actively used. |
+| Windows via WSL2 | Should work — see below. Not tested by the maintainer; reports welcome. |
+| Windows (native) | Not supported. Use WSL2 — a native port would have to replace systemd, the FIFO mic, PulseAudio, and the bash install script. |
+| macOS | Plausible but not yet wired up. Untested. PRs welcome — see below. |
+
+### Windows (via WSL2)
+
+Install WSL2 with a recent Linux distro from an elevated PowerShell:
+
+```powershell
+wsl --install                        # default Ubuntu
+# or: wsl --install -d Debian
+```
+
+Reboot, open the Linux shell, then follow the [Linux install steps](#install)
+inside it. WSL2 on current Windows builds supports `systemd --user`
+(may need `systemd=true` under `[boot]` in `/etc/wsl.conf`) and
+PulseAudio via WSLg. The browser on the Windows side connects to
+`http://localhost:8080` (port-forwarded from WSL2 by default) or
+whichever address you put behind a reverse proxy. Voice in/out across
+the WSLg audio boundary hasn't been verified end-to-end — if you try
+it, please report back.
+
+### macOS
+
+The Python backend itself should run unmodified. Two pieces of
+plumbing are Linux-specific and would need macOS equivalents:
+
+- **Service supervisor.** The two systemd unit templates
+  (`systemd/*.service.in`) need launchd plist twins, and
+  `scripts/install.sh` needs to detect the platform and render the
+  right pair.
+- **Virtual microphone.** PulseAudio's `module-pipe-source` doesn't
+  exist on CoreAudio. The likely path is
+  [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the
+  virtual audio device plus a small bridge process that reads from
+  the FIFO (`/tmp/ccpipe_mic.pipe`) and writes 16 kHz mono Int16 PCM
+  into BlackHole's input — a few lines of `sox`/`ffmpeg`, or a small
+  Swift/Go helper.
+
+If you have a Mac and want this, please open a PR.
+
 ## Install
 
 Install into the home directory of the user ccpipe should run as —
