@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-50 -50 100 100" width="160" height="160" role="img" aria-label="ccpipe">
+  <title>ccpipe</title>
+  <style>
+    .halo  { animation: ccpipe-halo  4s ease-out infinite; transform-origin: 0 0; }
+    .spark { transform-origin: 0 0; animation: ccpipe-spin 18s linear infinite; }
+    .petal { fill: #f5a524; transform-origin: 0 0; opacity: 0.65;
+             transform: rotate(var(--rot, 0deg)) scale(1, 0.92);
+             animation: ccpipe-breathe 4s ease-out infinite; }
+    .petal.a { --rot:   0deg; animation-delay:  0s; }
+    .petal.b { --rot:  45deg; animation-delay: -1s; }
+    .petal.c { --rot:  90deg; animation-delay: -2s; }
+    .petal.d { --rot: 135deg; animation-delay: -3s; }
+    .core    { fill: #f5a524; transform-origin: 0 0; animation: ccpipe-core 4s ease-out infinite; }
+
+    @keyframes ccpipe-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes ccpipe-breathe {
+      0%, 100% { transform: rotate(var(--rot, 0deg)) scale(1, 0.92);    opacity: 0.65; }
+      50%      { transform: rotate(var(--rot, 0deg)) scale(1.08, 1.18); opacity: 1;    }
+    }
+    @keyframes ccpipe-core {
+      0%, 100% { transform: scale(0.85); opacity: 0.55; }
+      50%      { transform: scale(1.25); opacity: 1;    }
+    }
+    @keyframes ccpipe-halo {
+      0%, 100% { filter: drop-shadow(0 0 8px  rgba(245,165,36,0.12)); }
+      50%      { filter: drop-shadow(0 0 18px rgba(245,165,36,0.32)); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .halo, .spark, .petal, .core { animation: none; }
+    }
+  </style>
+  <g class="halo">
+    <g class="spark">
+      <path class="petal a" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+      <path class="petal b" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+      <path class="petal c" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+      <path class="petal d" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
+    </g>
+    <circle class="core" cx="0" cy="0" r="2.4"/>
+  </g>
+</svg>

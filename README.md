@@ -1,5 +1,9 @@
 # ccpipe
 
+<p align="center">
+  <img src="docs/logo.svg" alt="ccpipe" width="160">
+</p>
+
 ccpipe is a web front-end for [Claude Code](https://claude.com/claude-code)
 sessions running in tmux. Install it on the workstation, server, or VM
 where you already run `claude` from a terminal; ccpipe attaches a
