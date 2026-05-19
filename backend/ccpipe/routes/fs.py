@@ -250,7 +250,14 @@ async def fs_read(path: str) -> dict[str, Any]:
                             detail=f"file too large for editor "
                                    f"({st.st_size} > {_FS_EDITOR_LIMIT})")
     try:
-        with resolved.open("rb") as f:
+        # O_NOFOLLOW: refuse to follow a symlink at the resolved path.
+        # _resolve_fs_path has already collapsed any pre-existing
+        # symlinks during canonicalisation; this catches the TOCTOU
+        # window where the resolved real path is racily replaced with
+        # a symlink between resolution and open(). fs writes already
+        # use O_NOFOLLOW for the same reason — see fs_write.
+        fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
             head = f.read(_FS_BINARY_SNIFF)
             if b"\x00" in head:
                 raise HTTPException(status_code=415, detail="file is binary")
@@ -375,7 +382,11 @@ async def fs_download(path: str) -> StreamingResponse:
 
     def _gen():
         try:
-            with resolved.open("rb") as f:
+            # O_NOFOLLOW: see fs_read — TOCTOU protection against the
+            # resolved real path being racily replaced with a symlink
+            # between resolution and download.
+            fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as f:
                 while True:
                     chunk = f.read(64 * 1024)
                     if not chunk:

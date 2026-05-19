@@ -685,7 +685,19 @@ def _allowed_origins(websocket: WebSocket) -> set[str]:
             if part:
                 out.add(part)
         return out
-    # Fallback: derive from the request's Host header.
+    # Behind TLS the operator MUST configure CCPIPE_ALLOWED_ORIGINS;
+    # falling back to the request's own Host header means a request
+    # arriving with a forged Host (or originating from a misconfigured
+    # reverse proxy that lets clients control the Host header) gets
+    # to define its own gate. Fail closed instead — startup already
+    # warns loudly when the env is missing under TLS.
+    if behind_tls():
+        log.warning("ws origin allowlist empty under TLS — refusing upgrade")
+        return set()
+    # Plain HTTP zero-config LAN deployment: derive from Host so the
+    # default deployment keeps working. SameSite=Lax keeps the auth
+    # cookie off any cross-origin upgrade so this is a softer gate
+    # rather than a hole.
     out = set()
     host = websocket.headers.get("host")
     if host:

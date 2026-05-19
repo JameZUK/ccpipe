@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from .. import sticky, tmux
 from ..auth import AuthDep, CsrfDep
 from ..tmux_control import CONTROL_SESSION_NAME
-from .fs import content_disposition_attachment
+from .fs import _enforce_fs_jail, content_disposition_attachment
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -135,6 +135,13 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
             raise HTTPException(status_code=400, detail="cwd does not exist")
         if not resolved.is_dir():
             raise HTTPException(status_code=400, detail="cwd is not a directory")
+        # The cwd is operator-supplied and used to spawn claude — without
+        # the jail check we'd happily start claude in /etc, /var/log,
+        # anywhere the uvicorn UID can chdir. Claude then indexes that
+        # tree under ~/.claude/projects/<encoded>, exposing contents to
+        # subsequent /api/claude-sessions calls. Jail the cwd to the
+        # /api/fs root so this surface matches the rest of the app.
+        _enforce_fs_jail(resolved)
         cwd = str(resolved)
 
     if body.resumeSessionId:
@@ -379,6 +386,11 @@ async def claude_session_export(session_id: str, cwd: str) -> StreamingResponse:
         resolved = Path(cwd).resolve(strict=True)
     except (OSError, RuntimeError):
         raise HTTPException(status_code=400, detail="cwd does not exist")
+    # Jail the cwd: without this, an authenticated client can enumerate
+    # & export the markdown for any claude transcript whose project dir
+    # exists, regardless of whether the cwd is reachable through the
+    # /api/fs root. Stay consistent with the rest of the app's surface.
+    _enforce_fs_jail(resolved)
     projects_dir = _projects_subdir_for_cwd(str(resolved))
     jsonl = projects_dir / f"{session_id}.jsonl"
     # Confirm the file is still inside the projects dir after symlink
@@ -424,6 +436,8 @@ async def claude_sessions(cwd: str) -> dict[str, Any]:
         resolved = Path(cwd).resolve(strict=True)
     except (OSError, RuntimeError):
         raise HTTPException(status_code=400, detail="cwd does not exist")
+    # Jail the cwd — see claude_session_export for rationale.
+    _enforce_fs_jail(resolved)
     projects_dir = _projects_subdir_for_cwd(str(resolved))
     if not projects_dir.is_dir():
         return {"sessions": []}
