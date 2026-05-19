@@ -1462,6 +1462,11 @@ body.file-panel-resizing {
 .file-panel__status--error { color: var(--critical); }
 .file-panel__list {
   flex: 1;
+  /* Same flex-min-height fix as .dir-browser__list — without
+   * min-height: 0 a long file listing grows the list to its full
+   * content size and pushes anything below (inline editor / status
+   * line) past the sheet's `overflow: hidden` clip. */
+  min-height: 0;
   overflow-y: auto;
   background: var(--bg-elev);
   -webkit-overflow-scrolling: touch;
@@ -2287,6 +2292,12 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
 .dir-browser__go { flex-shrink: 0; }
 .dir-browser__list {
   flex: 1;
+  /* min-height: 0 overrides the default `auto` so the flex item can
+   * actually shrink below its content height. Without this, a long
+   * directory listing grows the list to its full content size and
+   * pushes the foot (with the new-dir / pick buttons) below the
+   * sheet's `overflow: hidden` clip — invisible on mobile. */
+  min-height: 0;
   overflow-y: auto;
   background: var(--bg-elev);
   -webkit-overflow-scrolling: touch;
