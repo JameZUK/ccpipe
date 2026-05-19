@@ -1406,6 +1406,116 @@ a:hover { color: var(--fg); }
   justify-self: start;
 }
 
+/* Cursor-colour swatch picker. Row of small coloured circles; the
+ * selected swatch gets a ring + slight scale so the choice is
+ * unambiguous even at a glance. Keyboard-navigation supported via
+ * role="radio" + tabindex (browsers handle arrow keys natively when
+ * the role is set on each button inside a radiogroup). */
+.cursor-swatches {
+  display: inline-flex;
+  gap: var(--s-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.cursor-swatch {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  cursor: pointer;
+  padding: 0;
+  transition: transform var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+.cursor-swatch:hover { transform: scale(1.1); }
+.cursor-swatch.selected {
+  border-color: var(--fg);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
+  transform: scale(1.05);
+}
+.cursor-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Font picker — card grid that previews each font in its own
+ * rendering. The grid auto-fits to whatever modal width we have so
+ * the picker collapses to a single column on a phone but spreads
+ * across 3-4 columns in the desktop modal. The "row--stacked"
+ * variant puts the label above the grid instead of beside it,
+ * because squeezing 12 cards into the narrow value column would
+ * shrink the previews past the point of usefulness. */
+.row--stacked {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s-2);
+}
+.font-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--s-2);
+}
+.font-card {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--s-2) var(--s-3);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  color: var(--fg);
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+.font-card:hover {
+  border-color: var(--accent-soft);
+}
+.font-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.font-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.font-card__label {
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+.font-card.selected .font-card__label {
+  color: var(--accent);
+}
+.font-card__star {
+  color: var(--accent);
+  font-size: 0.85em;
+}
+.font-card__sample {
+  /* Preview text rendered in the actual font. Slightly larger than
+   * the catalogue label so glyph shapes are easy to compare at a
+   * glance. font-family is set inline on each card. */
+  font-size: 0.95rem;
+  line-height: 1.2;
+  color: var(--fg);
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .modal__row-actions {
   display: flex;
   align-items: center;

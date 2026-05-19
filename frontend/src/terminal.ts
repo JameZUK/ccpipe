@@ -11,6 +11,7 @@ import {
   saveSessionFontSize,
 } from "./display-prefs";
 import { isMobileLayout } from "./mobile";
+import { resolveCursorColor } from "./terminal-cursor";
 import { resolveTerminalFontFamily } from "./terminal-fonts";
 import { TerminalSocket } from "./ws";
 
@@ -62,6 +63,8 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     letterSpacing: initialPrefs.letterSpacing,
     cursorBlink: initialPrefs.cursorBlink,
     cursorStyle: initialPrefs.cursorStyle,
+    cursorInactiveStyle: initialPrefs.cursorInactiveStyle,
+    cursorWidth: initialPrefs.cursorWidth,
     convertEol: false,
     // Required for term.parser.registerCsiHandler() below — that lives
     // on xterm's "proposed API" surface. We rely on it to suppress
@@ -76,7 +79,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     theme: {
       background: "#0d0c08",
       foreground: "#e8dfc8",
-      cursor: "#f5a524",
+      cursor: resolveCursorColor(initialPrefs.cursorColor),
       cursorAccent: "#0d0c08",
       selectionBackground: "rgba(245, 165, 36, 0.28)",
 
@@ -557,6 +560,16 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     term.options.letterSpacing = next.letterSpacing;
     term.options.cursorBlink = next.cursorBlink;
     term.options.cursorStyle = next.cursorStyle;
+    term.options.cursorInactiveStyle = next.cursorInactiveStyle;
+    term.options.cursorWidth = next.cursorWidth;
+    // Cursor colour rides on xterm's theme object. We must hand a
+    // FRESH object — mutating term.options.theme in place doesn't
+    // trigger xterm's renderer-update handler. Preserve the rest of
+    // the theme by spreading the current value.
+    term.options.theme = {
+      ...term.options.theme,
+      cursor: resolveCursorColor(next.cursorColor),
+    };
     scheduleResize();
 
     const nextFontFamily = resolveTerminalFontFamily(pickFontIdForDevice(next));

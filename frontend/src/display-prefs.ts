@@ -2,11 +2,17 @@
 // localStorage so each browser/device has its own — these aren't worth
 // syncing through the server.
 
+import {
+  CursorInactiveStyle,
+  CursorStyle,
+  isKnownCursorColor,
+  isKnownCursorInactiveStyle,
+} from "./terminal-cursor";
 import { isKnownFontId } from "./terminal-fonts";
 
 const LS_KEY = "ccpipe.display.v1";
 
-export type CursorStyle = "bar" | "block" | "underline";
+export type { CursorStyle, CursorInactiveStyle };
 
 export interface DisplayPrefs {
   fontSize: number;        // 11..22 px
@@ -14,6 +20,17 @@ export interface DisplayPrefs {
   letterSpacing: number;   // 0..3 px
   cursorStyle: CursorStyle;
   cursorBlink: boolean;
+  // Inactive-cursor rendering (when the terminal element loses
+  // focus). xterm 5+ supports the "outline" hollow-block + "none"
+  // hide variants in addition to the bar/block/underline pair.
+  cursorInactiveStyle: CursorInactiveStyle;
+  // Stable id from CURSOR_COLORS (terminal-cursor.ts); resolved to
+  // a CSS colour by resolveCursorColor() before being handed to
+  // xterm's theme.cursor.
+  cursorColor: string;
+  // Bar-cursor thickness in pixels. xterm clamps higher values down
+  // to its cell width; 1-3 is the useful visible range.
+  cursorWidth: number;
   // Terminal font is split desktop / mobile because what reads well
   // on a 27" screen is rarely what reads well on a phone. The
   // resolver in `terminal-fonts.ts` maps these ids onto the CSS
@@ -32,6 +49,9 @@ export const DEFAULT_PREFS: DisplayPrefs = {
   letterSpacing: 0,
   cursorStyle: "bar",
   cursorBlink: true,
+  cursorInactiveStyle: "outline",   // distinct from focused — easy to read
+  cursorColor: "amber",
+  cursorWidth: 1,
   terminalFontDesktop: "system",
   terminalFontMobile: "jetbrains-mono",
 };
@@ -49,6 +69,14 @@ function sanitize(p: Partial<DisplayPrefs>): DisplayPrefs {
       ? (p.cursorStyle as CursorStyle)
       : DEFAULT_PREFS.cursorStyle,
     cursorBlink: typeof p.cursorBlink === "boolean" ? p.cursorBlink : DEFAULT_PREFS.cursorBlink,
+    cursorInactiveStyle: isKnownCursorInactiveStyle(p.cursorInactiveStyle as string)
+      ? (p.cursorInactiveStyle as CursorInactiveStyle)
+      : DEFAULT_PREFS.cursorInactiveStyle,
+    cursorColor: isKnownCursorColor(p.cursorColor as string)
+      ? (p.cursorColor as string)
+      : DEFAULT_PREFS.cursorColor,
+    cursorWidth: clamp(
+      Math.round(Number(p.cursorWidth ?? DEFAULT_PREFS.cursorWidth)), 1, 3),
     // Validate against the known font catalogue — an unknown id (e.g.
     // a font we removed in a later version) falls back to the
     // device-appropriate default rather than blanking the terminal.

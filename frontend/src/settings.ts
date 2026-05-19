@@ -14,6 +14,7 @@
 
 import { getMicConfig, type MicConfig, setMicConfig } from "./api";
 import { changeCredentials, logout as apiLogout } from "./auth";
+import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
 import {
   DEFAULT_PREFS,
@@ -573,14 +574,38 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
   const sec = document.createElement("section");
   sec.className = "modal__section";
   const prefs = loadDisplayPrefs();
-  // Build the font-option list once — same options for both
-  // selectors, but each remembers its own selection so a user can
-  // run System mono on their desktop and JetBrains Mono on their
-  // phone (or vice versa). Mobile-friendly fonts get a glyph hint
-  // to nudge users on small screens.
-  const fontOptionsHTML = (selected: string) => TERMINAL_FONTS.map(f =>
-    `<option value="${f.id}"${f.id === selected ? " selected" : ""}>${f.label}${f.mobileFriendly ? " ★" : ""}</option>`
-  ).join("");
+  // System-mono fallback stack mirrored here so the card grid can
+  // render its preview in the actual font the terminal will use.
+  // Kept in sync with the resolver in terminal-fonts.ts — the
+  // "system" entry uses this stack verbatim; custom fonts prepend
+  // their quoted name to it.
+  const SYSTEM_STACK =
+    'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace';
+  const familyFor = (f: typeof TERMINAL_FONTS[number]): string =>
+    f.family ? `'${f.family}', ${SYSTEM_STACK}` : SYSTEM_STACK;
+
+  // Sample text picked to surface the differences between fonts at
+  // a glance: lowercase x-height + zero/O/Q confusables + a mix of
+  // ligature glyphs that lots of code fonts pretty up.
+  const PREVIEW_TEXT = "abc 0Oo => != const";
+
+  // Render the font catalogue as a card grid. Each card previews
+  // the font's actual rendering (font-display: swap means the
+  // browser fetches the woff2 as soon as a card lands, so previews
+  // settle within a few hundred ms). Mobile-friendly fonts get a
+  // ★ glyph so small-screen users can spot them at a glance.
+  const fontCardsHTML = (selected: string, gridName: string) =>
+    `<div class="font-picker" role="radiogroup" aria-label="${gridName}">`
+    + TERMINAL_FONTS.map(f => {
+        const isSel = f.id === selected;
+        return `<button type="button" class="font-card${isSel ? " selected" : ""}" `
+          + `data-font-id="${f.id}" data-grid="${gridName}" `
+          + `role="radio" aria-checked="${isSel}" title="${f.hint ?? f.label}">`
+          + `<span class="font-card__label">${f.label}${f.mobileFriendly ? ' <span class="font-card__star">★</span>' : ""}</span>`
+          + `<span class="font-card__sample" style="font-family:${familyFor(f).replace(/"/g, '&quot;')}">${PREVIEW_TEXT}</span>`
+          + `</button>`;
+      }).join("")
+    + `</div>`;
   sec.innerHTML = `
     <h2 class="modal__section-title">display</h2>
     <div class="modal__rows">
@@ -596,22 +621,18 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
         <span class="row__label">Letter spacing <span class="row__hint" data-role="letterSpacing-value">${prefs.letterSpacing}px</span></span>
         <input type="range" name="letterSpacing" min="0" max="3" step="0.5" value="${prefs.letterSpacing}" class="slider"/>
       </label>
-      <label class="row">
+      <div class="row row--stacked">
         <span class="row__label">Terminal font · desktop
           <span class="row__hint" data-role="terminalFontDesktop-hint"></span>
         </span>
-        <select name="terminalFontDesktop" class="select">
-          ${fontOptionsHTML(prefs.terminalFontDesktop)}
-        </select>
-      </label>
-      <label class="row">
+        ${fontCardsHTML(prefs.terminalFontDesktop, "Desktop")}
+      </div>
+      <div class="row row--stacked">
         <span class="row__label">Terminal font · mobile
           <span class="row__hint" data-role="terminalFontMobile-hint">★ marks fonts tuned for small screens</span>
         </span>
-        <select name="terminalFontMobile" class="select">
-          ${fontOptionsHTML(prefs.terminalFontMobile)}
-        </select>
-      </label>
+        ${fontCardsHTML(prefs.terminalFontMobile, "Mobile")}
+      </div>
       <label class="row">
         <span class="row__label">Cursor style</span>
         <select name="cursorStyle" class="select">
@@ -619,6 +640,32 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
           <option value="block"${prefs.cursorStyle === "block" ? " selected" : ""}>block</option>
           <option value="underline"${prefs.cursorStyle === "underline" ? " selected" : ""}>underline</option>
         </select>
+      </label>
+      <label class="row">
+        <span class="row__label">Cursor (unfocused)
+          <span class="row__hint">how the cursor looks when xterm doesn't have focus</span>
+        </span>
+        <select name="cursorInactiveStyle" class="select">
+          <option value="outline"${prefs.cursorInactiveStyle === "outline" ? " selected" : ""}>outline</option>
+          <option value="bar"${prefs.cursorInactiveStyle === "bar" ? " selected" : ""}>bar</option>
+          <option value="block"${prefs.cursorInactiveStyle === "block" ? " selected" : ""}>block</option>
+          <option value="underline"${prefs.cursorInactiveStyle === "underline" ? " selected" : ""}>underline</option>
+          <option value="none"${prefs.cursorInactiveStyle === "none" ? " selected" : ""}>none (hide)</option>
+        </select>
+      </label>
+      <label class="row">
+        <span class="row__label">Cursor colour</span>
+        <div class="cursor-swatches" role="radiogroup" aria-label="Cursor colour">
+          ${CURSOR_COLORS.map(c =>
+            `<button type="button" class="cursor-swatch${c.id === prefs.cursorColor ? " selected" : ""}" `
+            + `data-cursor-color="${c.id}" role="radio" aria-checked="${c.id === prefs.cursorColor}" `
+            + `title="${c.label}" style="background:${c.value}"></button>`
+          ).join("")}
+        </div>
+      </label>
+      <label class="row">
+        <span class="row__label">Cursor width <span class="row__hint" data-role="cursorWidth-value">${prefs.cursorWidth}px</span></span>
+        <input type="range" name="cursorWidth" min="1" max="3" step="1" value="${prefs.cursorWidth}" class="slider"/>
       </label>
       <label class="row">
         <span class="row__label">Cursor blink</span>
@@ -661,10 +708,34 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
     .addEventListener("change", (e) => {
       apply({ ...working, cursorStyle: (e.target as HTMLSelectElement).value as any });
     });
+  sec.querySelector<HTMLSelectElement>("select[name=cursorInactiveStyle]")!
+    .addEventListener("change", (e) => {
+      apply({ ...working, cursorInactiveStyle: (e.target as HTMLSelectElement).value as any });
+    });
   sec.querySelector<HTMLInputElement>("input[name=cursorBlink]")!
     .addEventListener("change", (e) => {
       apply({ ...working, cursorBlink: (e.target as HTMLInputElement).checked });
     });
+  // Cursor-width slider — wireRange would format as a float but we
+  // want integer px display.
+  wireRange("cursorWidth", (n) => `${Math.round(n)}px`);
+  // Cursor-colour swatches — click any swatch to select. Manages
+  // both the visual selected state and the underlying pref via the
+  // standard apply() path.
+  const swatchEls = sec.querySelectorAll<HTMLButtonElement>(".cursor-swatch");
+  swatchEls.forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const id = btn.dataset.cursorColor;
+      if (!id) return;
+      swatchEls.forEach(b => {
+        const on = b === btn;
+        b.classList.toggle("selected", on);
+        b.setAttribute("aria-checked", on ? "true" : "false");
+      });
+      apply({ ...working, cursorColor: id });
+    });
+  });
 
   // Terminal-font selectors. On change, update the live hint with
   // the catalogue's one-liner about the picked font and apply the
@@ -681,18 +752,34 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
   updateFontHint("Desktop", prefs.terminalFontDesktop);
   updateFontHint("Mobile",  prefs.terminalFontMobile);
 
-  sec.querySelector<HTMLSelectElement>("select[name=terminalFontDesktop]")!
-    .addEventListener("change", (e) => {
-      const id = (e.target as HTMLSelectElement).value;
-      updateFontHint("Desktop", id);
-      apply({ ...working, terminalFontDesktop: id });
+  // Font-picker card grids — click any card to select. Both grids
+  // share one delegated click handler; data-grid distinguishes them
+  // so the same card-id can be picked independently for desktop and
+  // mobile (the most common case: "system" on desktop, a bundled
+  // font on mobile).
+  const fontCards = sec.querySelectorAll<HTMLButtonElement>(".font-card");
+  fontCards.forEach(card => {
+    card.addEventListener("click", (e) => {
+      e.preventDefault();
+      const id = card.dataset.fontId;
+      const grid = card.dataset.grid as "Desktop" | "Mobile" | undefined;
+      if (!id || !grid) return;
+      // Mark this card selected within its grid; clear siblings.
+      sec.querySelectorAll<HTMLButtonElement>(
+        `.font-card[data-grid="${grid}"]`).forEach(b => {
+          const on = b === card;
+          b.classList.toggle("selected", on);
+          b.setAttribute("aria-checked", on ? "true" : "false");
+        });
+      updateFontHint(grid, id);
+      apply({
+        ...working,
+        ...(grid === "Desktop"
+          ? { terminalFontDesktop: id }
+          : { terminalFontMobile: id }),
+      });
     });
-  sec.querySelector<HTMLSelectElement>("select[name=terminalFontMobile]")!
-    .addEventListener("change", (e) => {
-      const id = (e.target as HTMLSelectElement).value;
-      updateFontHint("Mobile", id);
-      apply({ ...working, terminalFontMobile: id });
-    });
+  });
 
   sec.querySelector<HTMLButtonElement>("[data-role=reset]")!
     .addEventListener("click", () => {
