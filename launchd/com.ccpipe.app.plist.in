@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd twin of systemd/ccpipe.service.in for macOS users.
+
+  Rendered by scripts/install.sh: @REPO_ROOT@ and @HOME@ are substituted
+  at install time with the absolute paths for this checkout / user.
+  The rendered plist lives at ~/Library/LaunchAgents/com.ccpipe.app.plist;
+  the template stays in the repo so the project remains location- and
+  user-independent.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ccpipe.app</string>
+
+    <key>WorkingDirectory</key>
+    <string>@REPO_ROOT@/backend</string>
+
+    <!--
+      Default ExecStart binds 0.0.0.0 so an off-host reverse proxy (nginx)
+      can reach the backend over the LAN. When TLS is terminating at that
+      proxy, edit this plist to add `--proxy-headers
+      --forwarded-allow-ips=<proxy-host-IP>`; without the latter the per-IP
+      login throttle treats every request as coming from the proxy. See
+      README §"Putting it on the internet" for the full recipe.
+
+      Slowloris hardening (matches the Linux unit): cap simultaneous
+      in-flight requests so a single source can't saturate the worker by
+      holding 500+ slow connections, and shorten the keep-alive idle
+      window so an idle TCP doesn't pin a socket for the default 5 s × N
+      connections. Operator-side nginx still controls
+      client_body_timeout / client_header_timeout independently — this
+      is the app's own bound.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@REPO_ROOT@/backend/.venv/bin/uvicorn</string>
+        <string>ccpipe.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8080</string>
+        <string>--timeout-keep-alive</string>
+        <string>5</string>
+        <string>--limit-concurrency</string>
+        <string>200</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!--
+          launchd agents inherit only a minimal PATH; the backend shells
+          out to `tmux` (and on macOS the virtual-mic helper shells out
+          to `mkfifo`), so put Homebrew on PATH explicitly. Covers both
+          Apple Silicon (/opt/homebrew) and Intel (/usr/local) layouts.
+        -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+        <!-- Frontend bundle served by FastAPI when this exists -->
+        <key>CCPIPE_FRONTEND_DIST</key>
+        <string>@REPO_ROOT@/frontend/dist</string>
+
+        <!-- TTS (set CCPIPE_TTS=off to disable) -->
+        <key>CCPIPE_TTS</key>
+        <string>kokoro</string>
+        <key>CCPIPE_KOKORO_URL</key>
+        <string>http://localhost:8880</string>
+        <key>CCPIPE_TTS_VOICE</key>
+        <string>bf_emma</string>
+    </dict>
+
+    <!--
+      Authentication is ALWAYS ON. ccpipe generates a random password on
+      first start, argon2id-hashes it into ~/.local/state/ccpipe/credentials,
+      and writes the plaintext (once) into a sidecar
+      ~/.local/state/ccpipe/initial_password.txt (mode 0400). Read it,
+      then securely delete it (`rm -P` on macOS, `shred -u` on Linux).
+
+      To pin credentials in advance (e.g. provisioning), copy this plist
+      to a private location, add CCPIPE_AUTH_PASSWORD to
+      EnvironmentVariables, and `chmod 600` the copy — NOT this
+      version-controlled template.
+    -->
+
+    <!--
+      RunAtLoad=true mirrors WantedBy=default.target: launchd loads the
+      agent when the user logs in, and a `launchctl bootstrap` during
+      install starts it immediately. KeepAlive={SuccessfulExit:false}
+      with ThrottleInterval=3 mirrors Restart=on-failure/RestartSec=3:
+      restart only on non-zero exit, with a 3-second floor between
+      attempts.
+    -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+
+    <!--
+      launchd has no journal; logs go to files. Inspect with:
+        tail -F ~/Library/Logs/ccpipe/ccpipe.{log,err.log}
+      ccpipe's own logging (auth events, ws frames, etc.) lands on
+      stderr, so most useful info appears in ccpipe.err.log; uvicorn's
+      access log lands in ccpipe.log.
+    -->
+    <key>StandardOutPath</key>
+    <string>@HOME@/Library/Logs/ccpipe/ccpipe.log</string>
+    <key>StandardErrorPath</key>
+    <string>@HOME@/Library/Logs/ccpipe/ccpipe.err.log</string>
+
+    <!--
+      ProcessType=Interactive keeps the process at normal scheduling
+      priority. Without this, launchd may demote a "background" agent
+      under load, which adds latency to WebSocket frames.
+    -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
