@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd counterpart of systemd/ccpipe-virtual-mic.service.in for macOS.
+
+  The Linux unit is a oneshot that calls `pactl load-module
+  module-pipe-source` to make the FIFO appear directly as a mic. macOS
+  has no equivalent so the role is split: BlackHole 2ch provides the
+  virtual audio device (installed once via Homebrew), and this agent
+  runs a long-lived daemon (ccpipe.mic_bridge_macos) that reads the FIFO
+  and pushes PCM into BlackHole-as-output. Anything that records from
+  BlackHole-as-input (e.g. `claude /voice` with the system default
+  input set to "BlackHole 2ch") then hears the browser's mic.
+
+  Rendered by scripts/install.sh: @REPO_ROOT@ and @HOME@ are substituted
+  at install time. The rendered plist lives at
+  ~/Library/LaunchAgents/com.ccpipe.virtual-mic.plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ccpipe.virtual-mic</string>
+
+    <key>WorkingDirectory</key>
+    <string>@REPO_ROOT@/backend</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@REPO_ROOT@/backend/.venv/bin/python</string>
+        <string>-m</string>
+        <string>ccpipe.mic_bridge_macos</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!--
+          Match the main agent's PATH so the venv's python and any
+          subprocesses can resolve Homebrew binaries. The bridge itself
+          doesn't shell out, but consistency keeps surprises low.
+        -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!--
+      Start at login (RunAtLoad), restart on crash (KeepAlive on
+      non-zero exit, 3 s floor). The bridge is idle and parked in a
+      blocking FIFO open() most of the time, so steady-state cost is
+      near zero CPU; restart-on-crash is just a belt-and-braces guard
+      against transient PortAudio errors (e.g. BlackHole sample rate
+      changed via Audio MIDI Setup mid-flight).
+    -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+
+    <key>StandardOutPath</key>
+    <string>@HOME@/Library/Logs/ccpipe/virtual-mic.log</string>
+    <key>StandardErrorPath</key>
+    <string>@HOME@/Library/Logs/ccpipe/virtual-mic.err.log</string>
+
+    <!--
+      Interactive priority avoids launchd demoting us under load.
+      The bridge feeds a real-time audio stream and any scheduling
+      stall translates into audible glitches on the BlackHole input.
+    -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

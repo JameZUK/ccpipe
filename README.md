@@ -96,7 +96,7 @@ Android, iOS) — that side is OS-agnostic.
 | Linux | Fully tested, this is what's actively used. |
 | Windows via WSL2 | Should work — see below. Not tested by the maintainer; reports welcome. |
 | Windows (native) | Not supported. Use WSL2 — a native port would have to replace systemd, the FIFO mic, PulseAudio, and the bash install script. |
-| macOS | Plausible but not yet wired up. Untested. PRs welcome — see below. |
+| macOS | Fully supported via launchd and BlackHole for audio. |
 
 ### Windows (via WSL2)
 
@@ -118,22 +118,17 @@ it, please report back.
 
 ### macOS
 
-The Python backend itself should run unmodified. Two pieces of
-plumbing are Linux-specific and would need macOS equivalents:
+macOS is fully supported and runs via `launchd` LaunchAgents.
 
-- **Service supervisor.** The two systemd unit templates
-  (`systemd/*.service.in`) need launchd plist twins, and
-  `scripts/install.sh` needs to detect the platform and render the
-  right pair.
-- **Virtual microphone.** PulseAudio's `module-pipe-source` doesn't
-  exist on CoreAudio. The likely path is
-  [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the
-  virtual audio device plus a small bridge process that reads from
-  the FIFO (`/tmp/ccpipe_mic.pipe`) and writes 16 kHz mono Int16 PCM
-  into BlackHole's input — a few lines of `sox`/`ffmpeg`, or a small
-  Swift/Go helper.
+To use the voice feature, you will need a virtual audio device since macOS does not have an equivalent to PulseAudio's pipe-source. We use BlackHole for this. Install it before running the ccpipe installer:
 
-If you have a Mac and want this, please open a PR.
+```bash
+brew install --cask blackhole-2ch
+```
+
+**macOS Gotcha:** The terminal app hosting the `claude` CLI (e.g., Terminal.app, iTerm2, Ghostty) needs **Microphone permission** in `System Settings → Privacy & Security` so it can read from BlackHole. The first time you use `/voice`, macOS will trigger the permission prompt. If denied, voice input will not reach Claude.
+
+After installing BlackHole, follow the standard [Install](#install) steps below.
 
 ## Install
 

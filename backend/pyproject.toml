@@ -14,6 +14,12 @@ dependencies = [
     "pyotp>=2.9",        # TOTP (RFC 6238) for optional second-factor auth
     "qrcode>=7",         # render the TOTP enrolment QR server-side (SVG, no PIL)
     "argon2-cffi>=23",   # password hashing (argon2id) for stored credentials
+    # macOS-only: the virtual-mic bridge daemon (ccpipe.mic_bridge_macos)
+    # reads /tmp/ccpipe_mic.pipe and streams the PCM into BlackHole as
+    # output, replacing the role of PulseAudio's module-pipe-source on
+    # Linux. PEP 508 marker keeps these off Linux installs.
+    "sounddevice>=0.4; sys_platform == 'darwin'",
+    "numpy>=1.26; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
