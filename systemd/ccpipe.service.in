@@ -73,53 +73,26 @@ Environment=CCPIPE_TTS_VOICE=bf_emma
 Restart=on-failure
 RestartSec=3
 
-# ─── Sandboxing ──────────────────────────────────────────────────────
-# These directives contain a compromised ccpipe process — they don't
-# substitute for the auth gate (an authenticated attacker still has the
-# operator's filesystem reach inside the jail) but they make a remote
-# RCE harder to pivot off the box. Conservative set tuned for the
-# user-service deployment where we still need:
-#   - read+write into ~/.local/state/ccpipe (credentials, config)
-#   - read+write into ~/.claude (settings_patch, sticky restore)
-#   - read+write of /tmp/ccpipe_mic.pipe (the Pulse FIFO)
-#   - subprocess spawn of tmux (system PATH binaries)
-# Anything tighter (PrivateTmp=true) would break the mic — the FIFO is
-# shared with Pulse in the real /tmp.
-NoNewPrivileges=true
-ProtectSystem=strict
-# ProtectSystem=strict makes the ENTIRE filesystem read-only (incl.
-# /tmp), exempting only /dev /proc /sys and — for user services —
-# $HOME. tmux insists on creating /tmp/tmux-$UID for its socket, so
-# without /tmp writable the server can't start: at boot the sticky
-# restore loop fails ("couldn't create directory /tmp/tmux-1000
-# (Read-only file system)") and every subsequent new-session call
-# returns 500. The mic FIFO survives because it's *opened*, not
-# *created*, by ccpipe (ccpipe-virtual-mic.service creates it before
-# we start). ReadWritePaths= exempts /tmp from the read-only mount
-# while leaving /usr, /etc, /var, /opt, /boot etc. locked down — the
-# point of ProtectSystem=strict was always to block writes to
-# vendor-supplied OS paths, not to ban /tmp.
-ReadWritePaths=/tmp
-# ProtectHome is intentionally NOT set — ccpipe needs read-write
-# access to ~/.local/state/ccpipe (credentials, config, sticky map)
-# and ~/.claude (settings_patch, sticky restore, TTS transcript
-# tail). The valid values for ProtectHome= are true/false/read-only/
-# tmpfs; "read-write" isn't a thing and unset means "default access".
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-RestrictNamespaces=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
-SystemCallArchitectures=native
-# Permissive enough for asyncio + subprocess + watchdog inotify; blocks
-# the obvious post-exploitation paths (mount, swap, kexec, ptrace).
-SystemCallFilter=@system-service
-SystemCallFilter=~@mount @swap @reboot @raw-io @cpu-emulation @debug @clock @module @obsolete @resources
-# Only loopback + LAN sockets needed; explicitly deny exotic families.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# ─── Sandboxing — intentionally NOT enabled ──────────────────────────
+# An earlier revision of this file applied the standard hardening
+# stack (ProtectSystem=strict, SystemCallFilter=@system-service,
+# RestrictNamespaces, etc.). For this workload it makes things WORSE,
+# not better:
+#   * ProtectSystem=strict mounts /tmp read-only, so tmux can't create
+#     /tmp/tmux-$UID for its socket — every sticky-restore + new-
+#     session 500s after a clean reboot (the dir only "worked" before
+#     reboot because an interactive shell had pre-created it).
+#   * SystemCallFilter=@system-service with @resources in the deny set
+#     SIGSYS-kills the Claude Code CLI at startup: claude calls
+#     sched_setscheduler(2) via pthread_setschedparam() to set thread
+#     priorities, and that syscall lives in @resources. Removing
+#     @resources from the deny set is not enough — claude's exact
+#     syscall surface is opaque and changes between releases, so any
+#     allow-list filter is a perpetual whack-a-mole that ends with
+#     claude dying mid-session on a stranger's upgrade.
+# The auth gate is the security boundary that matters; sandboxing the
+# service process buys little when the whole point of the service is
+# to spawn an arbitrary user-trusted Claude session anyway.
 
 # StandardOutput/Error go to journal by default; view with:
 #   journalctl --user -u ccpipe -f
