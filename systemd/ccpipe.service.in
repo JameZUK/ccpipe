@@ -87,6 +87,19 @@ RestartSec=3
 # shared with Pulse in the real /tmp.
 NoNewPrivileges=true
 ProtectSystem=strict
+# ProtectSystem=strict makes the ENTIRE filesystem read-only (incl.
+# /tmp), exempting only /dev /proc /sys and — for user services —
+# $HOME. tmux insists on creating /tmp/tmux-$UID for its socket, so
+# without /tmp writable the server can't start: at boot the sticky
+# restore loop fails ("couldn't create directory /tmp/tmux-1000
+# (Read-only file system)") and every subsequent new-session call
+# returns 500. The mic FIFO survives because it's *opened*, not
+# *created*, by ccpipe (ccpipe-virtual-mic.service creates it before
+# we start). ReadWritePaths= exempts /tmp from the read-only mount
+# while leaving /usr, /etc, /var, /opt, /boot etc. locked down — the
+# point of ProtectSystem=strict was always to block writes to
+# vendor-supplied OS paths, not to ban /tmp.
+ReadWritePaths=/tmp
 # ProtectHome is intentionally NOT set — ccpipe needs read-write
 # access to ~/.local/state/ccpipe (credentials, config, sticky map)
 # and ~/.claude (settings_patch, sticky restore, TTS transcript
