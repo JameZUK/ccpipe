@@ -7,7 +7,7 @@ import {
   onDisplayPrefsChange,
   saveLastSession,
 } from "./display-prefs";
-import { FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
+import { FOLDER_SVG, GEAR_SVG, MIC_SVG, SEND_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI } from "./mobile";
 import * as notifications from "./notifications";
 import { TerminalSocket } from "./ws";
@@ -301,11 +301,23 @@ async function attachTerminal(session: string): Promise<void> {
   const micBtn = document.createElement("button");
   micBtn.className = "pill pill--icon pill--mic";
   micBtn.dataset.role = "mic";
-  micBtn.title = "Tap to start dictation, tap again to stop";
+  micBtn.title = "Tap to start dictation, tap again to stop. Or hold Option+Space.";
   micBtn.innerHTML = MIC_SVG;
   micBtn.hidden = true;
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, filesBtn, settingsBtn);
+  // Send button appears right after the mic stops, as a quick-tap
+  // alternative to clicking back into the terminal and pressing Enter.
+  // It's a transient affordance — auto-hides after a short timeout, or
+  // disappears the moment the user presses Enter manually. See
+  // showSendBtn / hideSendBtn below for the lifecycle.
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "pill pill--icon pill--send";
+  sendBtn.dataset.role = "send";
+  sendBtn.title = "Send (Enter)";
+  sendBtn.innerHTML = SEND_SVG;
+  sendBtn.hidden = true;
+
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, sendBtn, filesBtn, settingsBtn);
   statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────
@@ -584,6 +596,37 @@ async function attachTerminal(session: string): Promise<void> {
     }).catch((e) => { console.warn("mic event failed:", e); });
   };
 
+  // Send button lifecycle. The button is a transient affordance that
+  // appears immediately after the user stops a recording, as a quick-tap
+  // alternative to clicking back into the terminal to press Enter. It
+  // self-dismisses after SEND_BTN_HIDE_MS so it doesn't linger forever
+  // if the user decides to edit the transcribed text instead.
+  const SEND_BTN_HIDE_MS = 10_000;
+  let sendBtnHideTimer: number | null = null;
+  const hideSendBtn = (): void => {
+    sendBtn.hidden = true;
+    if (sendBtnHideTimer !== null) {
+      clearTimeout(sendBtnHideTimer);
+      sendBtnHideTimer = null;
+    }
+  };
+  const showSendBtn = (): void => {
+    sendBtn.hidden = false;
+    if (sendBtnHideTimer !== null) clearTimeout(sendBtnHideTimer);
+    sendBtnHideTimer = window.setTimeout(hideSendBtn, SEND_BTN_HIDE_MS);
+  };
+  sendBtn.addEventListener("click", () => {
+    // Carriage return = Enter on a PTY (xterm-friendly). claude's input
+    // box submits on this when the prompt is non-empty.
+    socket.send({ type: "input", data: "\r" });
+    hideSendBtn();
+    // Hand focus back to xterm so subsequent keystrokes go straight to
+    // claude. Without this, the next key the user presses would hit
+    // the (now-hidden) Send button's parent — usually nothing visible
+    // happens, but it's a small surprise we can avoid for free.
+    terminalApi?.term.focus();
+  });
+
   const toggleMic = async (): Promise<void> => {
     if (!micAvailable) return;
     if (recording) {
@@ -596,7 +639,14 @@ async function attachTerminal(session: string): Promise<void> {
       try { await mic?.stop(); } catch {}
       socket.send({ type: "mic_stop" });
       void wakeLock.release();
+      // Refocus xterm so the user can press Enter immediately to send
+      // the transcribed utterance. Without this, the mic button retains
+      // focus and Enter is a no-op until the user re-clicks the
+      // terminal. Reveal the Send button as a tap-alternative.
+      terminalApi?.term.focus();
+      showSendBtn();
     } else {
+      hideSendBtn();
       setRecording(true);
       socket.send({ type: "input", data: VOICE_TRIGGER });
       void wakeLock.acquire();
@@ -618,6 +668,64 @@ async function attachTerminal(session: string): Promise<void> {
       }
     }
   };
+
+  // ─── Global keyboard shortcut: Option+Space = push-to-talk ────────────
+  //
+  // Press-and-hold Option+Space to record without taking a hand off the
+  // keyboard; release either key to stop and submit. Listeners are
+  // bound to the document in CAPTURE phase so the chord is intercepted
+  // before xterm's keypress handler can forward it to the PTY.
+  // preventDefault stops Firefox/Safari from scrolling the page on
+  // Space when nothing has focus, and stops xterm from passing the
+  // chord through to the shell when the terminal is focused.
+  //
+  // Why Option+Space and not bare Space: bare Space conflicts with
+  // typing into the terminal (which is the common case). Option is a
+  // modifier no terminal command uses meaningfully, so it's the
+  // smallest "I really do mean PTT, not text input" signal we can
+  // require without burning a more specialised chord. Cross-browser:
+  // no major browser binds Option+Space to anything; macOS itself
+  // stopped using it for Spotlight a decade ago.
+  let optDown = false;
+  let spaceDown = false;
+  let pttKeyHeld = false;
+  const isPttChord = (): boolean => optDown && spaceDown;
+  const onPttKeyDown = (e: KeyboardEvent): void => {
+    if (e.code === "AltLeft" || e.code === "AltRight") optDown = true;
+    if (e.code === "Space") spaceDown = true;
+    if (!isPttChord() || pttKeyHeld || e.repeat) return;
+    pttKeyHeld = true;
+    e.preventDefault();
+    e.stopPropagation();
+    handleMicEvent("hold-start");
+  };
+  const onPttKeyUp = (e: KeyboardEvent): void => {
+    if (e.code === "AltLeft" || e.code === "AltRight") optDown = false;
+    if (e.code === "Space") spaceDown = false;
+    // Either side of the chord released → end the hold. Both releases
+    // would fire this twice, but handleMicEvent("hold-end") is
+    // idempotent (it no-ops when pttHoldActive is already false), so
+    // the extra call is harmless.
+    if (pttKeyHeld && (!optDown || !spaceDown)) {
+      pttKeyHeld = false;
+      e.preventDefault();
+      e.stopPropagation();
+      handleMicEvent("hold-end");
+    }
+  };
+  document.addEventListener("keydown", onPttKeyDown, true);
+  document.addEventListener("keyup", onPttKeyUp, true);
+  // Window-blur safety: if the user Cmd+Tabs away mid-hold, the keyup
+  // never fires and we'd be stuck recording forever. Treat blur as a
+  // forced release.
+  window.addEventListener("blur", () => {
+    if (pttKeyHeld) {
+      pttKeyHeld = false;
+      optDown = false;
+      spaceDown = false;
+      handleMicEvent("hold-end");
+    }
+  });
 
   const socket = new TerminalSocket(wsUrlFor(session), {
     onStatus(status, info) {
