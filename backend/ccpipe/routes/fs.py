@@ -14,6 +14,7 @@ operator's credentials, SSH keys, or ccpipe's own state directory.
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import stat as stat_mod
@@ -184,6 +185,72 @@ def _resolve_fs_parent_for_new(path: str) -> tuple[Path, Path]:
     return parent, final
 
 
+def _walk_parent_nofollow(absolute_path: str) -> tuple[int, str]:
+    """Open every intermediate component of *absolute_path* with
+    ``O_NOFOLLOW`` and return ``(parent_fd, leaf_name)``.
+
+    Closes the M1 TOCTOU window left open by ``resolve()`` +
+    ``open(..., O_NOFOLLOW)``: plain ``O_NOFOLLOW`` only refuses to
+    follow a symlink at the **final** component, so if a concurrent
+    writer with access inside the jail (notably ``claude`` itself via
+    prompt injection) swaps an **intermediate** directory for a symlink
+    pointing outside the jail between canonicalisation and open, the
+    kernel re-walks the path on ``open()`` and reads/writes the wrong
+    file. Walking component-by-component with ``openat(...,
+    O_NOFOLLOW)`` makes any such swap fail with ``ELOOP``.
+
+    Portability: uses only POSIX flags (no Linux-only ``O_PATH``), so
+    it works identically on Linux and macOS. ``os.O_NOFOLLOW`` and
+    ``os.O_DIRECTORY`` resolve to the platform-correct numeric values
+    at runtime; ``os.open(..., dir_fd=)`` maps to ``openat(2)`` on both.
+
+    The caller is responsible for ``os.close(parent_fd)`` once the
+    leaf open has been performed (or skipped due to error). On error
+    the fd is closed before the exception propagates.
+    """
+    parts = Path(absolute_path).parts
+    if not parts or parts[0] != "/":
+        # Defensive: callers go through _resolve_fs_path / _resolve_fs_parent_for_new,
+        # both of which already enforce absolute paths. This is belt-and-braces.
+        raise HTTPException(status_code=400, detail="path must be absolute")
+    if len(parts) == 1:
+        raise HTTPException(status_code=400, detail="cannot operate on /")
+
+    cur_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in parts[1:-1]:
+            try:
+                # NOTE: O_DIRECTORY is intentionally NOT set here. On
+                # Linux, `O_NOFOLLOW | O_DIRECTORY` on a symlink-to-dir
+                # returns ENOTDIR (the kernel evaluates O_DIRECTORY
+                # against the unfollowed symlink), masking the attack
+                # signal we care about. macOS may differ. Without
+                # O_DIRECTORY, a symlink intermediate returns the clean
+                # ELOOP we map to 403; a regular-file intermediate (a
+                # bogus path like /etc/passwd/foo) returns ENOTDIR on
+                # the *next* iteration's openat against a file fd, so
+                # safety is preserved either way.
+                nxt = os.open(
+                    part,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=cur_fd,
+                )
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise HTTPException(status_code=403, detail="symlink in path")
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                    raise HTTPException(status_code=404, detail="path not found")
+                if exc.errno == errno.EACCES:
+                    raise HTTPException(status_code=403, detail="permission denied")
+                raise HTTPException(status_code=500, detail=f"path walk failed: {exc}")
+            os.close(cur_fd)
+            cur_fd = nxt
+        return cur_fd, parts[-1]
+    except BaseException:
+        os.close(cur_fd)
+        raise
+
+
 def _scan_dir_entries(resolved: Path, show_hidden: bool,
                        include_files: bool) -> list[dict[str, Any]]:
     """Shared scandir loop for /api/fs/list. Returns at most 2000
@@ -291,14 +358,31 @@ async def fs_read(path: str) -> dict[str, Any]:
         raise HTTPException(status_code=413,
                             detail=f"file too large for editor "
                                    f"({st.st_size} > {_FS_EDITOR_LIMIT})")
+    # O_NOFOLLOW at the leaf plus a per-component O_NOFOLLOW walk of the
+    # intermediates (via _walk_parent_nofollow). Together these close
+    # the M1 TOCTOU window: an attacker who can write inside the jail
+    # cannot swap any segment of the canonical path for a symlink
+    # between _resolve_fs_path and this open(). ELOOP from either layer
+    # surfaces as 403.
+    parent_fd, leaf = _walk_parent_nofollow(str(resolved))
     try:
-        # O_NOFOLLOW: refuse to follow a symlink at the resolved path.
-        # _resolve_fs_path has already collapsed any pre-existing
-        # symlinks during canonicalisation; this catches the TOCTOU
-        # window where the resolved real path is racily replaced with
-        # a symlink between resolution and open(). fs writes already
-        # use O_NOFOLLOW for the same reason — see fs_write.
-        fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(
+                leaf,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise HTTPException(status_code=403, detail="symlink at target")
+            if exc.errno == errno.ENOENT:
+                raise HTTPException(status_code=404, detail="path not found")
+            if exc.errno == errno.EACCES:
+                raise HTTPException(status_code=403, detail="permission denied")
+            raise HTTPException(status_code=500, detail=f"open failed: {exc}")
+    finally:
+        os.close(parent_fd)
+    try:
         with os.fdopen(fd, "rb") as f:
             head = f.read(_FS_BINARY_SNIFF)
             if b"\x00" in head:
@@ -331,30 +415,51 @@ async def fs_write(body: FsWriteBody) -> dict[str, Any]:
     if len(body.content.encode("utf-8")) > _FS_EDITOR_LIMIT:
         raise HTTPException(status_code=413, detail="content too large")
     _, final = _resolve_fs_parent_for_new(body.path)
-    parent = final.parent
-    tmp = parent / (final.name + ".ccpipe.tmp")
+    tmp_name = final.name + ".ccpipe.tmp"
+    # Walk the parent with per-component O_NOFOLLOW (M1 fix) so an
+    # intermediate-directory swap to a symlink between resolve and
+    # open is caught. The tmp + replace dance then runs entirely
+    # via *dir_fd*, so the kernel never re-walks the path string
+    # again after the canonical walk completed.
+    parent_fd, _leaf = _walk_parent_nofollow(str(final))
     try:
-        # O_NOFOLLOW: refuse to follow a symlink at *tmp*. Without this,
-        # an attacker who can place a file in the (in-jail) parent dir
-        # — including `claude` itself via prompt injection — could
-        # pre-create `<basename>.ccpipe.tmp` as a symlink to
-        # ~/.bashrc and have our O_CREAT|O_TRUNC follow it and clobber
-        # the target. ELOOP on open(); we surface as 500.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
         try:
-            os.write(fd, body.content.encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, final)
-    except PermissionError:
-        try: tmp.unlink()
-        except OSError: pass
-        raise HTTPException(status_code=403, detail="permission denied")
-    except OSError as exc:
-        try: tmp.unlink()
-        except OSError: pass
-        raise HTTPException(status_code=500, detail=f"write failed: {exc}")
+            # O_NOFOLLOW at the leaf: refuse to follow a symlink at *tmp*.
+            # Without this, an attacker who can place a file in the parent
+            # dir could pre-create `<basename>.ccpipe.tmp` as a symlink to
+            # ~/.bashrc and have our O_CREAT|O_TRUNC follow it and clobber
+            # the target.
+            fd = os.open(
+                tmp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o644,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise HTTPException(status_code=403, detail="symlink at target")
+            if exc.errno == errno.EACCES:
+                raise HTTPException(status_code=403, detail="permission denied")
+            raise HTTPException(status_code=500, detail=f"write failed: {exc}")
+        try:
+            try:
+                os.write(fd, body.content.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            # renameat: the rename happens inside the validated parent fd,
+            # not by re-walking the path string.
+            os.replace(tmp_name, final.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except PermissionError:
+            try: os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError: pass
+            raise HTTPException(status_code=403, detail="permission denied")
+        except OSError as exc:
+            try: os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError: pass
+            raise HTTPException(status_code=500, detail=f"write failed: {exc}")
+    finally:
+        os.close(parent_fd)
     try:
         st = final.stat()
     except OSError:
@@ -368,43 +473,59 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
     request body (not FastAPI's UploadFile) so the bytes pass through
     a temp file without ever sitting fully in memory."""
     _, final = _resolve_fs_parent_for_new(path)
-    parent = final.parent
     cap_bytes = app_config.load().fs.upload_limit_mb * 1024 * 1024
-    tmp = parent / (final.name + ".ccpipe.tmp")
+    tmp_name = final.name + ".ccpipe.tmp"
     received = 0
     success = False
     # NB: keep the fd open across the chunk loop and close it in finally
     # so a mid-stream client disconnect doesn't leak the descriptor.
     fd: int | None = None
+    # Walk the parent with per-component O_NOFOLLOW (M1 fix). All
+    # subsequent file ops use the resulting dir_fd, so the kernel
+    # never re-walks the path string after we validated it.
+    parent_fd, _leaf = _walk_parent_nofollow(str(final))
     try:
-        # O_NOFOLLOW: see fs_write — refuse to follow a pre-placed
-        # symlink at the tmp path, which would otherwise let an attacker
-        # who controls the parent dir use the upload to clobber any
-        # user-writable file the symlink points at.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-        async for chunk in request.stream():
-            if not chunk:
-                continue
-            received += len(chunk)
-            if received > cap_bytes:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"upload exceeds limit ({cap_bytes} bytes)")
-            os.write(fd, chunk)
-        os.fsync(fd)
-        os.close(fd)
-        fd = None
-        os.replace(tmp, final)
-        success = True
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="permission denied")
+        try:
+            # O_NOFOLLOW at the leaf: see fs_write — refuse to follow a
+            # pre-placed symlink at the tmp path.
+            fd = os.open(
+                tmp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o644,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise HTTPException(status_code=403, detail="symlink at target")
+            if exc.errno == errno.EACCES:
+                raise HTTPException(status_code=403, detail="permission denied")
+            raise HTTPException(status_code=500, detail=f"upload failed: {exc}")
+        try:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > cap_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"upload exceeds limit ({cap_bytes} bytes)")
+                os.write(fd, chunk)
+            os.fsync(fd)
+            os.close(fd)
+            fd = None
+            os.replace(tmp_name, final.name,
+                       src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            success = True
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="permission denied")
     finally:
         if fd is not None:
             try: os.close(fd)
             except OSError: pass
         if not success:
-            try: tmp.unlink()
+            try: os.unlink(tmp_name, dir_fd=parent_fd)
             except OSError: pass
+        os.close(parent_fd)
     return {"path": str(final), "size": received}
 
 
@@ -422,12 +543,31 @@ async def fs_download(path: str) -> StreamingResponse:
     if not stat_mod.S_ISREG(st.st_mode):
         raise HTTPException(status_code=400, detail="not a regular file")
 
+    # M1 fix: walk + open BEFORE returning the StreamingResponse, so an
+    # ELOOP at any intermediate component (or the leaf) surfaces as a
+    # 403 status — not as a silent empty body inside the generator. The
+    # generator below owns the fd and closes it via os.fdopen's context.
+    parent_fd, leaf = _walk_parent_nofollow(str(resolved))
+    try:
+        try:
+            fd = os.open(
+                leaf,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise HTTPException(status_code=403, detail="symlink at target")
+            if exc.errno == errno.ENOENT:
+                raise HTTPException(status_code=404, detail="path not found")
+            if exc.errno == errno.EACCES:
+                raise HTTPException(status_code=403, detail="permission denied")
+            raise HTTPException(status_code=500, detail=f"download failed: {exc}")
+    finally:
+        os.close(parent_fd)
+
     def _gen():
         try:
-            # O_NOFOLLOW: see fs_read — TOCTOU protection against the
-            # resolved real path being racily replaced with a symlink
-            # between resolution and download.
-            fd = os.open(str(resolved), os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(fd, "rb") as f:
                 while True:
                     chunk = f.read(64 * 1024)

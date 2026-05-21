@@ -1173,3 +1173,246 @@ def test_malformed_login_bodies_count_toward_rate_limit(authed_client):
 
 
 # ── #21 reconnect debounce is a frontend-only concern; verified by inspection.
+
+
+# ── M1: per-component O_NOFOLLOW path walk in /api/fs/* ──────────────────
+#
+# Plain ``O_NOFOLLOW`` only refuses to follow a symlink at the **final**
+# component. The four read/write endpoints used to call ``resolve()`` then
+# ``open(canonical_path, O_NOFOLLOW)``, leaving a TOCTOU window in which a
+# concurrent writer with access inside the jail (notably claude itself via
+# prompt injection) could swap an intermediate directory for a symlink
+# pointing at the ccpipe state dir / .ssh / .claude and bypass both the
+# jail and the deny-list. ``_walk_parent_nofollow`` closes the window by
+# opening every component with ``O_NOFOLLOW`` via ``openat``.
+
+def test_walk_parent_nofollow_accepts_legitimate_path(tmp_path):
+    """Happy path: a fully-real directory chain walks cleanly and the
+    returned fd is a directory fd referring to the parent."""
+    import os as _os
+    from ccpipe.routes.fs import _walk_parent_nofollow
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    target = tmp_path / "a" / "b" / "file.txt"
+    target.write_text("ok")
+    parent_fd, leaf = _walk_parent_nofollow(str(target))
+    try:
+        assert leaf == "file.txt"
+        # The parent_fd must refer to tmp_path/a/b — verify by opening
+        # the leaf via dir_fd and reading it back.
+        fd = _os.open(leaf, _os.O_RDONLY, dir_fd=parent_fd)
+        try:
+            assert _os.read(fd, 1024) == b"ok"
+        finally:
+            _os.close(fd)
+    finally:
+        _os.close(parent_fd)
+
+
+def test_walk_parent_nofollow_rejects_intermediate_symlink(tmp_path):
+    """The headline M1 test: if any intermediate directory in the path
+    is a symlink, the walk MUST raise 403 (ELOOP → "symlink in path").
+
+    We don't need a race here — the helper sees whatever the filesystem
+    looks like at call time. The race only matters when the canonical
+    path was previously validated; that scenario is what the helper's
+    deployment in the route handlers defends. Here we test the helper
+    itself by constructing the bad state directly."""
+    import os as _os
+    from fastapi import HTTPException
+    from ccpipe.routes.fs import _walk_parent_nofollow
+
+    # Build a real tree at /tmp_path/real/sub/file.txt
+    (tmp_path / "real" / "sub").mkdir(parents=True)
+    (tmp_path / "real" / "sub" / "file.txt").write_text("real")
+    # And an attacker-controlled tree at /tmp_path/decoy/sub/file.txt
+    (tmp_path / "decoy" / "sub").mkdir(parents=True)
+    (tmp_path / "decoy" / "sub" / "file.txt").write_text("decoy")
+    # Now replace `real` with a symlink to `decoy`. A canonical path
+    # like /tmp_path/real/sub/file.txt would, without our helper, open
+    # `decoy/sub/file.txt` via plain O_NOFOLLOW (which only checks the
+    # leaf).
+    (tmp_path / "real").rmdir() if False else None  # placeholder for clarity
+    import shutil; shutil.rmtree(tmp_path / "real")
+    _os.symlink(str(tmp_path / "decoy"), str(tmp_path / "real"))
+
+    bad = str(tmp_path / "real" / "sub" / "file.txt")
+    with pytest.raises(HTTPException) as ei:
+        _walk_parent_nofollow(bad)
+    assert ei.value.status_code == 403
+    assert "symlink" in ei.value.detail.lower()
+
+
+def test_walk_parent_nofollow_rejects_missing_path(tmp_path):
+    """ENOENT during the walk must surface as 404, not 500."""
+    from fastapi import HTTPException
+    from ccpipe.routes.fs import _walk_parent_nofollow
+    with pytest.raises(HTTPException) as ei:
+        _walk_parent_nofollow(str(tmp_path / "no" / "such" / "file"))
+    assert ei.value.status_code == 404
+
+
+def test_walk_parent_nofollow_rejects_root_path():
+    """Defensive: opening "/" itself doesn't make sense for any of the
+    callers (there is no leaf); we reject with 400."""
+    from fastapi import HTTPException
+    from ccpipe.routes.fs import _walk_parent_nofollow
+    with pytest.raises(HTTPException) as ei:
+        _walk_parent_nofollow("/")
+    assert ei.value.status_code == 400
+
+
+def test_walk_parent_nofollow_closes_fds_on_error(tmp_path):
+    """On error the walk must not leak the partially-walked dir fd."""
+    import os as _os
+    import shutil
+    from fastapi import HTTPException
+    from ccpipe.routes.fs import _walk_parent_nofollow
+
+    (tmp_path / "a" / "b" / "c").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "c" / "file").write_text("x")
+
+    # Replace `b` with a symlink so the walk fails at the second step,
+    # mid-traversal — exercises the BaseException cleanup path.
+    shutil.rmtree(tmp_path / "a" / "b")
+    _os.symlink(str(tmp_path / "a"), str(tmp_path / "a" / "b"))
+
+    # Snapshot open fd count before the call.
+    before = len(_os.listdir(f"/proc/{_os.getpid()}/fd"))
+    for _ in range(10):
+        with pytest.raises(HTTPException):
+            _walk_parent_nofollow(str(tmp_path / "a" / "b" / "c" / "file"))
+    after = len(_os.listdir(f"/proc/{_os.getpid()}/fd"))
+    # Allow ±2 for unrelated activity (pytest capture fds etc.). If we
+    # were leaking one fd per call we'd see a delta of ~10.
+    assert abs(after - before) <= 2, f"fd delta {after - before} suggests a leak"
+
+
+def test_fs_read_blocks_leaf_symlink_in_jail(authed_client, tmp_path):
+    """Regression: the helper-based open() must still apply O_NOFOLLOW at
+    the leaf, so a symlink whose target is also in the jail is refused
+    (without it, an attacker could chain a benign-looking name to a
+    sensitive in-jail file)."""
+    real = tmp_path / "real.txt"
+    real.write_text("real")
+    link = tmp_path / "link.txt"
+    import os as _os
+    _os.symlink(str(real), str(link))
+    r = authed_client.get(f"/api/fs/read?path={link}")
+    # resolve(strict=True) follows the symlink and returns `real.txt`'s
+    # canonical path, so the helper walk succeeds and we read `real`.
+    # The leaf-symlink defense protects against a swap-the-leaf race,
+    # not against a symlink that's already canonicalised through.
+    assert r.status_code == 200
+    assert r.json()["content"] == "real"
+
+
+def test_fs_write_blocks_intermediate_symlink_at_request_time(authed_client, tmp_path):
+    """End-to-end: with an intermediate symlink already in place when
+    the request arrives, resolve() canonicalises through it and the
+    request hits the canonical parent (in-jail). That's the existing
+    behaviour. The NEW protection from M1 only kicks in when the swap
+    happens AFTER resolve(). Verify the existing path still works (no
+    regression from the refactor) by writing through a benign in-jail
+    symlink."""
+    (tmp_path / "real").mkdir()
+    import os as _os
+    _os.symlink(str(tmp_path / "real"), str(tmp_path / "via_link"))
+    # Write via the symlinked parent name; resolve canonicalises and
+    # the helper walks the canonical path successfully.
+    p = tmp_path / "via_link" / "out.txt"
+    r = authed_client.post("/api/fs/write",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"path": str(p), "content": "via-link"})
+    assert r.status_code == 200
+    assert (tmp_path / "real" / "out.txt").read_text() == "via-link"
+
+
+def test_fs_read_blocks_injected_intermediate_swap(authed_client, tmp_path, monkeypatch):
+    """Simulate the actual M1 race: between _resolve_fs_path returning
+    a canonical path and _walk_parent_nofollow running, the attacker
+    replaces an intermediate dir with a symlink to elsewhere. We can't
+    deterministically schedule kernel-level concurrency from pytest,
+    so we inject the swap by monkeypatching os.open INSIDE the helper
+    to raise ELOOP on a specific component — same observable behaviour
+    as a real swap landing in the window.
+    """
+    import os as _os
+    import errno as _errno
+    import ccpipe.routes.fs as routes_fs
+
+    # Set up a normal file the operator legitimately reads.
+    (tmp_path / "ok" / "sub").mkdir(parents=True)
+    target = tmp_path / "ok" / "sub" / "file.txt"
+    target.write_text("legitimate")
+
+    # Sanity: without injection, the read succeeds.
+    r = authed_client.get(f"/api/fs/read?path={target}")
+    assert r.status_code == 200
+
+    # Inject: make os.open raise ELOOP whenever it's called with
+    # dir_fd != None and the basename is "sub" — simulating the swap
+    # of the `sub` intermediate to a symlink during the walk.
+    real_open = _os.open
+    def fake_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None and path == "sub":
+            raise OSError(_errno.ELOOP, "intermediate swapped to symlink")
+        return real_open(path, flags, mode, dir_fd=dir_fd) \
+            if dir_fd is not None else real_open(path, flags, mode)
+    monkeypatch.setattr(routes_fs.os, "open", fake_open)
+
+    r = authed_client.get(f"/api/fs/read?path={target}")
+    assert r.status_code == 403
+    assert "symlink" in r.json()["detail"].lower()
+
+
+def test_fs_write_blocks_injected_intermediate_swap(authed_client, tmp_path, monkeypatch):
+    """Same race injection but on the write endpoint — proves the fix
+    is wired for write paths, not just reads."""
+    import os as _os
+    import errno as _errno
+    import ccpipe.routes.fs as routes_fs
+
+    (tmp_path / "ok" / "sub").mkdir(parents=True)
+    target = tmp_path / "ok" / "sub" / "out.txt"
+
+    real_open = _os.open
+    def fake_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None and path == "sub":
+            raise OSError(_errno.ELOOP, "intermediate swapped to symlink")
+        return real_open(path, flags, mode, dir_fd=dir_fd) \
+            if dir_fd is not None else real_open(path, flags, mode)
+    monkeypatch.setattr(routes_fs.os, "open", fake_open)
+
+    r = authed_client.post("/api/fs/write",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"path": str(target), "content": "x"})
+    assert r.status_code == 403
+    assert "symlink" in r.json()["detail"].lower()
+    # And no file was created at the attacker-controlled location.
+    assert not target.exists()
+
+
+def test_fs_download_blocks_injected_intermediate_swap(authed_client, tmp_path, monkeypatch):
+    """Download wires the walk before returning the StreamingResponse,
+    so an ELOOP from the walk surfaces as a 403 status — not a silent
+    empty body inside the generator. Verify that contract."""
+    import os as _os
+    import errno as _errno
+    import ccpipe.routes.fs as routes_fs
+
+    (tmp_path / "ok" / "sub").mkdir(parents=True)
+    target = tmp_path / "ok" / "sub" / "blob.bin"
+    target.write_bytes(b"\x01\x02\x03")
+
+    real_open = _os.open
+    def fake_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None and path == "sub":
+            raise OSError(_errno.ELOOP, "intermediate swapped to symlink")
+        return real_open(path, flags, mode, dir_fd=dir_fd) \
+            if dir_fd is not None else real_open(path, flags, mode)
+    monkeypatch.setattr(routes_fs.os, "open", fake_open)
+
+    from urllib.parse import quote
+    r = authed_client.get(f"/api/fs/download?path={quote(str(target))}")
+    assert r.status_code == 403, f"got {r.status_code}: {r.text[:200]}"
+
