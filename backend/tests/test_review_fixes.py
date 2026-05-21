@@ -1150,3 +1150,58 @@ def test_malformed_login_bodies_count_toward_rate_limit(authed_client):
 
 
 # ── #21 reconnect debounce is a frontend-only concern; verified by inspection.
+
+
+# ── Multi-worker warning ─────────────────────────────────────────────────
+
+def _capture_warn_if_multi_worker() -> str:
+    """Call _warn_if_multi_worker with a fresh handler attached so we can
+    capture its output regardless of the ccpipe logger's propagate flag.
+    pytest's caplog hooks the root logger, but ccpipe.main sets
+    propagate=False on its own logger, so caplog never sees these lines."""
+    import io
+    import logging
+    from ccpipe.main import _warn_if_multi_worker
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.WARNING)
+    logger = logging.getLogger("ccpipe")
+    logger.addHandler(handler)
+    try:
+        _warn_if_multi_worker()
+    finally:
+        logger.removeHandler(handler)
+    return buf.getvalue()
+
+
+def test_multi_worker_warning_fires_under_web_concurrency(monkeypatch):
+    """If WEB_CONCURRENCY > 1, the lifespan must loudly warn the operator
+    that ccpipe's module-level state (login throttle, credential cache,
+    mic FIFO, TTS observer, tmux control client) is per-process and
+    silently desyncs across workers. The default unit doesn't set
+    --workers; this guards against a drop-in adding it without anyone
+    noticing the security regression that follows."""
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    monkeypatch.setattr("sys.argv", ["uvicorn", "ccpipe.main:app"])
+    out = _capture_warn_if_multi_worker()
+    assert "4 worker processes" in out
+    assert "throttle" in out
+
+
+def test_multi_worker_warning_silent_for_single_worker(monkeypatch):
+    """The opposite assertion — no warning when WEB_CONCURRENCY is unset
+    or 1, so the warning doesn't fire on every default install."""
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.setattr("sys.argv", ["uvicorn", "ccpipe.main:app"])
+    out = _capture_warn_if_multi_worker()
+    assert "worker processes" not in out
+
+
+def test_multi_worker_warning_fires_under_workers_argv(monkeypatch):
+    """Catches --workers passed on the command line (the systemd
+    drop-in flavour) even when WEB_CONCURRENCY is unset."""
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.setattr("sys.argv",
+                         ["uvicorn", "--workers", "3", "ccpipe.main:app"])
+    out = _capture_warn_if_multi_worker()
+    assert "3 worker processes" in out

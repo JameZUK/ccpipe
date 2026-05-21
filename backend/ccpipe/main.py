@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket
@@ -111,6 +112,66 @@ def _warn_if_tls_with_open_host_validation() -> None:
     log.warning(bar)
 
 
+def _warn_if_multi_worker() -> None:
+    """Loud-warn if ccpipe is starting with more than one worker process.
+
+    Several pieces of module-level state are per-process by design and
+    silently desync across workers:
+
+      - login rate-limit buckets (``routes/auth.py:_login_attempts`` and
+        ``_global_login_attempts``) — effective limit becomes N× the
+        documented cap, which materially weakens brute-force defence
+      - the credential cache (``auth.py:_cached_credential``) — a UI
+        password change writes the file + resets one worker's cache, but
+        the other workers continue serving with their own stale entries
+        until each one's first cache miss
+      - the mic FIFO writer + ownership tag (``ws.py:_mic_writer``,
+        ``_mic_owner``) — concurrent ``/voice`` sessions on different
+        workers will interleave audio in the system-wide pipe
+      - the TTS Watchdog observer (``tts.py:tts_service``) — each worker
+        opens its own observer on ``~/.claude/projects``, so a single
+        assistant message produces N duplicate utterances
+      - the tmux control client (``tmux_control.py:control_client``) —
+        each worker maintains an independent ``tmux -C`` connection;
+        event dispatch becomes nondeterministic
+
+    Detection is best-effort: uvicorn doesn't surface worker count to
+    the ASGI app, so we sniff ``WEB_CONCURRENCY`` (Gunicorn-style) and
+    ``--workers`` in ``sys.argv``. Misses some setups but catches the
+    common shapes."""
+    worker_count = 1
+    raw = os.environ.get("WEB_CONCURRENCY", "").strip()
+    if raw:
+        try:
+            worker_count = max(worker_count, int(raw))
+        except ValueError:
+            pass
+    for i, arg in enumerate(sys.argv):
+        if arg == "--workers" and i + 1 < len(sys.argv):
+            try:
+                worker_count = max(worker_count, int(sys.argv[i + 1]))
+            except ValueError:
+                pass
+        elif arg.startswith("--workers="):
+            try:
+                worker_count = max(worker_count, int(arg.split("=", 1)[1]))
+            except ValueError:
+                pass
+    if worker_count <= 1:
+        return
+    bar = "─" * 64
+    log.warning(bar)
+    log.warning("  ccpipe is starting with %d worker processes.", worker_count)
+    log.warning("  Module-level state is per-process; running > 1 worker")
+    log.warning("  silently desyncs the login throttle (effective limit N× the")
+    log.warning("  documented cap), the credential cache (UI password changes")
+    log.warning("  take time to propagate across workers), the mic FIFO writer")
+    log.warning("  (concurrent /voice interleaves audio), the TTS observer")
+    log.warning("  (duplicate utterances), and the tmux control client.")
+    log.warning("  Recommended: drop --workers / WEB_CONCURRENCY back to 1.")
+    log.warning(bar)
+
+
 async def _restore_sticky_sessions() -> None:
     """Recreate any sticky session whose tmux side has vanished
     (typically a fresh boot, or `tmux kill-server`). Idempotent —
@@ -144,6 +205,7 @@ async def lifespan(app: FastAPI):
     get_credential()
     _warn_if_tls_with_public_bind()
     _warn_if_tls_with_open_host_validation()
+    _warn_if_multi_worker()
     # Reset the login throttle on every app launch. Module-level state
     # in routes.auth survives importlib.reload(main); without this, tests
     # that re-import main accumulate hits across runs and trip the global
