@@ -13,6 +13,7 @@ from before the WS subscription started. See ``ws.py::_build_tts_filter``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -651,7 +652,17 @@ class TtsService:
             except Exception:
                 log.exception("tts: pipeline producer failed")
             finally:
-                await q.put(EOS)
+                # M4: non-blocking EOS post. The queue is bounded
+                # (maxsize=16); if the consumer crashed mid-stream and
+                # stopped draining, an `await q.put(EOS)` would park
+                # the producer's `finally` indefinitely — eventually
+                # unblocked only by a second CancelledError from the
+                # outer gather(). The consumer's reap path (`gather`
+                # at the end of the iteration block) already treats
+                # producer-task-done as terminal, so EOS is purely a
+                # fast-path signal; dropping it on QueueFull is safe.
+                with contextlib.suppress(asyncio.QueueFull):
+                    q.put_nowait(EOS)
 
         # Prime the pipeline with the first DEPTH sentences' requests.
         in_flight: list[tuple[asyncio.Queue, asyncio.Task, str]] = []
@@ -667,7 +678,27 @@ class TtsService:
             sent_start = False
             try:
                 while True:
-                    evt = await q.get()
+                    # M4: don't park indefinitely on q.get() if EOS got
+                    # dropped at the producer end (full queue at the
+                    # producer's finally). Race q.get() against the
+                    # producer task's completion; if the producer is
+                    # done with no remaining buffered items, treat as EOS.
+                    get_fut = asyncio.ensure_future(q.get())
+                    done, _pending = await asyncio.wait(
+                        {get_fut, task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if get_fut in done:
+                        evt = get_fut.result()
+                    else:
+                        # Producer finished first. Drain any items it
+                        # left buffered (consumer may have been a few
+                        # chunks behind); on empty queue, we're done.
+                        get_fut.cancel()
+                        try:
+                            evt = q.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
                     if evt is EOS:
                         break
                     kind, payload = evt

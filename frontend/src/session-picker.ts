@@ -56,6 +56,14 @@ function homeRelative(path: string): string {
 
 // apiJson moved to ./api.ts
 
+// M6: module-level handle for the outside-click listener of the most-
+// recent picker render so re-renders can remove the prior one. Without
+// this, every `renderSessionPicker` call accumulates a fresh
+// document-level listener — the closure pins the previous picker's
+// `list` element (already wiped by root.innerHTML = "") and every
+// future page click walks N stale closures looking for menus to close.
+let _outsideClickListener: ((e: MouseEvent) => void) | null = null;
+
 export function renderSessionPicker(
   root: HTMLElement,
   onPick: (session: string) => void,
@@ -759,6 +767,14 @@ export function renderSessionPicker(
   // any open menu when the click target sits outside the row's actions
   // column. Bound once here rather than per-row to avoid leaking
   // listeners across refresh().
+  //
+  // M6: remove the previous picker render's listener before adding ours,
+  // so going picker → terminal → picker doesn't accumulate one stale
+  // listener per round-trip (each pinning the prior picker's DOM tree
+  // through the `list` closure capture).
+  if (_outsideClickListener) {
+    document.removeEventListener("click", _outsideClickListener);
+  }
   const onOutsideClick = (e: MouseEvent) => {
     const target = e.target as Element | null;
     if (!target) return;
@@ -768,12 +784,8 @@ export function renderSessionPicker(
         if (!actions || !actions.contains(target)) m.hidden = true;
       });
   };
+  _outsideClickListener = onOutsideClick;
   document.addEventListener("click", onOutsideClick);
-  // Cleanup when the picker is replaced (caller wipes innerHTML; we
-  // can't observe that directly, but bootstrap dispatches no event
-  // for the picker view today — accept a single listener over the
-  // tab's lifetime, which is what we had post-fix and is fine for
-  // a long-lived SPA).
 
   // First render
   renderRecent();

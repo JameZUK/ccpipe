@@ -645,15 +645,37 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                             )
                             _mic_writer.reset()
                             _mic_owner = None
+                            # M3: cancel any prior pending release from
+                            # this same handler before scheduling a new
+                            # one. Without this, a rapid mic_start →
+                            # mic_stop → mic_start → mic_stop sequence
+                            # leaves the first release task in flight
+                            # — its Esc k fires mid-second-recording's
+                            # drain and toggles claude /voice at the
+                            # wrong time. At most one release per WS is
+                            # ever meaningful; older ones are stale.
+                            for old in list(pending_releases):
+                                old.cancel()
+                            pending_releases.clear()
                             # Track the release task so the `finally`
                             # block can cancel it on disconnect, and
-                            # only write Esc k if this handler is
-                            # still the most-recent authoritative
-                            # owner at fire-time.
+                            # only write Esc k if no other handler has
+                            # claimed the mic in the meantime. We
+                            # capture mic_token in the lambda's default
+                            # arg so the closure binds it at scheduling
+                            # time — gating on `_mic_owner is None or
+                            # _mic_owner is mt` lets a re-record from
+                            # the SAME handler still get its drain-end
+                            # release fired, while a swap to a different
+                            # owner correctly suppresses the write.
                             rel_task = asyncio.create_task(
                                 _release_ptt_after(
                                     pty_proc, total,
-                                    still_authoritative=lambda: _mic_owner is None,
+                                    still_authoritative=(
+                                        lambda mt=mic_token: (
+                                            _mic_owner is None or _mic_owner is mt
+                                        )
+                                    ),
                                 )
                             )
                             pending_releases.add(rel_task)
