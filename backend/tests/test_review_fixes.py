@@ -470,6 +470,36 @@ def test_old_session_invalidated_after_credential_change(authed_client):
     assert r.json()["authenticated"] is False
 
 
+def test_new_password_logs_in_old_env_password_does_not(authed_client):
+    """A successful password change must actually take effect — the new
+    password logs in, the old one (which here is the env-pinned bootstrap
+    password) does not. The existing
+    ``test_old_session_invalidated_after_credential_change`` checks that
+    the old *cookie* is rejected, but it kept passing even while
+    ``_resolve_credential`` silently re-applied ``CCPIPE_AUTH_PASSWORD``
+    on every read, because the route also clears the request session.
+    This test exercises the part that was actually broken: a fresh login
+    with the new credentials."""
+    r = authed_client.post("/api/auth/credentials",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "newPassword": "letmein-v2"})
+    assert r.status_code == 200, r.json()
+
+    # New password must work.
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein-v2"})
+    assert r.status_code == 200, r.json()
+    assert r.json()["authenticated"] is True
+
+    # Old (env bootstrap) password must NOT work anymore.
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein"})
+    assert r.status_code == 401
+
+
 def test_update_credential_rejects_short_password(authed_client):
     r = authed_client.post("/api/auth/credentials",
                             headers={"X-Requested-By": "ccpipe"},

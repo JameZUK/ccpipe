@@ -3,15 +3,25 @@
 ccpipe binds 0.0.0.0 by default, so auth is **always on**. Credentials are
 resolved in this order:
 
-  1. Both ``CCPIPE_AUTH_USERNAME`` and ``CCPIPE_AUTH_PASSWORD`` env vars
-     (typical when deployed via a systemd drop-in).
-  2. ``CCPIPE_AUTH_PASSWORD`` alone (username defaults to the system user).
-  3. A persisted file at ``~/.local/state/ccpipe/credentials`` (0600).
-  4. Auto-generate a random password, argon2id-hash it into the credentials
+  1. A persisted file at ``~/.local/state/ccpipe/credentials`` (0600).
+     Once this file exists it is **authoritative** — the in-UI password
+     change writes here, and subsequent restarts read from here.
+  2. ``CCPIPE_AUTH_PASSWORD`` (optionally with ``CCPIPE_AUTH_USERNAME``)
+     as a **bootstrap seed** when no credentials file exists yet. On
+     first run the env value is hashed and written to the file; from
+     then on the file wins and the env var is ignored. This means an
+     in-UI password change persists across restarts (previous behaviour
+     silently let the env value override the file on every read, making
+     the UI change a no-op).
+  3. Auto-generate a random password, argon2id-hash it into the credentials
      file, and write the *plaintext* into a sidecar
      ``~/.local/state/ccpipe/initial_password.txt`` (0400). The plaintext is
      never logged — the operator is told once at startup to ``cat`` the
      sidecar and then delete it.
+
+To rotate to a new env-pinned password after the file has been seeded,
+delete the credentials file (the service will re-seed from env on next
+start) — or just use Settings → Account in the UI.
 
 Stored passwords are argon2id hashes; the plaintext only exists in memory
 when verifying a login. Legacy credential files containing a cleartext
@@ -281,9 +291,11 @@ def _announce_generated_credentials(username: str, creds_path: Path, sidecar: Pa
     log.warning("  Then delete the sidecar:")
     log.warning("    shred -u %s", sidecar)
     log.warning("")
-    log.warning("  To override, set environment in a systemd drop-in:")
+    log.warning("  Change the password later: Settings → Account in the UI.")
+    log.warning("  To re-seed from env, delete the credentials file and set")
     log.warning("    Environment=CCPIPE_AUTH_USERNAME=...")
     log.warning("    Environment=CCPIPE_AUTH_PASSWORD=...")
+    log.warning("  in a systemd drop-in / launchd plist before next start.")
     log.warning(bar)
 
 
@@ -291,9 +303,6 @@ def _resolve_credential() -> Credential:
     env_user = os.environ.get(USERNAME_ENV, "").strip() or None
     env_pass = os.environ.get(PASSWORD_ENV, "").strip() or None
     path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    # TOTP enrollment is always file-backed even when username/password
-    # come from the environment — otherwise CCPIPE_AUTH_PASSWORD would
-    # silently disable any TOTP secret the user enrolled via the UI.
     file_cred, needs_migration = _load_credentials_file(path)
     # Opportunistic migration: if the on-disk file was legacy plaintext
     # we just rewrote it in memory as an argon2 hash; flush that hash
@@ -304,15 +313,38 @@ def _resolve_credential() -> Credential:
             log.warning("migrated plaintext credentials at %s to argon2id hash", path)
         except OSError as exc:
             log.error("could not rewrite migrated credentials to %s: %s", path, exc)
-    file_totp = file_cred.totp_secret if file_cred else None
+    # File wins once it exists. CCPIPE_AUTH_PASSWORD is a bootstrap seed
+    # only; before this change env_pass was re-evaluated on every read
+    # and silently overrode the file, making the in-UI password change
+    # a no-op (the file was rewritten, the next read ignored it). Once
+    # the file exists, the only way to change credentials is via the UI
+    # or by deleting the file to force a re-seed from env on next start.
+    # A side benefit: env_pass no longer needs to be re-hashed (argon2id)
+    # on every process start to satisfy a comparison that never happens.
+    if file_cred:
+        if env_pass:
+            log.info(
+                "CCPIPE_AUTH_PASSWORD is set but %s already exists — "
+                "env value ignored (file is authoritative). Delete the "
+                "file to re-seed from env.", path,
+            )
+        return file_cred
     if env_pass:
-        return Credential(
+        # First run with env-pinned creds: hash and persist so the file
+        # becomes authoritative from the next read onward.
+        cred = Credential(
             username=env_user or _system_username(),
             password_hash=_hash_password(env_pass),
-            totp_secret=file_totp,
         )
-    if file_cred:
-        return file_cred
+        try:
+            _write_credentials_file(path, cred)
+        except OSError as exc:
+            log.error(
+                "could not persist env-seeded credentials to %s: %s "
+                "(login will work, but an in-UI password change cannot "
+                "be saved)", path, exc,
+            )
+        return cred
     plain = _generate_password()
     cred = Credential(
         username=env_user or _system_username(),

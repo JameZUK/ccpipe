@@ -8,8 +8,8 @@ All env vars are typically set via a systemd drop-in at
 | Variable                  | Default                            | Notes |
 | ------------------------- | ---------------------------------- | ----- |
 | `CCPIPE_FRONTEND_DIST`    | `/app/frontend`                    | Where to serve the Vite build from. The systemd unit points this at the in-repo `frontend/dist`. |
-| `CCPIPE_AUTH_USERNAME`    | system user                        | Login user. Overrides the credentials file when set. |
-| `CCPIPE_AUTH_PASSWORD`    | auto-generated                     | Login password. Set explicitly to skip the auto-generated random one. |
+| `CCPIPE_AUTH_USERNAME`    | system user                        | Login username. Used only when no credentials file exists yet (bootstrap-only — once the file is written, `CCPIPE_AUTH_USERNAME` changes are ignored on subsequent reads). |
+| `CCPIPE_AUTH_PASSWORD`    | auto-generated                     | Bootstrap password. **Only consulted when no credentials file exists** — the first start hashes it and persists it to the credentials file, after which the file is authoritative and changes via Settings → Account take effect. To re-seed, delete the credentials file and restart. |
 | `CCPIPE_CREDENTIALS_FILE` | `~/.local/state/ccpipe/credentials`| JSON credential store (`0600`). |
 | `CCPIPE_SESSION_SECRET_FILE` | `~/.local/state/ccpipe/session_secret` | Random secret used to sign session cookies. Auto-generated on first run. |
 | `CCPIPE_BEHIND_TLS`       | (unset)                            | When `1`/`true`/`on`, cookies get `Secure` + `__Host-` prefix, HSTS is sent, `TrustedHostMiddleware` enables, and a startup banner reminds the operator to firewall `:8080` to the proxy IP. |
