@@ -469,7 +469,10 @@ async def claude_sessions(cwd: str) -> dict[str, Any]:
     if not projects_dir.is_dir():
         return {"sessions": []}
 
-    running = _running_claude_session_ids()
+    # L4: glob + stat + read_text per session file — blocking I/O.
+    # Tens of ms on a busy box (with many concurrent claude sessions),
+    # noticeable jitter for PTY pumps and WS pings during the wait.
+    running = await asyncio.to_thread(_running_claude_session_ids)
     # Collect viable JSONL paths first.
     viable: list[tuple[str, Path, int, int]] = []
     for jsonl in projects_dir.glob("*.jsonl"):

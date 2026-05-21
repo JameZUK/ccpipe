@@ -115,6 +115,15 @@ need node
 need npm
 need tmux
 
+# L15: explicit version floors. pyproject.toml says requires-python=">=3.11"
+# but pip will only refuse late in the install; node 18 silently breaks
+# some xterm packages with cryptic stack traces. Probe up front so the
+# user gets a clear message rather than 5 minutes of confusing output.
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' \
+  || { warn "ccpipe needs Python ≥ 3.11; got $(python3 --version 2>&1)"; exit 1; }
+node -e 'process.exit(process.versions.node.split(".")[0] >= 20 ? 0 : 1)' \
+  || { warn "ccpipe needs Node ≥ 20; got $(node --version)"; exit 1; }
+
 # Pick the service supervisor for this platform. Other OSes are
 # unsupported by the service-install step but the backend may still
 # build fine with --skip-units.

@@ -493,7 +493,15 @@ export function renderSessionPicker(
   });
 
   // ─── Render existing sessions list ──────────────────────────────────
+  // L11: track in-flight kill-confirm timers per picker render so a
+  // refresh() that wipes the list can also cancel their closures.
+  // Without this, each armed-but-unconfirmed kill pinned the row's
+  // closure (and `s`) for the full 5s confirm window even after the
+  // row was removed from the DOM.
+  const pickerKillTimers = new Set<number>();
   const refresh = async () => {
+    for (const t of pickerKillTimers) clearTimeout(t);
+    pickerKillTimers.clear();
     list.innerHTML = "";
     let sessions: SessionInfo[] = [];
     try {
@@ -686,6 +694,7 @@ export function renderSessionPicker(
       killItem.classList.remove("armed");
       if (killConfirmTimer !== null) {
         clearTimeout(killConfirmTimer);
+        pickerKillTimers.delete(killConfirmTimer);
         killConfirmTimer = null;
       }
     };
@@ -696,6 +705,7 @@ export function renderSessionPicker(
         killItem.textContent = `confirm kill ${s.name}`;
         killItem.classList.add("armed");
         killConfirmTimer = window.setTimeout(resetKill, 5000);
+        pickerKillTimers.add(killConfirmTimer);
         return;
       }
       resetKill();

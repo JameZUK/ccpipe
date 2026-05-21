@@ -8,6 +8,7 @@ and the lifespan that starts/stops the long-lived background services
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -159,6 +160,13 @@ async def lifespan(app: FastAPI):
     # 429 well before they should.
     from .routes.auth import reset_throttle_state
     reset_throttle_state()
+    # L1: bound the lifetime of the read-once initial_password.txt
+    # sidecar at 1 hour. Operators who follow the journal banner and
+    # run `shred -u` immediately are unaffected; this just caps the
+    # worst case for those who forget. The task is held for the
+    # lifespan and cancelled cleanly on shutdown.
+    from .auth import _autodelete_initial_password_sidecar
+    _sidecar_task = asyncio.create_task(_autodelete_initial_password_sidecar())
     if should_apply():
         patch_settings_safe()
         patch_keybindings_safe()
@@ -173,6 +181,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        _sidecar_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await _sidecar_task
         await tts_service.stop()
         await control_client.stop()
 
@@ -212,6 +223,30 @@ if _BEHIND_TLS:
     allowed = [h.strip() for h in os.environ.get(
         "CCPIPE_TRUSTED_HOSTS", "*").split(",") if h.strip()]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)
+
+
+# L17: one-shot warning when X-Forwarded-Proto=https arrives but
+# CCPIPE_BEHIND_TLS isn't set. Cookies are missing `Secure` in that
+# state, and `__Host-` would be rejected by the browser too. Typo'd
+# env values (`CCPIPE_BEHIND_TLS=yess`) are the common cause — without
+# this nudge the misconfiguration is invisible until someone complains
+# logins don't stick.
+_https_mismatch_warned = False
+
+@app.middleware("http")
+async def _warn_on_tls_misconfig(request: Request, call_next):
+    global _https_mismatch_warned
+    if (not _BEHIND_TLS) and (not _https_mismatch_warned):
+        if request.headers.get("x-forwarded-proto", "").lower() == "https":
+            _https_mismatch_warned = True
+            log.warning(
+                "TLS misconfig: request arrived with X-Forwarded-Proto=https "
+                "but CCPIPE_BEHIND_TLS is not set — session cookies are "
+                "missing Secure, the __Host- prefix is disabled, and "
+                "TrustedHostMiddleware is off. Set CCPIPE_BEHIND_TLS=1 in "
+                "the systemd unit if a reverse proxy is terminating TLS."
+            )
+    return await call_next(request)
 
 
 # ─── Pre-auth body-size cap (DoS hardening) ───────────────────────────────

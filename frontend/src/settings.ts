@@ -64,7 +64,10 @@ const DEFAULT_TAB: TabId = "display";
 function loadLastTab(): TabId {
   try {
     const v = localStorage.getItem(LS_LAST_TAB);
-    if (v === "display" || v === "voice" || v === "account") return v;
+    // L9: include "debug" — buildTabs() renders all four, but a user
+    // who selected the debug tab and reopened settings was bounced
+    // back to display every time because the validator dropped it.
+    if (v === "display" || v === "voice" || v === "account" || v === "debug") return v;
   } catch {}
   return DEFAULT_TAB;
 }
@@ -341,6 +344,11 @@ function buildVoiceSection(): HTMLElement {
         fetch("/api/tts/voices", { credentials: "same-origin" }),
         fetch("/api/tts/config", { credentials: "same-origin" }),
       ]);
+      // L10: check res.ok before parsing JSON. A 401/403 used to fall
+      // through to `await .json()` → `{detail: "..."}` → `cfg.speech_rate.toFixed`
+      // throwing TypeError → "failed to load: undefined" in the UI.
+      if (!voicesRes.ok) throw new Error(`/api/tts/voices: ${voicesRes.status}`);
+      if (!configRes.ok) throw new Error(`/api/tts/config: ${configRes.status}`);
       const { voices = [] } = (await voicesRes.json()) as { voices: string[] };
       const cfg = (await configRes.json()) as TtsServerConfig;
       select.innerHTML = "";
@@ -379,10 +387,21 @@ function buildVoiceSection(): HTMLElement {
   // through the browser audio element (no Web Audio routing — simple
   // playback so it can't break if AudioContext quirks bite).
   let preview: HTMLAudioElement | null = null;
+  const disposePreview = () => {
+    if (!preview) return;
+    preview.pause();
+    // L12: clear src so the in-flight fetch is cancelled and the
+    // element becomes eligible for GC even if a playback callback
+    // still holds a transient reference. Without this, closing the
+    // modal mid-preview kept the request + element alive until the
+    // network roundtrip completed.
+    preview.src = "";
+    preview = null;
+  };
   testBtn.addEventListener("click", () => {
     const voice = select.value;
     if (!voice) return;
-    if (preview) { preview.pause(); preview = null; }
+    disposePreview();
     const text = encodeURIComponent("Voice test, one two three.");
     const url = `/api/tts/preview?voice=${encodeURIComponent(voice)}&text=${text}`;
     preview = new Audio(url);
@@ -391,6 +410,10 @@ function buildVoiceSection(): HTMLElement {
       status.classList.add("modal__status--error");
     });
   });
+  // L12: hook the existing close-cleanup channel so a settings close
+  // mid-preview tears the <audio> down rather than letting it run.
+  activeOverlay?.addEventListener("close-cleanup" as any, disposePreview,
+                                   { once: true });
 
   saveBtn.addEventListener("click", async () => {
     status.classList.remove("modal__status--error");

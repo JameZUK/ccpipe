@@ -84,7 +84,13 @@ _login_attempts: dict[str, deque[float]] = {}
 # deployment), where request.client.host is always the loopback /
 # nginx IP, so all clients share one IP-bucket. A global cap caps the
 # absolute rate while still letting a legit user retry.
-_GLOBAL_LOGIN_MAX = 30
+#
+# L8: previously 30/min — low enough that any unauthenticated attacker
+# generating 30 failed logins/minute locked the legit operator out.
+# Raised to 300/min so the cap only catches sustained floods (5/s
+# sustained for a minute), not opportunistic probes. The per-IP bucket
+# (5/min) does the brute-force protection; this is purely a DoS guard.
+_GLOBAL_LOGIN_MAX = 300
 _GLOBAL_LOGIN_WINDOW_S = 60.0
 _global_login_attempts: deque[float] = deque()
 

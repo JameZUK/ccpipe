@@ -591,7 +591,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                 # toggles TTS, so we can skip the Kokoro round-trip
                 # while nobody's listening. Cheap dispatch — no JSON
                 # parse on the hot input path.
-                if '"type":"tts_mute"' in text or '"type": "tts_mute"' in text:
+                if _is_control_frame(text, '"type":"tts_mute"', '"type": "tts_mute"'):
                     try:
                         payload = _safe_json_loads(text)
                         tts_sub.muted = bool(payload.get("value"))
@@ -609,7 +609,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                 # the configured pad, and write the release keystroke
                 # to the PTY ourselves after waiting that long. The
                 # client is no longer involved in the release timing.
-                if '"type":"mic_stop"' in text or '"type": "mic_stop"' in text:
+                if _is_control_frame(text, '"type":"mic_stop"', '"type": "mic_stop"'):
                     if _mic_owner is mic_token:
                         if sys.platform == "darwin":
                             # macOS: no Pulse pipeline to drain. The
@@ -835,8 +835,15 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     # lock is needed.
     now = time.monotonic()
     cached = _history_cache.get(session)
-    if cached is not None and now - cached[0] < _HISTORY_CACHE_TTL_S:
-        return cached[1]
+    if cached is not None:
+        if now - cached[0] < _HISTORY_CACHE_TTL_S:
+            return cached[1]
+        # L2: stale on read — drop so the dict doesn't hold this entry
+        # until the 64-key threshold sweep runs. A session that was
+        # attached once then renamed/killed would otherwise sit with
+        # its ~MB of capture bytes until 63 other unique session names
+        # appear over the process lifetime.
+        _history_cache.pop(session, None)
     try:
         proc = await asyncio.create_subprocess_exec(
             tmux.TMUX_BIN, "capture-pane",
@@ -949,14 +956,30 @@ def _is_session_still_authed(websocket: WebSocket) -> bool:
     return is_session_authed(session)
 
 
+# L3: substring fast-paths for control frames only apply to small text
+# frames. Real control envelopes are well under 100 bytes; anything
+# larger is a paste, which shouldn't match (and shouldn't pay the
+# json.loads cost on the full payload).
+_CONTROL_FRAME_MAX = 256
+
+
+def _is_control_frame(text: str, needle1: str, needle2: str) -> bool:
+    """Returns True when *text* is short enough to be a control envelope
+    AND contains one of the needles. Used by the receive loop's cheap
+    pre-dispatch for tts_mute / mic_stop without parsing JSON on every
+    keystroke. See L3."""
+    return len(text) <= _CONTROL_FRAME_MAX and (needle1 in text or needle2 in text)
+
+
 def _is_ping(text: str) -> bool:
     """Cheap pre-parse check so the receive loop can dispatch pongs
     without doing a full json.loads on every keystroke. The substring
     check is tighter than ``"ping"`` alone so paste content containing
     the word doesn't waste a parse — it has to look like our literal
     ``{"type":"ping"}`` shape (modulo whitespace) to even be tested.
+    Plus the L3 size cap: a paste >256 bytes can't be a ping anyway.
     """
-    if '"type":"ping"' not in text and '"type": "ping"' not in text:
+    if not _is_control_frame(text, '"type":"ping"', '"type": "ping"'):
         return False
     try:
         return _safe_json_loads(text).get("type") == "ping"

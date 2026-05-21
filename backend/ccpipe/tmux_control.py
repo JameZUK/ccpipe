@@ -216,15 +216,27 @@ class TmuxControlClient:
         # Snapshot then fan out concurrently so one slow subscriber doesn't
         # stall events for the others (mobile-WS reconnect can easily wedge
         # a send for hundreds of ms).
+        #
+        # L5: per-subscriber 2-second timeout. gather() waits for the
+        # slowest, so a single stuck WS (mid-send on a wedged transport)
+        # would otherwise delay every other subscriber AND defer the
+        # next tmux event's read in the surrounding loop. Wrap each
+        # callback so a stuck subscriber gets a TimeoutError logged
+        # rather than holding the fan-out indefinitely.
         subs = list(self._subscribers)
         if not subs:
             return
+        async def _bounded(sub: "_Subscription"):
+            return await asyncio.wait_for(sub.callback(event), timeout=2.0)
         results = await asyncio.gather(
-            *(sub.callback(event) for sub in subs),
+            *(_bounded(sub) for sub in subs),
             return_exceptions=True,
         )
         for sub, result in zip(subs, results):
-            if isinstance(result, BaseException):
+            if isinstance(result, asyncio.TimeoutError):
+                log.warning("subscriber timed out on %s after 2s — fan-out continued",
+                            event.name)
+            elif isinstance(result, BaseException):
                 # log.exception only works inside an except block — outside
                 # one it prints "NoneType: None" as the traceback, hiding the
                 # real cause. Pass exc_info explicitly so the traceback comes

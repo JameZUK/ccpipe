@@ -95,7 +95,10 @@ def _default_credentials_path() -> Path:
 # ─── Session secret ────────────────────────────────────────────────────────
 
 def load_or_create_secret() -> str:
-    override = os.environ.get(_SECRET_FILE_ENV)
+    # L13: strip + treat empty string as unset. Without this, an env
+    # var set to "" makes Path("") → cwd, and we'd write the secret
+    # there instead of the state dir.
+    override = (os.environ.get(_SECRET_FILE_ENV) or "").strip() or None
     path = Path(override) if override else _default_secret_path()
     if path.exists():
         try:
@@ -298,6 +301,37 @@ def _announce_generated_credentials(username: str, creds_path: Path, sidecar: Pa
     log.warning("    rm %s", creds_path)
     log.warning("    # then set CCPIPE_AUTH_PASSWORD in a drop-in / plist")
     log.warning(bar)
+
+
+async def _autodelete_initial_password_sidecar(delay_s: float = 3600.0) -> None:
+    """L1: schedule deletion of the read-once initial password sidecar
+    after ``delay_s`` (default 1 h). The sidecar holds plaintext at
+    mode 0400, but operators who skip the documented ``shred -u`` leave
+    it on disk indefinitely — and the hash + sidecar combo is enough
+    to take over the account from any path that backs up $HOME.
+
+    Idempotent: the operator may shred earlier, or the file may not
+    exist if env-pinned creds were used; both paths are handled
+    silently. Cancellable: lifespan teardown will not block on this
+    sleep.
+    """
+    try:
+        await asyncio.sleep(max(0.0, delay_s))
+    except asyncio.CancelledError:
+        # Shutdown before TTL fired. Sidecar still on disk; operator
+        # can clean up manually. This is the safer default.
+        raise
+    creds_path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    sidecar = _initial_password_sidecar_for(creds_path)
+    try:
+        sidecar.unlink()
+        log.warning("initial_password sidecar auto-deleted after %.0f s (%s)",
+                     delay_s, sidecar)
+    except FileNotFoundError:
+        # Operator beat us to it, or env-creds path never created one.
+        pass
+    except OSError as exc:
+        log.warning("initial_password sidecar autodelete failed: %s", exc)
 
 
 def _resolve_credential() -> Credential:

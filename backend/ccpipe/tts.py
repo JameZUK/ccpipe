@@ -237,6 +237,12 @@ class TtsService:
     _loop: asyncio.AbstractEventLoop | None = None
     _http: httpx.AsyncClient | None = None
     _enabled: bool = True
+    # L6: cache of ancestor paths already confirmed not to be symlinks.
+    # Each watchdog event used to lstat() 3-5 ancestors; with this cache
+    # only the leaf path requires a syscall on subsequent events. The
+    # leaf itself is never cached (it CAN be replaced — the rotation
+    # case the symlink walk exists to defend against).
+    _ancestor_safe: set[Path] = field(default_factory=set)
     # Set in stop() so any in-flight watchdog event that fires AFTER we
     # tear down the loop becomes a no-op rather than calling
     # call_soon_threadsafe on a closed loop (which raises RuntimeError).
@@ -454,12 +460,20 @@ class TtsService:
         # to come back inside it (it doesn't here, but the leaf-only
         # check would have allowed the path if it did).
         try:
-            for ancestor in (path, *path.parents):
+            # L6: cache ancestors. Only the leaf path needs a fresh
+            # is_symlink() check on every event — directories above
+            # don't rotate per file. Caching shaves 3-5 syscalls per
+            # watchdog event in a busy claude session.
+            for i, ancestor in enumerate((path, *path.parents)):
                 if ancestor == self.projects_dir or ancestor == self.projects_dir.parent:
                     break
+                if i > 0 and ancestor in self._ancestor_safe:
+                    continue
                 if ancestor.is_symlink():
                     log.warning("tts: refusing path with symlinked ancestor %s", ancestor)
                     return
+                if i > 0:
+                    self._ancestor_safe.add(ancestor)
             resolved = path.resolve()
             resolved.relative_to(self.projects_dir.resolve())
         except (OSError, ValueError):

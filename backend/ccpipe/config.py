@@ -144,7 +144,9 @@ def _default_config_path() -> Path:
 
 
 def config_path() -> Path:
-    override = os.environ.get(CONFIG_FILE_ENV)
+    # L13: strip + treat empty string as unset (Path("") would silently
+    # resolve to cwd).
+    override = (os.environ.get(CONFIG_FILE_ENV) or "").strip() or None
     return Path(override) if override else _default_config_path()
 
 

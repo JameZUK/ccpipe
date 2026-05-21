@@ -80,6 +80,14 @@ Environment=CCPIPE_TTS_VOICE=bf_emma
 Restart=on-failure
 RestartSec=3
 
+# L14: bound the stop window so `systemctl --user restart ccpipe` isn't
+# held hostage by a slow uvicorn shutdown. SIGINT (rather than the
+# default SIGTERM) so uvicorn does its graceful WS-close path; 20s is
+# generous for any in-flight WS to drain. systemd's default 90s would
+# delay a restart from an interactive operator.
+KillSignal=SIGINT
+TimeoutStopSec=20s
+
 # ─── Sandboxing — intentionally NOT enabled ──────────────────────────
 # An earlier revision of this file applied the standard hardening
 # stack (ProtectSystem=strict, SystemCallFilter=@system-service,
