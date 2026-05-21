@@ -7,9 +7,10 @@ import {
   onDisplayPrefsChange,
   saveLastSession,
 } from "./display-prefs";
-import { FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
+import { FOLDER_SVG, GEAR_SVG, MIC_SVG, SEND_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI } from "./mobile";
 import * as notifications from "./notifications";
+import { attachOptionSpacePtt } from "./ptt";
 import { TerminalSocket } from "./ws";
 // Heavy chunks loaded lazily on user gesture:
 //   - settings / file-panel / session-picker are large (758 + 752 + 629
@@ -301,11 +302,28 @@ async function attachTerminal(session: string): Promise<void> {
   const micBtn = document.createElement("button");
   micBtn.className = "pill pill--icon pill--mic";
   micBtn.dataset.role = "mic";
-  micBtn.title = "Tap to start dictation, tap again to stop";
+  micBtn.title = "Tap to start dictation, tap again to stop. Or hold Option+Space.";
   micBtn.innerHTML = MIC_SVG;
   micBtn.hidden = true;
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, filesBtn, settingsBtn);
+  // Persistent Send pill: a one-tap alternative to "click into the
+  // terminal and press Enter", primarily useful immediately after a
+  // dictation lands in claude's prompt. It's always *visible* (no
+  // hide/show flicker) but disabled until we have a reason to believe
+  // claude's input box is non-empty — flipped on by a mic stop or a
+  // typed keystroke, flipped off by sending Enter (here) or by a
+  // fresh session attach. We can't introspect claude's prompt buffer
+  // from the DOM so this is a heuristic, not a guarantee. The worst
+  // failure mode is an enabled Send that sends \r against an empty
+  // prompt; claude treats that as a no-op.
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "pill pill--icon pill--send";
+  sendBtn.dataset.role = "send";
+  sendBtn.title = "Send (Enter)";
+  sendBtn.innerHTML = SEND_SVG;
+  sendBtn.disabled = true;
+
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, sendBtn, filesBtn, settingsBtn);
   statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────
@@ -584,6 +602,38 @@ async function attachTerminal(session: string): Promise<void> {
     }).catch((e) => { console.warn("mic event failed:", e); });
   };
 
+  // Option+Space global push-to-talk. Captured on document so it
+  // works whether the terminal, the controls strip, or nothing has
+  // focus. See ptt.ts for the chord rules and the blur-safety net.
+  // Unbind on session dispose — without this, switching sessions
+  // stacks a new pair of listeners on each attach and every
+  // Option+Space would fire N onHoldStarts.
+  const detachPtt = attachOptionSpacePtt({
+    onHoldStart: () => handleMicEvent("hold-start"),
+    onHoldEnd: () => handleMicEvent("hold-end"),
+  });
+  view.addEventListener("ccpipe:dispose", detachPtt, { once: true });
+
+  // Enable the Send pill once we have a reason to believe claude's
+  // input box is non-empty. Called from mic_stop (transcription
+  // likely produced text) and from the keystroke forwarder (typed
+  // input). Defined here so toggleMic and the keystroke handlers
+  // share a single seam.
+  const armSend = (): void => { sendBtn.disabled = false; };
+  const disarmSend = (): void => { sendBtn.disabled = true; };
+
+  sendBtn.addEventListener("click", () => {
+    if (sendBtn.disabled) return;
+    // CR = Enter on a PTY. claude's input box submits on this when
+    // the prompt is non-empty; empty-prompt CR is harmless.
+    socket.send({ type: "input", data: "\r" });
+    disarmSend();
+    // Hand focus back to xterm so the next keystroke goes straight
+    // to claude; without this the user's next key hits the (focused)
+    // Send pill, which is silent but surprising.
+    terminalApi?.term.focus();
+  });
+
   const toggleMic = async (): Promise<void> => {
     if (!micAvailable) return;
     if (recording) {
@@ -596,6 +646,13 @@ async function attachTerminal(session: string): Promise<void> {
       try { await mic?.stop(); } catch {}
       socket.send({ type: "mic_stop" });
       void wakeLock.release();
+      // Refocus xterm so a physical Enter works immediately to send
+      // the transcribed utterance. Without this, the mic button keeps
+      // focus and the user's first Enter is a no-op. Arm the Send
+      // pill as a tap-alternative for users who'd rather not move
+      // their hand from the mouse/screen.
+      terminalApi?.term.focus();
+      armSend();
     } else {
       setRecording(true);
       socket.send({ type: "input", data: VOICE_TRIGGER });

@@ -1180,6 +1180,17 @@ a:hover { color: var(--fg); }
   border-color: var(--accent);
   color: var(--accent);
 }
+.pill:disabled {
+  /* Browser default disabled rendering is subtle (slight opacity); too
+     subtle here because the muted "off" look already lives at this
+     palette. Give the disabled state an explicit dim+desaturated look
+     so an empty Send pill obviously doesn't invite a click. */
+  color: var(--fg-faint);
+  border-color: var(--border);
+  background: transparent;
+  cursor: default;
+  opacity: 0.55;
+}
 .pill[aria-pressed="true"] {
   background: var(--accent-bg);
   border-color: var(--accent);
