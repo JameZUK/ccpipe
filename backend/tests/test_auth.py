@@ -107,6 +107,29 @@ def test_login_blocked_without_csrf_header(app_env_creds):
         assert "csrf" in r.json()["detail"]
 
 
+def test_login_rejects_oversized_body(app_env_creds):
+    """Login must refuse bodies above the documented cap so a misbehaving
+    or hostile client can't force the worker to buffer an arbitrary-size
+    body in memory before the throttle decides anything.
+
+    Two paths each reject independently: the Content-Length pre-check in
+    main.py:_cap_auth_login_body (returns a plain-text 413 before the
+    route ever runs) and the streaming read in routes/auth.py:auth_login
+    (closes the chunked-encoding / missing-Content-Length gap, returns a
+    JSON 413 with a `detail` field). This test covers the honest-CL path;
+    chunked-encoding tests are awkward to drive from TestClient."""
+    with TestClient(app_env_creds) as c:
+        huge_password = "a" * (128 * 1024)
+        r = c.post("/api/auth/login",
+                   headers={"X-Requested-By": "ccpipe"},
+                   json={"username": "alice", "password": huge_password})
+        assert r.status_code == 413, r.text
+        # Either path returns a body containing "too large"; the
+        # middleware uses plaintext and the route uses JSON, so just
+        # assert against the response text directly.
+        assert "too large" in r.text.lower()
+
+
 def test_logout_clears_session(app_env_creds):
     with TestClient(app_env_creds) as c:
         c.post("/api/auth/login", headers={"X-Requested-By": "ccpipe"}, json={"username": "alice", "password": "letmein"})

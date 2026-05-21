@@ -73,6 +73,15 @@ _LOGIN_BUCKET_WINDOW_S = 60.0
 # quadratic in bucket length per call.
 _login_attempts: dict[str, deque[float]] = {}
 
+# Hard cap on the /api/auth/login request body read here in the route.
+# Aligns with the Content-Length pre-check at main.py:_cap_auth_login_body
+# (4 KiB); the middleware catches the easy case where the client honestly
+# declares the body size. This streamed read closes the chunked-encoding
+# / missing-Content-Length gap: without it, ``await request.body()`` would
+# happily buffer an arbitrary-size chunked body before the JSON parser
+# rejects it — defeating the same DoS the middleware exists to prevent.
+_LOGIN_MAX_BODY_BYTES = 4 * 1024
+
 # Global ceiling that complements the per-IP bucket. The per-IP limit
 # alone is bypassed when ccpipe sits behind nginx (the documented
 # deployment), where request.client.host is always the loopback /
@@ -189,7 +198,19 @@ async def auth_login(request: Request) -> AuthStatus:
     # parse_float catches overflow) and treat any failure as 400 — same
     # semantic class as "wrong credentials" from the attacker's POV.
     try:
-        raw = await request.body()
+        # Read with a hard byte cap. main.py's _cap_auth_login_body
+        # middleware already rejects bodies that honestly declare a
+        # Content-Length above the cap; this loop closes the
+        # chunked-encoding / missing-Content-Length gap so an attacker
+        # can't bypass the cap by lying about (or omitting) the body size.
+        raw = b""
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            raw += chunk
+            if len(raw) > _LOGIN_MAX_BODY_BYTES:
+                await asyncio.sleep(1.0)
+                raise HTTPException(status_code=413, detail="request too large")
         data = (
             json.loads(
                 raw,

@@ -189,6 +189,11 @@ def save(config: AppConfig) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(config.to_dict(), indent=2).encode() + b"\n")
+        # fsync before close — a hard power loss between write() and
+        # replace() can otherwise publish a zero-length config file,
+        # which load() will treat as malformed and silently revert all
+        # of the user's persisted settings to defaults.
+        os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, path)

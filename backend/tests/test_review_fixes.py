@@ -470,6 +470,36 @@ def test_old_session_invalidated_after_credential_change(authed_client):
     assert r.json()["authenticated"] is False
 
 
+def test_new_password_logs_in_old_env_password_does_not(authed_client):
+    """A successful password change must actually take effect — the new
+    password logs in, the old one (which here is the env-pinned bootstrap
+    password) does not. The existing
+    ``test_old_session_invalidated_after_credential_change`` checks that
+    the old *cookie* is rejected, but it kept passing even while
+    ``_resolve_credential`` silently re-applied ``CCPIPE_AUTH_PASSWORD``
+    on every read, because the route also clears the request session.
+    This test exercises the part that was actually broken: a fresh login
+    with the new credentials."""
+    r = authed_client.post("/api/auth/credentials",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "newPassword": "letmein-v2"})
+    assert r.status_code == 200, r.json()
+
+    # New password must work.
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein-v2"})
+    assert r.status_code == 200, r.json()
+    assert r.json()["authenticated"] is True
+
+    # Old (env bootstrap) password must NOT work anymore.
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein"})
+    assert r.status_code == 401
+
+
 def test_update_credential_rejects_short_password(authed_client):
     r = authed_client.post("/api/auth/credentials",
                             headers={"X-Requested-By": "ccpipe"},
@@ -1120,3 +1150,58 @@ def test_malformed_login_bodies_count_toward_rate_limit(authed_client):
 
 
 # ── #21 reconnect debounce is a frontend-only concern; verified by inspection.
+
+
+# ── Multi-worker warning ─────────────────────────────────────────────────
+
+def _capture_warn_if_multi_worker() -> str:
+    """Call _warn_if_multi_worker with a fresh handler attached so we can
+    capture its output regardless of the ccpipe logger's propagate flag.
+    pytest's caplog hooks the root logger, but ccpipe.main sets
+    propagate=False on its own logger, so caplog never sees these lines."""
+    import io
+    import logging
+    from ccpipe.main import _warn_if_multi_worker
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.WARNING)
+    logger = logging.getLogger("ccpipe")
+    logger.addHandler(handler)
+    try:
+        _warn_if_multi_worker()
+    finally:
+        logger.removeHandler(handler)
+    return buf.getvalue()
+
+
+def test_multi_worker_warning_fires_under_web_concurrency(monkeypatch):
+    """If WEB_CONCURRENCY > 1, the lifespan must loudly warn the operator
+    that ccpipe's module-level state (login throttle, credential cache,
+    mic FIFO, TTS observer, tmux control client) is per-process and
+    silently desyncs across workers. The default unit doesn't set
+    --workers; this guards against a drop-in adding it without anyone
+    noticing the security regression that follows."""
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    monkeypatch.setattr("sys.argv", ["uvicorn", "ccpipe.main:app"])
+    out = _capture_warn_if_multi_worker()
+    assert "4 worker processes" in out
+    assert "throttle" in out
+
+
+def test_multi_worker_warning_silent_for_single_worker(monkeypatch):
+    """The opposite assertion — no warning when WEB_CONCURRENCY is unset
+    or 1, so the warning doesn't fire on every default install."""
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.setattr("sys.argv", ["uvicorn", "ccpipe.main:app"])
+    out = _capture_warn_if_multi_worker()
+    assert "worker processes" not in out
+
+
+def test_multi_worker_warning_fires_under_workers_argv(monkeypatch):
+    """Catches --workers passed on the command line (the systemd
+    drop-in flavour) even when WEB_CONCURRENCY is unset."""
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.setattr("sys.argv",
+                         ["uvicorn", "--workers", "3", "ccpipe.main:app"])
+    out = _capture_warn_if_multi_worker()
+    assert "3 worker processes" in out
