@@ -39,8 +39,8 @@ from ..auth import (
     totp_generate_secret,
     totp_provisioning_uri,
     totp_verify,
-    update_credential,
-    verify_credential,
+    update_credential_async,
+    verify_credential_async,
 )
 
 log = logging.getLogger(__name__)
@@ -62,10 +62,16 @@ async def auth_status(request: Request) -> AuthStatus:
     )
 
 
-# Per-client-IP login rate limiter. Per-IP rather than global so a
-# distributed brute-force across the LAN gets one attempt budget per
-# source, and a legitimate user retrying their password doesn't lock
-# out the whole tenant. Bucket = 5 attempts per minute, window slides.
+# Per-client-IP credential-check rate limiter. Per-IP rather than global
+# so a distributed brute-force across the LAN gets one attempt budget per
+# source, and a legitimate user retrying their password doesn't lock out
+# the whole tenant. Bucket = 5 attempts per minute, window slides.
+#
+# Shared between /api/auth/login AND the four authenticated re-verify
+# endpoints (/credentials, /totp/enroll, /totp/confirm, /totp/disable).
+# Without sharing, an attacker holding a stolen session cookie could use
+# the re-verify endpoints to brute-force the current password at unmetered
+# rate, bypassing the /login budget entirely (review H2).
 _LOGIN_BUCKET_MAX = 5
 _LOGIN_BUCKET_WINDOW_S = 60.0
 # deque, not list — popleft() is O(1) where list.pop(0) is O(n).
@@ -134,6 +140,28 @@ def _login_throttle_ok(ip: str) -> bool:
     bucket.append(now)
     _global_login_attempts.append(now)
     return True
+
+
+async def _enforce_throttle(request: Request, endpoint: str) -> None:
+    """Trip the shared credential-check throttle. Used by /login and by
+    the four authenticated re-verify endpoints (H2). Raises 429 with a
+    1-second async penalty when the bucket is full.
+
+    ``endpoint`` is logged only — the bucket is keyed by client IP, not
+    by endpoint, so an attacker can't farm a fresh budget by rotating
+    through /credentials → /totp/enroll → /totp/confirm → /totp/disable
+    after burning the /login bucket."""
+    client_ip = (request.client.host if request.client else "") or "unknown"
+    if not _login_throttle_ok(client_ip):
+        log.warning("cred-check throttle tripped for ip=%s endpoint=%s "
+                     "(per-IP %d/%ds + global %d/%ds)",
+                     client_ip, endpoint,
+                     _LOGIN_BUCKET_MAX, int(_LOGIN_BUCKET_WINDOW_S),
+                     _GLOBAL_LOGIN_MAX, int(_GLOBAL_LOGIN_WINDOW_S))
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=429,
+                            detail="too many attempts; try again in a minute",
+                            headers={"Retry-After": str(int(_LOGIN_BUCKET_WINDOW_S))})
 
 
 def _reject_non_finite_json_const(name: str) -> float:
@@ -217,7 +245,10 @@ async def auth_login(request: Request) -> AuthStatus:
     # validate password AND code together and return a single uniform
     # 401 on any failure (wrong password, missing/wrong code), so the
     # response distinguishes only "authenticated" vs "not".
-    password_ok = verify_credential(body.username, body.password)
+    # Argon2 verify on a worker thread (H3) so the 50–200 ms hash cost
+    # doesn't freeze the event loop for every concurrent PTY / WS / TTS
+    # consumer while a login is in flight.
+    password_ok = await verify_credential_async(body.username, body.password)
     cred = get_credential()
     if cred.totp_secret:
         # When TOTP is enrolled, a missing or wrong code is just another
@@ -275,14 +306,15 @@ class TotpDisableBody(BaseModel):
 
 
 @router.post("/api/auth/totp/enroll", dependencies=[AuthDep, CsrfDep])
-async def totp_enroll(body: TotpEnrollBody) -> dict[str, str]:
+async def totp_enroll(body: TotpEnrollBody, request: Request) -> dict[str, str]:
     """Generate a fresh TOTP secret and return it along with the
     otpauth:// provisioning URI for QR rendering. The secret is NOT
     persisted yet — the client must round-trip it back through
     /api/auth/totp/confirm with a working code first, which proves the
     user actually scanned the QR and their authenticator is in sync."""
+    await _enforce_throttle(request, "totp_enroll")
     cred = get_credential()
-    if not verify_credential(cred.username, body.currentPassword):
+    if not await verify_credential_async(cred.username, body.currentPassword):
         await asyncio.sleep(1.0)
         raise HTTPException(status_code=401, detail="current password is wrong")
     secret = totp_generate_secret()
@@ -306,7 +338,7 @@ async def totp_enroll(body: TotpEnrollBody) -> dict[str, str]:
 
 
 @router.post("/api/auth/totp/confirm", dependencies=[AuthDep, CsrfDep])
-async def totp_confirm_endpoint(body: TotpConfirmBody) -> dict[str, bool]:
+async def totp_confirm_endpoint(body: TotpConfirmBody, request: Request) -> dict[str, bool]:
     """Validate a 6-digit code against the provided candidate secret
     BEFORE persisting it — if the user's authenticator app drifted or
     they scanned the wrong QR, we want to fail loudly here instead of
@@ -317,8 +349,9 @@ async def totp_confirm_endpoint(body: TotpConfirmBody) -> dict[str, bool]:
     choosing and lock the legitimate user out.
     """
     import pyotp
+    await _enforce_throttle(request, "totp_confirm")
     cred = get_credential()
-    if not verify_credential(cred.username, body.currentPassword):
+    if not await verify_credential_async(cred.username, body.currentPassword):
         await asyncio.sleep(1.0)
         raise HTTPException(status_code=401, detail="current password is wrong")
     secret = (body.secret or "").strip()
@@ -341,7 +374,7 @@ async def totp_confirm_endpoint(body: TotpConfirmBody) -> dict[str, bool]:
 
 
 @router.post("/api/auth/totp/disable", dependencies=[AuthDep, CsrfDep])
-async def totp_disable_endpoint(body: TotpDisableBody) -> dict[str, bool]:
+async def totp_disable_endpoint(body: TotpDisableBody, request: Request) -> dict[str, bool]:
     """Disable TOTP. Requires BOTH the current password AND a valid
     current code, so a stolen session cookie alone can't unenroll
     two-factor protection (which would then let the attacker keep
@@ -349,7 +382,8 @@ async def totp_disable_endpoint(body: TotpDisableBody) -> dict[str, bool]:
     cred = get_credential()
     if not cred.totp_secret:
         return {"enrolled": False}
-    if not verify_credential(cred.username, body.currentPassword):
+    await _enforce_throttle(request, "totp_disable")
+    if not await verify_credential_async(cred.username, body.currentPassword):
         await asyncio.sleep(1.0)
         raise HTTPException(status_code=401, detail="current password is wrong")
     if not totp_verify(body.code):
@@ -365,12 +399,35 @@ class ChangeCredentialBody(BaseModel):
     currentPassword: str
     newUsername: str | None = None
     newPassword: str | None = None
+    # TOTP code, required when 2FA is enrolled. See H1.
+    code: str | None = None
 
 
 @router.post("/api/auth/credentials", dependencies=[AuthDep, CsrfDep])
 async def auth_change_credentials(body: ChangeCredentialBody,
                                    request: Request) -> dict[str, bool]:
-    ok, msg = update_credential(
+    # H2: shared credential-check throttle. Without it, an attacker
+    # with a stolen session cookie can brute-force the current password
+    # at unmetered rate through this endpoint — the /login budget
+    # protects neither the password nor the TOTP secret here.
+    await _enforce_throttle(request, "change_credentials")
+
+    # H1: when TOTP is enrolled, require a valid current code BEFORE
+    # changing the password. Without this, an attacker who learned the
+    # password (phishing, reuse) plus a session cookie (XSS, shared
+    # device) can rotate the password to one they control, carry the
+    # legitimate TOTP secret forward, bump the credential version and
+    # lock the legitimate user out — exactly the scenario TOTP exists
+    # to neutralise. Mirror the totp_disable_endpoint shape.
+    cred = get_credential()
+    if cred.totp_secret:
+        code = (body.code or "").strip()
+        if not (code and totp_verify(code)):
+            await asyncio.sleep(1.0)
+            raise HTTPException(status_code=401, detail="invalid TOTP code")
+
+    # H3: argon2 verify+hash off the event loop.
+    ok, msg = await update_credential_async(
         current_password=body.currentPassword,
         new_username=body.newUsername,
         new_password=body.newPassword,

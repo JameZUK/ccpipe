@@ -32,6 +32,7 @@ The session secret used to sign cookies is handled separately in
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -608,6 +609,38 @@ def update_credential(*, current_password: str,
         return False, f"failed to write credentials: {exc}"
     reset_cached_credential()
     return True, "updated"
+
+
+# ─── Async wrappers (H3 — argon2 off the event loop) ───────────────────────
+#
+# argon2.PasswordHasher.verify / hash are CPU-bound C+Python work, typically
+# 50–200 ms on commodity hardware and 1–2 s on a Pi. Running them directly
+# inside an async handler freezes the entire uvicorn worker for the
+# duration — PTY pumps stall, WS pings miss, TTS chunks pause. The wrong-
+# username branch of ``verify_credential`` runs the same expensive op
+# against a decoy hash for timing equivalence, doubling the freeze on
+# failed logins. Offloading to ``asyncio.to_thread`` keeps the loop
+# responsive while preserving the constant-time decoy-verify defence.
+
+async def verify_credential_async(username: str, password: str) -> bool:
+    """Argon2-based credential verify on a worker thread."""
+    return await asyncio.to_thread(verify_credential, username, password)
+
+
+async def update_credential_async(*, current_password: str,
+                                    new_username: str | None,
+                                    new_password: str | None) -> tuple[bool, str]:
+    """Atomic credential update on a worker thread — includes argon2 verify
+    of the current password, an optional argon2 verify against the stored
+    hash to detect "same password" on rename-only updates, and an argon2
+    hash of the new password. Three argon2 ops on a slow Pi can add up to
+    half a second; we don't want any of that on the event loop."""
+    return await asyncio.to_thread(
+        update_credential,
+        current_password=current_password,
+        new_username=new_username,
+        new_password=new_password,
+    )
 
 
 # ─── FastAPI types & deps ──────────────────────────────────────────────────

@@ -551,6 +551,12 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
         <span class="row__label">New password (optional)</span>
         <input type="password" name="newPassword" class="input" autocomplete="new-password"/>
       </label>
+      <label class="row" data-role="totp-row" hidden>
+        <span class="row__label">2FA code</span>
+        <input type="text" name="code" class="input" inputmode="numeric"
+               autocomplete="one-time-code" pattern="[0-9]*" maxlength="8"
+               placeholder="6-digit code"/>
+      </label>
     </div>
     <div class="modal__row-actions">
       <span class="modal__status" data-role="account-status"></span>
@@ -563,8 +569,21 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
   const currentPw = sec.querySelector<HTMLInputElement>("input[name=currentPassword]")!;
   const newUser = sec.querySelector<HTMLInputElement>("input[name=newUsername]")!;
   const newPw = sec.querySelector<HTMLInputElement>("input[name=newPassword]")!;
+  const code = sec.querySelector<HTMLInputElement>("input[name=code]")!;
+  const totpRow = sec.querySelector<HTMLElement>("[data-role=totp-row]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
   const signOutBtn = sec.querySelector<HTMLButtonElement>("[data-role=signout]")!;
+
+  // Reveal the 2FA code input when the account has TOTP enrolled (H1).
+  // /api/auth/status surfaces otp_enrolled only for authenticated callers,
+  // which we are inside the settings modal.
+  (async () => {
+    try {
+      const r = await fetch("/api/auth/status", { credentials: "same-origin" });
+      const s = await r.json();
+      if (s && s.otp_enrolled) totpRow.hidden = false;
+    } catch { /* leave hidden — server will reject with 401 if needed */ }
+  })();
 
   saveBtn.addEventListener("click", async () => {
     status.classList.remove("modal__status--error");
@@ -584,6 +603,7 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
       currentPassword: currentPw.value,
       newUsername: newUser.value || undefined,
       newPassword: newPw.value || undefined,
+      code: code.value.trim() || undefined,
     });
     saveBtn.disabled = false;
     if ("error" in result) {

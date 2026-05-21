@@ -70,6 +70,9 @@ export async function changeCredentials(body: {
   currentPassword: string;
   newUsername?: string;
   newPassword?: string;
+  // Required by the backend when TOTP is enrolled (H1). The settings
+  // UI reveals the input only when /api/auth/status reports otp_enrolled.
+  code?: string;
 }): Promise<{ updated: true } | { error: string }> {
   const res = await fetch("/api/auth/credentials", {
     method: "POST",

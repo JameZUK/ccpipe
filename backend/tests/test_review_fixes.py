@@ -298,6 +298,13 @@ def test_login_wrong_code_and_missing_code_indistinguishable(authed_client):
     authed_client.post("/api/auth/logout",
                        headers={"X-Requested-By": "ccpipe"})
 
+    # The credential-check throttle now spans /login AND the four
+    # re-verify endpoints (H2). The enroll+confirm setup above consumed
+    # two slots; reset before exercising the indistinguishability
+    # invariant so the third login probe doesn't 429 instead of 401.
+    import ccpipe.routes.auth as routes_auth
+    routes_auth.reset_throttle_state()
+
     headers = {"X-Requested-By": "ccpipe"}
     # Wrong password (any code).
     r_wp = authed_client.post("/api/auth/login", headers=headers,
@@ -1390,6 +1397,208 @@ def test_fs_write_blocks_injected_intermediate_swap(authed_client, tmp_path, mon
     assert "symlink" in r.json()["detail"].lower()
     # And no file was created at the attacker-controlled location.
     assert not target.exists()
+
+
+# ── H1: /api/auth/credentials must require TOTP code when enrolled ──────
+
+def _enrol_totp(authed_client) -> str:
+    """Helper: enrol + confirm TOTP on the test account. Returns the
+    persisted secret. Resets the throttle on the way out so callers can
+    exercise login/re-verify flows without bumping into the shared bucket
+    (H2 throttle is per-IP across login + the four re-verify routes)."""
+    import pyotp, ccpipe.routes.auth as routes_auth
+    r = authed_client.post("/api/auth/totp/enroll",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein"})
+    assert r.status_code == 200, r.text
+    secret = r.json()["secret"]
+    code = pyotp.TOTP(secret).now()
+    r = authed_client.post("/api/auth/totp/confirm",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "secret": secret, "code": code})
+    assert r.status_code == 200, r.text
+    # /confirm bumps the credential version → existing cookie now stale.
+    # Log back in with the new TOTP so the rest of the test can act
+    # authenticated.
+    import time as _t
+    _t.sleep(1.0)  # avoid the burn-list refusing the same code we just used
+    routes_auth.reset_throttle_state()
+    code = pyotp.TOTP(secret).now()
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein",
+                                  "code": code})
+    assert r.status_code == 200, r.text
+    routes_auth.reset_throttle_state()
+    return secret
+
+
+def test_h1_change_credentials_without_totp_code_rejected_when_enrolled(authed_client):
+    """When TOTP is enrolled, /api/auth/credentials MUST refuse a
+    password change submitted without a TOTP code. Pre-fix, an attacker
+    holding (stolen session cookie + leaked password) could rotate the
+    password and lock the legitimate user out, bypassing the second
+    factor."""
+    _enrol_totp(authed_client)
+    r = authed_client.post("/api/auth/credentials",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "newPassword": "attacker-pw-v2"})
+    assert r.status_code == 401, r.text
+    assert "totp" in r.json()["detail"].lower()
+
+
+def test_h1_change_credentials_with_wrong_totp_code_rejected(authed_client):
+    _enrol_totp(authed_client)
+    r = authed_client.post("/api/auth/credentials",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "newPassword": "attacker-pw-v2",
+                                  "code": "000000"})
+    assert r.status_code == 401, r.text
+
+
+def test_h1_change_credentials_with_valid_totp_code_succeeds(authed_client):
+    """Positive control: a legitimate password change WITH a valid TOTP
+    code must succeed. Otherwise the H1 gate is just a denial-of-service."""
+    import pyotp, ccpipe.routes.auth as routes_auth
+    secret = _enrol_totp(authed_client)
+    # Use a fresh code (the one used during enrol+login is on the burn-list).
+    import time as _t; _t.sleep(31)  # next 30-second slot
+    code = pyotp.TOTP(secret).now()
+    routes_auth.reset_throttle_state()
+    r = authed_client.post("/api/auth/credentials",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "newPassword": "letmein-rotated",
+                                  "code": code})
+    assert r.status_code == 200, r.text
+    assert r.json()["updated"] is True
+
+
+def test_h1_change_credentials_without_totp_when_not_enrolled_unchanged(authed_client):
+    """Without TOTP enrolled, /api/auth/credentials must keep working
+    as before — the H1 gate fires only when ``cred.totp_secret`` is set."""
+    r = authed_client.post("/api/auth/credentials",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "newPassword": "letmein-rotated"})
+    assert r.status_code == 200, r.text
+
+
+# ── H2: shared credential-check throttle across login + re-verify ───────
+
+def test_h2_credentials_brute_force_trips_throttle(authed_client):
+    """The pre-fix path: an attacker with a session cookie could brute-
+    force the current password through /api/auth/credentials at unmetered
+    rate. With the H2 shared throttle, the 6th currentPassword attempt
+    on a single source IP must 429."""
+    import ccpipe.routes.auth as routes_auth
+    routes_auth.reset_throttle_state()
+    headers = {"X-Requested-By": "ccpipe"}
+    statuses = []
+    for _ in range(7):
+        r = authed_client.post("/api/auth/credentials", headers=headers,
+            json={"currentPassword": "WRONG", "newPassword": "x"})
+        statuses.append(r.status_code)
+    assert 429 in statuses, f"expected 429 in {statuses}"
+
+
+def test_h2_totp_disable_brute_force_trips_throttle(authed_client):
+    """Same protection on /totp/disable — an attacker who picks the
+    Disable button as their oracle should hit the same wall."""
+    _enrol_totp(authed_client)
+    headers = {"X-Requested-By": "ccpipe"}
+    statuses = []
+    for _ in range(7):
+        r = authed_client.post("/api/auth/totp/disable", headers=headers,
+            json={"currentPassword": "WRONG", "code": "000000"})
+        statuses.append(r.status_code)
+    assert 429 in statuses, f"expected 429 in {statuses}"
+
+
+def test_h2_login_and_re_verify_share_one_bucket(authed_client):
+    """If /login and /credentials had separate buckets, an attacker
+    could rotate between endpoints to double their attempts. They share
+    one IP-keyed bucket — verify by burning login attempts THEN
+    confirming the next /credentials POST 429s, not 401s."""
+    import ccpipe.routes.auth as routes_auth
+    routes_auth.reset_throttle_state()
+    headers = {"X-Requested-By": "ccpipe"}
+    # Fill the bucket via /login (5 attempts; 5/5).
+    for _ in range(5):
+        authed_client.post("/api/auth/login", headers=headers,
+            json={"username": "alice", "password": "WRONG"})
+    # The next /credentials POST must 429 — bucket is full from the
+    # shared budget.
+    r = authed_client.post("/api/auth/credentials", headers=headers,
+        json={"currentPassword": "WRONG", "newPassword": "x"})
+    assert r.status_code == 429, r.text
+
+
+# ── H3: argon2 verify runs on a worker thread ───────────────────────────
+
+def test_h3_verify_credential_runs_on_worker_thread(monkeypatch):
+    """Pre-fix, argon2.verify ran on the asyncio event loop, freezing
+    the worker for 50–200 ms per attempt. The async wrapper offloads
+    to a thread via asyncio.to_thread — verify by introspecting the
+    thread the sync verify ran on, via the module-level _verify_password
+    indirection (the PasswordHasher's own .verify is C-slotted and not
+    monkeypatchable)."""
+    import asyncio, threading
+    from ccpipe import auth as auth_mod
+
+    main_ident = threading.main_thread().ident
+    samples: list[int] = []
+    real = auth_mod._verify_password
+    def observing(candidate: str, stored_hash: str) -> bool:
+        samples.append(threading.current_thread().ident)
+        return real(candidate, stored_hash)
+    monkeypatch.setattr(auth_mod, "_verify_password", observing)
+
+    async def go():
+        return await auth_mod.verify_credential_async("nobody", "irrelevant")
+    asyncio.run(go())
+
+    assert samples, "_verify_password was never called"
+    assert all(t != main_ident for t in samples), (
+        f"argon2 verify ran on the main thread; samples={samples}. "
+        f"H3 wrapper not in effect.")
+
+
+def test_h3_update_credential_runs_on_worker_thread(tmp_path, monkeypatch):
+    """Same check for update_credential_async — it runs argon2 hash +
+    verify, which are also CPU-heavy and must not block the loop."""
+    import asyncio, threading
+    monkeypatch.setenv("CCPIPE_SESSION_SECRET_FILE", str(tmp_path / "s"))
+    monkeypatch.setenv("CCPIPE_CREDENTIALS_FILE", str(tmp_path / "c"))
+    monkeypatch.setenv("CCPIPE_AUTH_USERNAME", "alice")
+    monkeypatch.setenv("CCPIPE_AUTH_PASSWORD", "letmein")
+    from ccpipe import auth as auth_mod
+    auth_mod.reset_cached_credential()
+    # Force first resolve so the credentials file exists on disk.
+    auth_mod.get_credential()
+
+    main_ident = threading.main_thread().ident
+    samples: list[int] = []
+    real = auth_mod._verify_password
+    def observing(candidate: str, stored_hash: str) -> bool:
+        samples.append(threading.current_thread().ident)
+        return real(candidate, stored_hash)
+    monkeypatch.setattr(auth_mod, "_verify_password", observing)
+
+    async def go():
+        return await auth_mod.update_credential_async(
+            current_password="letmein",
+            new_username=None,
+            new_password="letmein-v2",
+        )
+    ok, msg = asyncio.run(go())
+    assert ok, msg
+    assert samples, "_verify_password never called inside update_credential"
+    assert all(t != main_ident for t in samples), (
+        f"update_credential ran argon2 on main thread; samples={samples}")
 
 
 def test_fs_download_blocks_injected_intermediate_swap(authed_client, tmp_path, monkeypatch):
