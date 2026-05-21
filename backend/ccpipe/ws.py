@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 import time
 from collections import deque
 from collections.abc import Callable
@@ -25,6 +26,15 @@ from .pty_relay import PtyProcess, pump
 from .tmux_control import TmuxEvent, control_client
 from .tts import tts_service
 
+# macOS uses a different mic backend (in-memory PCM buffer +
+# whisper-cpp local transcription) because claude's /voice keybinding
+# handler is upstream-broken — see transcriber_macos.py for the full
+# story. The Linux import path doesn't pull the transcriber module in.
+if sys.platform == "darwin":
+    from .transcriber_macos import MicTranscriber
+else:
+    MicTranscriber = None  # type: ignore[misc,assignment]
+
 log = logging.getLogger(__name__)
 
 # Binary frame type prefixes (1 byte). The first byte is the channel
@@ -37,9 +47,16 @@ FRAME_MIC_PCM    = 0x01    # client → server, Int16 PCM mic audio
 FRAME_TTS_AUDIO  = 0x02    # server → client, encoded TTS audio chunk
 FRAME_PTY_OUTPUT = 0x00    # server → client, raw PTY bytes — see comment
 
-# Process-wide singleton; mic plumbing is shared across WS clients because
-# Pulse's pipe-source is a single FIFO on disk.
-_mic_writer = MicWriter()
+# Process-wide singleton; the mic backend is shared across WS clients
+# because the underlying resource is shared too (Pulse pipe-source on
+# Linux, the local transcriber on macOS — only one whisper
+# subprocess can usefully run at a time anyway). The macOS branch
+# returns a MicTranscriber that exposes the same write/reset/stats
+# surface as MicWriter, so the rest of this file is platform-agnostic.
+_mic_writer: MicWriter = (
+    MicTranscriber() if sys.platform == "darwin" and MicTranscriber is not None
+    else MicWriter()
+)
 
 # Tracks which WS connection (if any) currently owns the mic. Two
 # simultaneous WS clients writing into the same FIFO interleave Int16
@@ -552,32 +569,53 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                 # client is no longer involved in the release timing.
                 if '"type":"mic_stop"' in text or '"type": "mic_stop"' in text:
                     if _mic_owner is mic_token:
-                        # Use a local module reference so reload-during-
-                        # dev (importlib.reload) picks up edits.
-                        from . import config as _app_config
-                        cfg = _app_config.load().mic
-                        drain_s = _mic_writer.estimate_drain_seconds()
-                        pad_s = cfg.drain_pad_ms / 1000.0
-                        total = drain_s + pad_s
-                        log.info(
-                            "mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs",
-                            _mic_writer.bytes_written,
-                            _mic_writer.drops, drain_s, pad_s, total,
-                        )
-                        _mic_writer.reset()
-                        _mic_owner = None
-                        # Track the release task so the `finally` block
-                        # can cancel it on disconnect, and only write
-                        # Esc k if this handler is still the most-recent
-                        # authoritative owner at fire-time.
-                        rel_task = asyncio.create_task(
-                            _release_ptt_after(
-                                pty_proc, total,
-                                still_authoritative=lambda: _mic_owner is None,
+                        if sys.platform == "darwin":
+                            # macOS: no Pulse pipeline to drain. The
+                            # MicTranscriber holds the entire utterance
+                            # in memory; hand it off to whisper-cpp
+                            # asynchronously and let it type the result
+                            # into the PTY when transcription finishes.
+                            # Fire-and-forget so the WS receive loop
+                            # stays responsive; whisper is ~real-time
+                            # on Apple Silicon (1-2 s for short
+                            # utterances on base.en).
+                            log.info(
+                                "mic_stop: bytes=%d drops=%d → local transcribe",
+                                _mic_writer.bytes_written, _mic_writer.drops,
                             )
-                        )
-                        pending_releases.add(rel_task)
-                        rel_task.add_done_callback(pending_releases.discard)
+                            asyncio.create_task(_mic_writer.finalize(pty_proc))  # type: ignore[attr-defined]
+                            _mic_owner = None
+                        else:
+                            # Linux: drain Pulse, wait the configured
+                            # pad for claude's STT to finalise, then
+                            # write the release keystroke. Use a local
+                            # module reference so reload-during-dev
+                            # (importlib.reload) picks up edits.
+                            from . import config as _app_config
+                            cfg = _app_config.load().mic
+                            drain_s = _mic_writer.estimate_drain_seconds()
+                            pad_s = cfg.drain_pad_ms / 1000.0
+                            total = drain_s + pad_s
+                            log.info(
+                                "mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs",
+                                _mic_writer.bytes_written,
+                                _mic_writer.drops, drain_s, pad_s, total,
+                            )
+                            _mic_writer.reset()
+                            _mic_owner = None
+                            # Track the release task so the `finally`
+                            # block can cancel it on disconnect, and
+                            # only write Esc k if this handler is
+                            # still the most-recent authoritative
+                            # owner at fire-time.
+                            rel_task = asyncio.create_task(
+                                _release_ptt_after(
+                                    pty_proc, total,
+                                    still_authoritative=lambda: _mic_owner is None,
+                                )
+                            )
+                            pending_releases.add(rel_task)
+                            rel_task.add_done_callback(pending_releases.discard)
                     continue
                 # Re-check the session on every non-intercepted text
                 # frame (typically `input`). Without this, a credential
@@ -871,6 +909,17 @@ def _handle_client_text(text: str, pty_proc: PtyProcess) -> None:
         case "input":
             data = msg.get("data", "")
             if isinstance(data, str):
+                # macOS: swallow the /voice trigger keystroke (ESC k,
+                # i.e. meta+k) at both edges. The frontend still sends
+                # it to arm/disarm tap mode on Linux, but the macOS
+                # backend transcribes locally and types the result
+                # into the PTY itself — claude's own /voice never
+                # gets involved. Forwarding meta+k would either be a
+                # no-op (today, since /voice is upstream-broken) or
+                # worse, double-trigger if Anthropic ships a fix
+                # mid-deploy.
+                if sys.platform == "darwin" and data == "\x1bk":
+                    return
                 pty_proc.write(data.encode("utf-8"))
         case "resize":
             try:

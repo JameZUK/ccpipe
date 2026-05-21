@@ -96,7 +96,7 @@ Android, iOS) — that side is OS-agnostic.
 | Linux | Fully tested, this is what's actively used. |
 | Windows via WSL2 | Should work — see below. Not tested by the maintainer; reports welcome. |
 | Windows (native) | Not supported. Use WSL2 — a native port would have to replace systemd, the FIFO mic, PulseAudio, and the bash install script. |
-| macOS | Plausible but not yet wired up. Untested. PRs welcome — see below. |
+| macOS | Experimental. launchd LaunchAgent + local whisper-cpp transcription. Ported without a Mac to test on; first real user gets to find the rough edges. See [`docs/macos.md`](docs/macos.md). |
 
 ### Windows (via WSL2)
 
@@ -118,22 +118,28 @@ it, please report back.
 
 ### macOS
 
-The Python backend itself should run unmodified. Two pieces of
-plumbing are Linux-specific and would need macOS equivalents:
+ccpipe runs as a `launchd` LaunchAgent under
+`~/Library/LaunchAgents/`. Voice differs from Linux because `claude`'s
+built-in `/voice` has an unfixed regression on macOS
+([anthropics/claude-code#38690](https://github.com/anthropics/claude-code/issues/38690)) —
+ccpipe transcribes locally via [whisper-cpp](https://github.com/ggerganov/whisper.cpp)
+and types the result into the PTY. No virtual audio device or
+Microphone-permission-on-Terminal-app dance needed.
 
-- **Service supervisor.** The two systemd unit templates
-  (`systemd/*.service.in`) need launchd plist twins, and
-  `scripts/install.sh` needs to detect the platform and render the
-  right pair.
-- **Virtual microphone.** PulseAudio's `module-pipe-source` doesn't
-  exist on CoreAudio. The likely path is
-  [BlackHole](https://github.com/ExistentialAudio/BlackHole) for the
-  virtual audio device plus a small bridge process that reads from
-  the FIFO (`/tmp/ccpipe_mic.pipe`) and writes 16 kHz mono Int16 PCM
-  into BlackHole's input — a few lines of `sox`/`ffmpeg`, or a small
-  Swift/Go helper.
+Prereqs:
 
-If you have a Mac and want this, please open a PR.
+```bash
+brew install python@3.11 node tmux whisper-cpp
+brew install --cask claude-code   # if not already
+```
+
+Then follow the standard [Install](#install) steps below. `install.sh`
+detects macOS, renders the launchd plist, and downloads the whisper
+`base.en` model (~148 MB, sha256-pinned, one-time). Full design,
+troubleshooting, and config knobs live in [`docs/macos.md`](docs/macos.md).
+
+This port hasn't been tested on real Apple hardware — bug reports from
+first-time users welcome.
 
 ## Install
 
