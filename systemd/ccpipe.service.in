@@ -62,13 +62,20 @@ Environment=CCPIPE_TTS_VOICE=bf_emma
 # initial_password.txt (mode 0400). Read it, then `shred -u` the
 # sidecar.
 #
-# To pin the credentials in advance (e.g. provisioning), use a drop-in
+# To pin the *initial* credentials (e.g. provisioning), use a drop-in
 # with mode 0600 — NOT this version-controlled file:
 #     mkdir -p ~/.config/systemd/user/ccpipe.service.d/
 #     printf "[Service]\nEnvironment=CCPIPE_AUTH_PASSWORD=hunter2\n" \
 #         > ~/.config/systemd/user/ccpipe.service.d/auth.conf
 #     chmod 600 ~/.config/systemd/user/ccpipe.service.d/auth.conf
 #     systemctl --user daemon-reload && systemctl --user restart ccpipe
+#
+# CCPIPE_AUTH_PASSWORD is **bootstrap-only**: it seeds the credentials
+# file when the file does not yet exist, then the file is authoritative.
+# Subsequent changes happen via Settings → Account in the UI. To re-seed
+# from env after the file exists, delete it
+# (`rm ~/.local/state/ccpipe/credentials`) and restart — that also
+# wipes any enrolled TOTP secret, by design.
 
 Restart=on-failure
 RestartSec=3

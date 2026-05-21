@@ -470,6 +470,59 @@ def test_old_session_invalidated_after_credential_change(authed_client):
     assert r.json()["authenticated"] is False
 
 
+def test_in_ui_password_change_persists_when_env_was_seed(authed_client, tmp_path, monkeypatch):
+    """A successful UI password change must actually take effect — the
+    new password logs in, the bootstrap env password no longer does.
+
+    Pre-fix, ``_resolve_credential`` ignored the file's ``password_hash``
+    in favour of ``CCPIPE_AUTH_PASSWORD`` on every read, so the route's
+    file rewrite was silently overridden on the next resolve. The
+    existing ``test_old_session_invalidated_after_credential_change``
+    kept passing because the route also clears the request session
+    (cookie invalidation) — independent from whether the new password
+    actually works on a fresh login.
+
+    This test exercises the part that was broken: log out, log back in
+    with the new credentials, then confirm the old (env-bootstrap)
+    password is rejected.
+    """
+    import ccpipe.auth as auth
+
+    # The authed_client fixture set CCPIPE_AUTH_PASSWORD=letmein and that
+    # value was used to seed the credentials file on first resolve. The
+    # bootstrap path persists; the next resolve comes from disk.
+    creds_path = tmp_path / "credentials"
+    assert creds_path.exists(), "fixture should have seeded the credentials file"
+
+    # Change the password through the UI route.
+    r = authed_client.post("/api/auth/credentials",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"currentPassword": "letmein",
+                                  "newPassword": "letmein-v2"})
+    assert r.status_code == 200, r.json()
+
+    # Drop the cached credential so the next verify_credential() goes
+    # back through _resolve_credential — the route already did this,
+    # but the assertion is about persistence across a resolve, so be
+    # explicit.
+    auth.reset_cached_credential()
+
+    # New password works.
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein-v2"})
+    assert r.status_code == 200, r.json()
+    assert r.json()["authenticated"] is True
+
+    # Old (bootstrap-env) password does not.
+    authed_client.post("/api/auth/logout",
+                       headers={"X-Requested-By": "ccpipe"})
+    r = authed_client.post("/api/auth/login",
+                            headers={"X-Requested-By": "ccpipe"},
+                            json={"username": "alice", "password": "letmein"})
+    assert r.status_code == 401
+
+
 def test_update_credential_rejects_short_password(authed_client):
     r = authed_client.post("/api/auth/credentials",
                             headers={"X-Requested-By": "ccpipe"},

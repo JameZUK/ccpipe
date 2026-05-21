@@ -3,15 +3,25 @@
 ccpipe binds 0.0.0.0 by default, so auth is **always on**. Credentials are
 resolved in this order:
 
-  1. Both ``CCPIPE_AUTH_USERNAME`` and ``CCPIPE_AUTH_PASSWORD`` env vars
-     (typical when deployed via a systemd drop-in).
-  2. ``CCPIPE_AUTH_PASSWORD`` alone (username defaults to the system user).
-  3. A persisted file at ``~/.local/state/ccpipe/credentials`` (0600).
-  4. Auto-generate a random password, argon2id-hash it into the credentials
+  1. A persisted file at ``~/.local/state/ccpipe/credentials`` (0600).
+     Once this file exists it is **authoritative** — the in-UI password
+     change writes here, and subsequent restarts read from here.
+  2. ``CCPIPE_AUTH_PASSWORD`` (optionally with ``CCPIPE_AUTH_USERNAME``)
+     as a **bootstrap seed** when no credentials file exists yet. The
+     first start hashes the value and persists it to the file; from then
+     on the file wins and env is ignored. Earlier behaviour silently
+     re-applied env on every read, so an in-UI password change was a
+     no-op across restarts.
+  3. Auto-generate a random password, argon2id-hash it into the credentials
      file, and write the *plaintext* into a sidecar
      ``~/.local/state/ccpipe/initial_password.txt`` (0400). The plaintext is
      never logged — the operator is told once at startup to ``cat`` the
      sidecar and then delete it.
+
+To rotate to a new env-pinned password after the file exists, delete the
+credentials file (next start re-seeds from env) — or just use
+Settings → Account in the UI. Deleting the file also wipes any enrolled
+TOTP secret, by design: "delete the file" = "wipe credential state".
 
 Stored passwords are argon2id hashes; the plaintext only exists in memory
 when verifying a login. Legacy credential files containing a cleartext
@@ -279,40 +289,69 @@ def _announce_generated_credentials(username: str, creds_path: Path, sidecar: Pa
     log.warning("  Recover the password ONCE with:")
     log.warning("    cat %s", sidecar)
     log.warning("  Then delete the sidecar:")
-    log.warning("    shred -u %s", sidecar)
+    log.warning("    shred -u %s   (macOS: rm -P %s)", sidecar, sidecar)
     log.warning("")
-    log.warning("  To override, set environment in a systemd drop-in:")
-    log.warning("    Environment=CCPIPE_AUTH_USERNAME=...")
-    log.warning("    Environment=CCPIPE_AUTH_PASSWORD=...")
+    log.warning("  Change the password later in Settings → Account.")
+    log.warning("  To re-seed from env (also wipes TOTP), delete the")
+    log.warning("  credentials file before next start:")
+    log.warning("    rm %s", creds_path)
+    log.warning("    # then set CCPIPE_AUTH_PASSWORD in a drop-in / plist")
     log.warning(bar)
 
 
 def _resolve_credential() -> Credential:
+    """Resolve credentials with file-wins-once-it-exists semantics.
+
+    The earlier "env always wins" shape silently overrode the file on
+    every read, so a successful in-UI password change was a no-op
+    across restarts: the route rewrote the file, the next resolve
+    rebuilt from env and ignored it. File-first removes the foot-gun
+    without losing the env-pinned-provisioning path — env still seeds
+    the file on first start; from then on the UI is the source of
+    truth. ``get_credential`` memoizes the result, so the warning
+    logged when env is set-but-ignored fires once per process.
+    """
     env_user = os.environ.get(USERNAME_ENV, "").strip() or None
     env_pass = os.environ.get(PASSWORD_ENV, "").strip() or None
     path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    # TOTP enrollment is always file-backed even when username/password
-    # come from the environment — otherwise CCPIPE_AUTH_PASSWORD would
-    # silently disable any TOTP secret the user enrolled via the UI.
     file_cred, needs_migration = _load_credentials_file(path)
-    # Opportunistic migration: if the on-disk file was legacy plaintext
-    # we just rewrote it in memory as an argon2 hash; flush that hash
-    # back to disk so subsequent reads are clean.
+    # Opportunistic legacy-plaintext → argon2id migration on disk.
     if file_cred and needs_migration:
         try:
             _write_credentials_file(path, file_cred)
             log.warning("migrated plaintext credentials at %s to argon2id hash", path)
         except OSError as exc:
             log.error("could not rewrite migrated credentials to %s: %s", path, exc)
-    file_totp = file_cred.totp_secret if file_cred else None
+    if file_cred:
+        if env_pass:
+            log.info(
+                "%s is set but %s already exists — env value ignored "
+                "(file is authoritative). Delete the file to re-seed.",
+                PASSWORD_ENV, path,
+            )
+        return file_cred
     if env_pass:
-        return Credential(
+        # Bootstrap path. Hash, persist, return: the next resolve will
+        # come back through the ``if file_cred`` branch above. env_pass
+        # leaves this function as a hash; the plaintext never sits on
+        # disk and disappears from memory after return.
+        cred = Credential(
             username=env_user or _system_username(),
             password_hash=_hash_password(env_pass),
-            totp_secret=file_totp,
         )
-    if file_cred:
-        return file_cred
+        try:
+            _write_credentials_file(path, cred)
+        except OSError as exc:
+            # Read-only state dir or similar. Auth still works *this*
+            # run from the in-memory hash, but an in-UI password
+            # change can't be saved until the underlying issue is
+            # fixed — be loud so the operator sees it.
+            log.error(
+                "could not persist env-seeded credentials to %s: %s — "
+                "auth works this run, but in-UI password changes won't "
+                "survive a restart until this is fixed", path, exc,
+            )
+        return cred
     plain = _generate_password()
     cred = Credential(
         username=env_user or _system_username(),
