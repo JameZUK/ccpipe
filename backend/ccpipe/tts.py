@@ -202,7 +202,13 @@ class _Handler(FileSystemEventHandler):
 class TtsService:
     kokoro_url: str
     projects_dir: Path
-    voice: str = "af_bella"
+    # NB: per-utterance voice is read from app_config.load().tts.voice
+    # at synthesis time (see _kokoro_stream's `cfg.voice`). There is
+    # deliberately no instance-level `voice` field here — an earlier
+    # revision had one, seeded from CCPIPE_TTS_VOICE at import, but it
+    # was never read and presented exactly the auth env-precedence
+    # footgun this PR is fixing: a future "fall back to self.voice"
+    # refactor would silently let env override the persisted config.
     model: str = "kokoro"
     response_format: str = "mp3"
 
@@ -713,9 +719,10 @@ def _read_range(path: Path, start: int, end: int) -> bytes:
 
 
 # Module-level singleton, configured by main.py's lifespan.
+# Voice is intentionally NOT passed here — it lives in app_config and is
+# read fresh per synthesis. See the comment on TtsService for context.
 tts_service: TtsService = TtsService(
     kokoro_url=os.environ.get("CCPIPE_KOKORO_URL", "http://localhost:8880"),
     projects_dir=Path(os.environ.get("CCPIPE_CLAUDE_PROJECTS",
                                       str(Path.home() / ".claude" / "projects"))),
-    voice=os.environ.get("CCPIPE_TTS_VOICE", "af_bella"),
 )
