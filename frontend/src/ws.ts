@@ -79,6 +79,11 @@ export interface TerminalSocketHandlers {
   onTtsEnd?: () => void;
   onStatus: (status: "connecting" | "open" | "closed" | "reconnecting",
              info?: { attempt: number; nextRetryMs?: number }) => void;
+  /** Fires when the server closes the socket with code 1008 (policy
+   * violation). Backend uses this for origin-rejection, missing-auth,
+   * and credential-rotation kicks. Retry loop is suppressed before
+   * this fires; caller should re-bootstrap into the login flow. */
+  onAuthRevoked?: (reason: string) => void;
   /** Fires whenever a server frame arrives in response to one of our
    * keepalive pings — `ms` is the round-trip in milliseconds. The UI
    * surfaces this as the statusbar's latency indicator so the user
@@ -312,7 +317,7 @@ export class TerminalSocket {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       // A stale onclose (from a socket we explicitly replaced in
       // connect() above) would otherwise re-schedule pendingRetry and
       // race the fresh socket — producing the multi-WS subscription
@@ -323,6 +328,17 @@ export class TerminalSocket {
       this.ws = null;
       if (this.closed) {
         this.handlers.onStatus("closed");
+        return;
+      }
+      // 1008 = policy violation. Backend uses it for origin-rejection,
+      // missing/invalid auth, and the credential-rotation kick (M2). All
+      // three mean "retrying won't help" — without this guard the loop
+      // dials forever at 8s and the user sees "offline" instead of
+      // being bounced to login (review M5).
+      if (ev.code === 1008) {
+        this.handlers.onStatus("closed");
+        this.handlers.onAuthRevoked?.(ev.reason || "");
+        this.close();
         return;
       }
       this.retryAttempt += 1;

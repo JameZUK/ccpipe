@@ -749,6 +749,14 @@ async function attachTerminal(session: string): Promise<void> {
       socket.close();
       setTimeout(bootstrap, 1200);
     },
+    onAuthRevoked(reason) {
+      // Server closed the WS with 1008 — auth lost, origin rejected,
+      // or credentials rotated mid-session (M2 kick). The socket has
+      // already self-closed and stopped retrying; bootstrap re-fetches
+      // /api/auth/status and routes the user back to login if needed.
+      flashState(stateLabel, reason || "signed out", 4000);
+      setTimeout(bootstrap, 800);
+    },
     onTtsStart(msg) {
       tts.onStart();
       lastSpokenText = msg.text || "";
