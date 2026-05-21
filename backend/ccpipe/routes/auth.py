@@ -370,6 +370,11 @@ async def totp_confirm_endpoint(body: TotpConfirmBody, request: Request) -> dict
     saved, msg = set_totp_secret(secret)
     if not saved:
         raise HTTPException(status_code=500, detail=msg)
+    # M2: set_totp_secret bumps cred_version, invalidating existing
+    # sessions. Kick stale WS now so they don't sit on a stale auth
+    # waiting for the next inbound frame to be re-evaluated.
+    from ..ws import close_stale_ws_sockets
+    await close_stale_ws_sockets("totp enrolled")
     return {"enrolled": True}
 
 
@@ -392,6 +397,9 @@ async def totp_disable_endpoint(body: TotpDisableBody, request: Request) -> dict
     saved, msg = set_totp_secret(None)
     if not saved:
         raise HTTPException(status_code=500, detail=msg)
+    # M2: as above — set_totp_secret bumps cred_version, so kick stale WS.
+    from ..ws import close_stale_ws_sockets
+    await close_stale_ws_sockets("totp disabled")
     return {"enrolled": False}
 
 
@@ -436,4 +444,10 @@ async def auth_change_credentials(body: ChangeCredentialBody,
         raise HTTPException(status_code=400, detail=msg)
     # Force a fresh login on the next request since credentials changed.
     request.session.clear()
+    # M2: actively close every live WS whose cred_version is now stale.
+    # The pong re-auth only fires on inbound frames; a passive-receive
+    # attacker WS (claude is speaking, they aren't typing) would survive
+    # "sign out everywhere" indefinitely otherwise.
+    from ..ws import close_stale_ws_sockets
+    await close_stale_ws_sockets("credentials changed")
     return {"updated": True}

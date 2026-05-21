@@ -144,6 +144,45 @@ class WsCounters:
 # access is single-threaded by asyncio so no lock is needed.
 _active_counters: list[WsCounters] = []
 
+# Registry of live WebSocket objects so credential rotation can
+# proactively close stale sockets without waiting for the next inbound
+# frame (M2). The session-version pong re-check at ws.py:531/628/637
+# only fires on inbound traffic — a passive-receive WS (claude is
+# speaking, attacker isn't typing) would survive "sign out everywhere"
+# indefinitely otherwise. Asyncio single-threaded, no lock needed.
+_live_ws: set[WebSocket] = set()
+
+
+async def close_stale_ws_sockets(reason: str = "credentials changed") -> int:
+    """Close every live WebSocket whose session ``cred_version`` no
+    longer matches the current credential. Returns the count of sockets
+    actually closed.
+
+    Called from the credential-mutation routes (auth_change_credentials,
+    totp_confirm_endpoint, totp_disable_endpoint) immediately after the
+    version bump lands on disk. Safe to call from the asyncio loop;
+    each close goes through Starlette's WebSocket.close which is
+    idempotent and handles "already closed" cleanly.
+    """
+    from .auth import get_credential
+    current_version = get_credential().version
+    # Snapshot the set before iterating — close() schedules a discard
+    # via the WS handler's finally block, which may mutate _live_ws.
+    closed = 0
+    for ws in list(_live_ws):
+        session = ws.scope.get("session") or {}
+        stored = session.get("cred_version")
+        if not isinstance(stored, int) or stored != current_version:
+            try:
+                await ws.close(code=1008, reason=reason)
+                closed += 1
+            except Exception as exc:
+                # Already-closed or transport-level error — log and continue.
+                log.debug("close_stale_ws_sockets: close failed: %s", exc)
+    if closed:
+        log.info("credential rotation closed %d stale ws (reason=%r)", closed, reason)
+    return closed
+
 
 async def _build_tts_filter(tmux_session: str):
     """Return a content filter that gates TTS to *this* claude conversation
@@ -301,6 +340,9 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     # tells us how much PTY data flowed and whether any was lost.
     counters = WsCounters(session=session, started_at=time.monotonic())
     _active_counters.append(counters)
+    # Register for credential-rotation kicks (M2). Deregistration is in
+    # the WS handler's finally block alongside _active_counters.remove.
+    _live_ws.add(websocket)
 
     async def send_json(msg: dict) -> bool:
         async with send_lock:
@@ -668,6 +710,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
             _active_counters.remove(counters)
         except ValueError:
             pass
+        _live_ws.discard(websocket)
         # Release the mic if this WS was the owner so the next connection
         # can claim it.
         if _mic_owner is mic_token:

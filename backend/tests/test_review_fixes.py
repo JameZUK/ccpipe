@@ -1601,6 +1601,149 @@ def test_h3_update_credential_runs_on_worker_thread(tmp_path, monkeypatch):
         f"update_credential ran argon2 on main thread; samples={samples}")
 
 
+# ── M2: proactive WS revocation on credential rotation ─────────────────
+
+class _FakeWS:
+    """Minimal duck-type for close_stale_ws_sockets: a scope-dict carrier
+    plus an awaitable close() that records the args. The real
+    Starlette WebSocket is heavier than necessary — we only need the
+    two attributes close_stale_ws_sockets reads from + calls."""
+    def __init__(self, cred_version: int | None) -> None:
+        self.scope = {"session": {"cred_version": cred_version} if cred_version is not None else {}}
+        self.closed: list[tuple[int, str]] = []
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed.append((code, reason))
+
+
+def _seed_creds(monkeypatch, tmp_path):
+    """Point auth at a fresh credentials file + clear cached state. Used
+    by the M2 tests that don't want the authed_client fixture's full
+    HTTP setup."""
+    monkeypatch.setenv("CCPIPE_SESSION_SECRET_FILE", str(tmp_path / "s"))
+    monkeypatch.setenv("CCPIPE_CREDENTIALS_FILE", str(tmp_path / "c"))
+    monkeypatch.setenv("CCPIPE_AUTH_USERNAME", "alice")
+    monkeypatch.setenv("CCPIPE_AUTH_PASSWORD", "letmein")
+    import ccpipe.auth as auth
+    auth.reset_cached_credential()
+    return auth
+
+
+def test_m2_close_stale_ws_kicks_only_stale_versions(tmp_path, monkeypatch):
+    """The helper must close sockets at a stale cred_version and leave
+    current ones untouched."""
+    import asyncio
+    auth = _seed_creds(monkeypatch, tmp_path)
+    from ccpipe import ws as ws_mod
+
+    current = auth.get_credential().version
+    stale = _FakeWS(cred_version=current - 1)
+    fresh = _FakeWS(cred_version=current)
+    missing = _FakeWS(cred_version=None)   # pre-versioning cookie shape
+
+    ws_mod._live_ws.clear()
+    ws_mod._live_ws.update({stale, fresh, missing})
+    try:
+        n = asyncio.run(ws_mod.close_stale_ws_sockets("test reason"))
+    finally:
+        ws_mod._live_ws.clear()
+
+    assert n == 2, f"closed {n}; expected 2 (stale + missing)"
+    assert stale.closed == [(1008, "test reason")]
+    assert missing.closed == [(1008, "test reason")]
+    assert fresh.closed == [], "fresh WS must NOT be closed"
+
+
+def test_m2_close_stale_ws_tolerates_already_closed(tmp_path, monkeypatch):
+    """A WS whose close() raises (already closed at the transport layer)
+    must not abort the kick for the remaining sockets."""
+    import asyncio
+    auth = _seed_creds(monkeypatch, tmp_path)
+    from ccpipe import ws as ws_mod
+
+    current = auth.get_credential().version
+
+    class _ExplodingWS(_FakeWS):
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            raise RuntimeError("already closed")
+
+    boom = _ExplodingWS(cred_version=current - 1)
+    ok = _FakeWS(cred_version=current - 1)
+    ws_mod._live_ws.clear()
+    ws_mod._live_ws.update({boom, ok})
+    try:
+        n = asyncio.run(ws_mod.close_stale_ws_sockets("test"))
+    finally:
+        ws_mod._live_ws.clear()
+    # The exploding one isn't counted toward the success total — but the
+    # OK one must still be closed.
+    assert ok.closed == [(1008, "test")], "second WS skipped after first raised"
+    assert n == 1
+
+
+def test_m2_change_credentials_endpoint_kicks_stale_ws(authed_client):
+    """End-to-end: a successful /api/auth/credentials call must invoke
+    close_stale_ws_sockets so a passive-receive WS gets kicked off the
+    moment credentials change — not on its next inbound frame."""
+    import asyncio
+    from ccpipe import ws as ws_mod
+    from ccpipe import auth as auth_mod
+
+    # The authed_client login persisted credentials and bumped no version
+    # since boot. Insert a fake WS at the *current* version (so it's a
+    # legitimate live socket) — after /credentials runs, the WS will be
+    # stale relative to the post-bump current.
+    current = auth_mod.get_credential().version
+    fake = _FakeWS(cred_version=current)
+    ws_mod._live_ws.clear()
+    ws_mod._live_ws.add(fake)
+    try:
+        r = authed_client.post("/api/auth/credentials",
+                                headers={"X-Requested-By": "ccpipe"},
+                                json={"currentPassword": "letmein",
+                                      "newPassword": "letmein-v2"})
+        assert r.status_code == 200, r.text
+    finally:
+        ws_mod._live_ws.discard(fake)
+
+    assert fake.closed, "fake WS was not closed by the credentials route"
+    code, reason = fake.closed[0]
+    assert code == 1008
+    assert "credentials" in reason.lower()
+
+
+def test_m2_totp_disable_kicks_stale_ws(authed_client):
+    """TOTP disable also bumps cred_version via set_totp_secret — verify
+    the same kick fires there."""
+    import asyncio
+    import pyotp
+    from ccpipe import ws as ws_mod
+    from ccpipe import auth as auth_mod
+
+    secret = _enrol_totp(authed_client)
+
+    current = auth_mod.get_credential().version
+    fake = _FakeWS(cred_version=current)
+    ws_mod._live_ws.clear()
+    ws_mod._live_ws.add(fake)
+    try:
+        # Wait into the next TOTP slot so we have a code that's not on
+        # the burn-list from _enrol_totp.
+        import time as _t; _t.sleep(31)
+        code = pyotp.TOTP(secret).now()
+        import ccpipe.routes.auth as routes_auth; routes_auth.reset_throttle_state()
+        r = authed_client.post("/api/auth/totp/disable",
+                                headers={"X-Requested-By": "ccpipe"},
+                                json={"currentPassword": "letmein",
+                                      "code": code})
+        assert r.status_code == 200, r.text
+    finally:
+        ws_mod._live_ws.discard(fake)
+
+    assert fake.closed, "fake WS was not closed by /totp/disable"
+    code, reason = fake.closed[0]
+    assert code == 1008
+
+
 def test_fs_download_blocks_injected_intermediate_swap(authed_client, tmp_path, monkeypatch):
     """Download wires the walk before returning the StreamingResponse,
     so an ELOOP from the walk surfaces as a 403 status — not a silent
