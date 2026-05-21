@@ -117,6 +117,7 @@ def load_or_create_secret() -> str:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, (secret + "\n").encode())
+        os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, path)
@@ -239,6 +240,14 @@ def _write_credentials_file(path: Path, cred: Credential) -> None:
         payload["totp_secret"] = cred.totp_secret
     try:
         os.write(fd, json.dumps(payload, indent=2).encode() + b"\n")
+        # fsync before close so the bytes are durable on disk before
+        # os.replace publishes them. Without this, a hard power loss
+        # between write() and replace() can leave a zero-length file
+        # behind — and a zero-length credentials file fails JSON parse
+        # at startup, falling through to "auto-generate" semantics,
+        # which rewrites the file with a brand-new random password
+        # (locking the operator out until they read the new sidecar).
+        os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, path)
@@ -268,6 +277,7 @@ def _write_initial_password_sidecar(username: str, password: str, creds_path: Pa
     )
     try:
         os.write(fd, body.encode())
+        os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, sidecar)

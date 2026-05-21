@@ -86,6 +86,12 @@ def _save(data: dict[str, dict[str, str]]) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(data, indent=2, sort_keys=True).encode() + b"\n")
+        # fsync before close so a hard power loss can't publish a
+        # zero-length sticky file. load() tolerates a missing or
+        # malformed file (returns {}), but that silently drops every
+        # sticky flag the user had set — losing intent across the
+        # restart that prompted them to make sessions sticky.
+        os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, p)
