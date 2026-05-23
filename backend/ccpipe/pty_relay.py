@@ -12,8 +12,77 @@ import signal
 import struct
 import termios
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger(__name__)
+
+# Dedicated executor for the *fallback* child-reap path (macOS / Linux
+# < 5.3 / pidfd_open denied by seccomp). Isolated from asyncio's default
+# executor so a long-lived PTY can't park a default-pool worker — which
+# would starve argon2 verify, tmux.list_sessions, and every other
+# asyncio.to_thread() call (review L7). On Linux 5.3+ the pidfd path
+# below skips this entirely and reaps are thread-free.
+_reap_executor = ThreadPoolExecutor(
+    max_workers=256,
+    thread_name_prefix="ccpipe-reap",
+)
+
+
+def _supports_pidfd() -> bool:
+    """Cheap probe. ``hasattr`` only — the actual syscall is in
+    _await_child_exit's try/except, where a runtime ENOSYS / EPERM
+    (e.g. seccomp filter blocks pidfd_open) still falls back cleanly."""
+    return hasattr(os, "pidfd_open")
+
+
+async def _await_child_exit(loop: asyncio.AbstractEventLoop, pid: int) -> None:
+    """Block until *pid* exits, then reap it. Uses pidfd_open() +
+    add_reader() when available so no thread is held for the duration
+    of the child's lifetime; falls back to a dedicated executor's
+    blocking waitpid() otherwise."""
+    if _supports_pidfd():
+        try:
+            pidfd = os.pidfd_open(pid)  # type: ignore[attr-defined]
+        except OSError as exc:
+            # ESRCH means the child has already been reaped (race with
+            # an out-of-band waitpid) — treat as success. ENOSYS /
+            # EPERM (seccomp) fall through to the executor path.
+            if exc.errno == errno.ESRCH:
+                return
+            if exc.errno not in (errno.ENOSYS, errno.EPERM):
+                raise
+            pidfd = None
+        if pidfd is not None:
+            exit_fut: asyncio.Future[None] = loop.create_future()
+
+            def _on_pidfd_readable() -> None:
+                # pidfd becomes readable exactly once, when the child exits.
+                if not exit_fut.done():
+                    exit_fut.set_result(None)
+
+            try:
+                loop.add_reader(pidfd, _on_pidfd_readable)
+                try:
+                    await exit_fut
+                finally:
+                    loop.remove_reader(pidfd)
+            finally:
+                os.close(pidfd)
+            # Child is dead; reap status non-blocking so the kernel
+            # doesn't keep the zombie around. ChildProcessError if
+            # something else reaped it first — fine either way.
+            with contextlib.suppress(ChildProcessError, OSError):
+                os.waitpid(pid, os.WNOHANG)
+            return
+    # Fallback: dedicated thread pool, isolated from the default
+    # executor. Same blocking semantics as before but can't starve
+    # asyncio's general-purpose to_thread() slots.
+    await loop.run_in_executor(_reap_executor, _waitpid_blocking, pid)
+
+
+def _waitpid_blocking(pid: int) -> None:
+    with contextlib.suppress(ChildProcessError, OSError):
+        os.waitpid(pid, 0)
 
 # How long terminate() waits for SIGTERM to take effect before SIGKILLing.
 _GRACEFUL_TERMINATE_S = 1.5
@@ -103,17 +172,24 @@ class PtyProcess:
         pid = self._pid
         assert pid is not None
         loop = asyncio.get_running_loop()
-        # Use a dedicated thread to call waitpid; cheap because it blocks once.
-        # Always clear self._pid + set the event in finally so:
-        #   1. terminate() can't os.kill() a recycled PID via a stale self._pid
-        #      reference after the child has been reaped.
-        #   2. If waitpid raises (ECHILD — child already reaped elsewhere, or
-        #      ESRCH if the pid never existed) we still drop the executor
-        #      worker; without finally those raise inside run_in_executor and
-        #      _exit_event stays unset, leaking the thread for the process
-        #      lifetime.
+        # L7 (proper fix): wait on the child via pidfd_open() + add_reader
+        # so a long-lived PTY doesn't park a default-executor worker for
+        # its entire lifetime. With many concurrent WS attaches (one
+        # PtyProcess each, before this change one waitpid thread each),
+        # the default ThreadPoolExecutor would saturate at min(32,
+        # cpu_count+4) ≈ 12 workers and every subsequent
+        # asyncio.to_thread() — argon2 verify, tmux.list_sessions, jsonl
+        # I/O — would queue forever. The pidfd path is thread-free.
+        #
+        # Linux 5.3+ exposes pidfd_open; on macOS / older kernels we
+        # fall back to a *dedicated* reap executor so PTY reaps still
+        # work but are isolated from the default pool. Always clear
+        # self._pid + set the event in finally so:
+        #   1. terminate() can't os.kill() a recycled PID via a stale
+        #      self._pid reference after the child has been reaped.
+        #   2. waitpid raising (ECHILD / ESRCH) still drops state.
         try:
-            await loop.run_in_executor(None, lambda: os.waitpid(pid, 0))
+            await _await_child_exit(loop, pid)
         except (ChildProcessError, OSError):
             pass
         finally:
