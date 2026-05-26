@@ -393,6 +393,38 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // (see further down) and have it flip this flag.
   let scrollRegionIsDefault = true;
 
+  // Diagnostic ring buffer of recent scroll-affecting events. The
+  // SU FIXME in xterm.js dropped the top scrolled-out line silently;
+  // there may be other sequences with the same shape (IL/DL/ED
+  // patterns, raw CUP-then-write redraws). Logging each event with
+  // the buffer/scroll state at that instant — then surfacing the
+  // ring in getDebugState() — lets a single Ctrl+Shift+D snapshot
+  // tell us which class of sequence is doing the damage, rather
+  // than guessing from symptoms. Bounded so memory stays flat.
+  const RECENT_SCROLL_EVENTS_MAX = 200;
+  const recentScrollEvents: Array<{
+    t: number;
+    kind: string;
+    n: number;
+    ydisp: number;
+    ybase: number;
+    cursorY: number;
+  }> = [];
+  const logScrollEvent = (kind: string, n: number): void => {
+    const buf = term.buffer.active;
+    if (recentScrollEvents.length >= RECENT_SCROLL_EVENTS_MAX) {
+      recentScrollEvents.shift();
+    }
+    recentScrollEvents.push({
+      t: performance.now(),
+      kind,
+      n,
+      ydisp: buf.viewportY,
+      ybase: buf.baseY,
+      cursorY: buf.cursorY,
+    });
+  };
+
   const rewriteScrollUpInBytes = (data: Uint8Array): Uint8Array => {
     // Fast path: no ESC bytes, no CSI sequences possible.
     if (!scrollRegionIsDefault) return data;
@@ -414,6 +446,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
         }
         if (j < data.length && data[j] === S) {
           const count = parseInt(digits || "1", 10) || 1;
+          logScrollEvent("SU(rewritten)", count);
           // Synthetic equivalent — see comment above writeToTerm.
           const synth = `\x1b7\x1b[${term.rows};1H${"\n".repeat(count)}\x1b8`;
           for (let c = 0; c < synth.length; c++) {
@@ -456,7 +489,36 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     const topIsDefault = top === 0 || top === 1;
     const botIsDefault = bot === 0 || bot === term.rows;
     scrollRegionIsDefault = topIsDefault && botIsDefault;
+    logScrollEvent(scrollRegionIsDefault ? "DECSTBM(default)" : "DECSTBM(custom)", top * 1000 + bot);
     return false;
+  });
+
+  // Passive observers for the other CSI sequences that can re-flow
+  // content within the live grid without growing scrollback. All
+  // return false so xterm's default handlers still run — these only
+  // exist to populate the diagnostic ring buffer so a single debug
+  // snapshot during the next regression tells us which sequence
+  // class is responsible. The current rate of these in a healthy
+  // session is also useful as a baseline.
+  const firstParam = (params: (number | number[])[]): number => {
+    const p = params[0];
+    const v = Array.isArray(p) ? p[0] : p;
+    return typeof v === "number" ? v : 0;
+  };
+  term.parser.registerCsiHandler({ final: "L" }, (params) => {
+    logScrollEvent("IL", firstParam(params) || 1); return false;
+  });
+  term.parser.registerCsiHandler({ final: "M" }, (params) => {
+    logScrollEvent("DL", firstParam(params) || 1); return false;
+  });
+  term.parser.registerCsiHandler({ final: "T" }, (params) => {
+    logScrollEvent("SD", firstParam(params) || 1); return false;
+  });
+  term.parser.registerCsiHandler({ final: "J" }, (params) => {
+    logScrollEvent(`ED${firstParam(params)}`, 0); return false;
+  });
+  term.parser.registerCsiHandler({ prefix: "?", final: "J" }, (params) => {
+    logScrollEvent(`DECSED${firstParam(params)}`, 0); return false;
   });
 
   // Terminal input → PTY. Most data is small (single keystrokes), so
@@ -858,6 +920,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       // Distance from live tail in pixels. 0 = at the bottom.
       offsetFromBottom:
         viewport ? viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop : null,
+      // Most recent scroll-affecting CSI sequences observed in the
+      // PTY byte stream, with the buffer/scroll state at each
+      // event. Populated by the byte rewriter (SU) plus the passive
+      // parser handlers (IL/DL/SD/ED/DECSTBM). Ring-buffer-capped at
+      // 200; oldest evicted. Look here first when scrollback regresses.
+      recentScrollEvents: recentScrollEvents.slice(),
     };
   };
 
