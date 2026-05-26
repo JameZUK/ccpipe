@@ -350,13 +350,114 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // AFTER the buffer has actually grown — like scrolling to the
   // bottom of the just-replayed scrollback — must run inside this
   // callback, not synchronously after the write() call returns.
+  // Rewrite CSI SU (`\x1b[<n>S`, "Scroll Up") into an equivalent
+  // natural-scroll sequence so the top lines actually land in
+  // scrollback.
+  //
+  // Why this exists: xterm.js's scrollUp handler (InputHandler.ts:
+  // ~1407) splices the top of the scroll region out and inserts a
+  // blank at the bottom — but the spliced line is DISCARDED, never
+  // pushed into the scrollback ring. The upstream source even
+  // carries a `FIXME` comment acknowledging this. claude code's TUI
+  // (Ink) and tmux both emit SU for incremental scrolling, so every
+  // time content reached the bottom of the live grid the top line
+  // vanished instead of becoming scrollback — exactly the symptom
+  // the user reported as "lines reach the edge, scrollback never
+  // moves up, the lines that should go above the visible area
+  // disappear."
+  //
+  // The natural \n-at-bottom-of-screen path (xterm's `index()`)
+  // routes through `BufferService.scroll()`, which DOES push to
+  // scrollback. So we substitute every SU with:
+  //   DECSC (save cursor) → CUP to bottom row → N × LF → DECRC.
+  //
+  // This is only correct when the scroll region is the default
+  // (whole screen). With a custom DECSTBM region, the synthetic
+  // CUP-to-bottom + LFs would scroll the wrong region. tmux + Ink
+  // don't use custom regions in practice here, but to stay safe
+  // the rewrite is skipped while a non-default region is active
+  // (tracked via the DECSTBM handler below).
+  //
+  // Implementation: bytewise scan looking for `ESC [ digits S`.
+  // Skipping anything with a CSI prefix byte (e.g. `?`) keeps us
+  // off DECSED 3 (which our existing ED-3 suppression handles) and
+  // anything else that just happens to end in S.
+  const ESC = 0x1b;
+  const LBRACKET = 0x5b;
+  const S = 0x53;
+  const DIGIT_0 = 0x30;
+  const DIGIT_9 = 0x39;
+
+  // DECSTBM tracker — false while a non-default scroll region is in
+  // effect. We register the handler below `writeToTerm` is declared
+  // (see further down) and have it flip this flag.
+  let scrollRegionIsDefault = true;
+
+  const rewriteScrollUpInBytes = (data: Uint8Array): Uint8Array => {
+    // Fast path: no ESC bytes, no CSI sequences possible.
+    if (!scrollRegionIsDefault) return data;
+    let foundEsc = false;
+    for (let k = 0; k < data.length; k++) {
+      if (data[k] === ESC) { foundEsc = true; break; }
+    }
+    if (!foundEsc) return data;
+
+    const out: number[] = [];
+    let i = 0;
+    while (i < data.length) {
+      if (data[i] === ESC && i + 1 < data.length && data[i + 1] === LBRACKET) {
+        let j = i + 2;
+        let digits = "";
+        while (j < data.length && data[j] >= DIGIT_0 && data[j] <= DIGIT_9) {
+          digits += String.fromCharCode(data[j]);
+          j++;
+        }
+        if (j < data.length && data[j] === S) {
+          const count = parseInt(digits || "1", 10) || 1;
+          // Synthetic equivalent — see comment above writeToTerm.
+          const synth = `\x1b7\x1b[${term.rows};1H${"\n".repeat(count)}\x1b8`;
+          for (let c = 0; c < synth.length; c++) {
+            out.push(synth.charCodeAt(c));
+          }
+          i = j + 1;
+          continue;
+        }
+      }
+      out.push(data[i]);
+      i++;
+    }
+    return new Uint8Array(out);
+  };
+
   const writeToTerm = (data: Uint8Array | string, after?: () => void) => {
+    // Only rewrite Uint8Array — PTY output always arrives as bytes.
+    // String writes come from synthetic internal callers (none today)
+    // and we don't need to scan them. Skipping keeps the string fast
+    // path zero-copy.
+    const payload = typeof data === "string" ? data : rewriteScrollUpInBytes(data);
     if (after) {
-      term.write(data, after);
+      term.write(payload, after);
     } else {
-      term.write(data);
+      term.write(payload);
     }
   };
+
+  // DECSTBM (`\x1b[<top>;<bot>r`) — track whether a custom scroll
+  // region is active so the SU rewrite knows when to bail out. Any
+  // non-default top/bottom means rewriting would scroll the wrong
+  // region. Return false so xterm still applies the DECSTBM change.
+  term.parser.registerCsiHandler({ final: "r" }, (params): boolean => {
+    const first = Array.isArray(params[0]) ? params[0][0] : params[0];
+    const second = Array.isArray(params[1]) ? params[1][0] : params[1];
+    const top = typeof first === "number" ? first : 0;
+    const bot = typeof second === "number" ? second : 0;
+    // Defaults (0 or 1 for top, 0 or `rows` for bot) describe the
+    // whole screen. Anything else carves out a sub-region.
+    const topIsDefault = top === 0 || top === 1;
+    const botIsDefault = bot === 0 || bot === term.rows;
+    scrollRegionIsDefault = topIsDefault && botIsDefault;
+    return false;
+  });
 
   // Terminal input → PTY. Most data is small (single keystrokes), so
   // ship it through directly. Pastes (xterm's onData fires once with
