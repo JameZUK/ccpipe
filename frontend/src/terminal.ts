@@ -350,66 +350,20 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // AFTER the buffer has actually grown — like scrolling to the
   // bottom of the just-replayed scrollback — must run inside this
   // callback, not synchronously after the write() call returns.
-  // Rewrite CSI SU (`\x1b[<n>S`, "Scroll Up") into an equivalent
-  // natural-scroll sequence so the top lines actually land in
-  // scrollback.
-  //
-  // Why this exists: xterm.js's scrollUp handler (InputHandler.ts:
-  // ~1407) splices the top of the scroll region out and inserts a
-  // blank at the bottom — but the spliced line is DISCARDED, never
-  // pushed into the scrollback ring. The upstream source even
-  // carries a `FIXME` comment acknowledging this. claude code's TUI
-  // (Ink) and tmux both emit SU for incremental scrolling, so every
-  // time content reached the bottom of the live grid the top line
-  // vanished instead of becoming scrollback — exactly the symptom
-  // the user reported as "lines reach the edge, scrollback never
-  // moves up, the lines that should go above the visible area
-  // disappear."
-  //
-  // The natural \n-at-bottom-of-screen path (xterm's `index()`)
-  // routes through `BufferService.scroll()`, which DOES push to
-  // scrollback. So we substitute every SU with:
-  //   DECSC (save cursor) → CUP to bottom row → N × LF → DECRC.
-  //
-  // This is only correct when the scroll region is the default
-  // (whole screen). With a custom DECSTBM region, the synthetic
-  // CUP-to-bottom + LFs would scroll the wrong region. tmux + Ink
-  // don't use custom regions in practice here, but to stay safe
-  // the rewrite is skipped while a non-default region is active
-  // (tracked via the DECSTBM handler below).
-  //
-  // Implementation: bytewise scan looking for `ESC [ digits S`.
-  // Skipping anything with a CSI prefix byte (e.g. `?`) keeps us
-  // off DECSED 3 (which our existing ED-3 suppression handles) and
-  // anything else that just happens to end in S.
-  const ESC = 0x1b;
-  const LBRACKET = 0x5b;
-  const S = 0x53;
-  const DIGIT_0 = 0x30;
-  const DIGIT_9 = 0x39;
+  const writeToTerm = (data: Uint8Array | string, after?: () => void) => {
+    if (after) {
+      term.write(data, after);
+    } else {
+      term.write(data);
+    }
+  };
 
-  // DECSTBM scroll region tracker. Zero-indexed; the SU rewriter
-  // needs both bounds:
-  //  - `scrollRegionTop === 0` is the gating condition for the rewrite
-  //    (only then does an SU-scrolled-out line map to the top of the
-  //    live grid, where natural-scroll would push it to scrollback);
-  //  - `scrollRegionBottom` is the CUP target for the synthetic LFs.
-  //    Earlier versions hard-coded CUP to `term.rows`, which silently
-  //    landed BELOW a smaller scroll region — LFs at row > scrollBottom
-  //    just clamp to row==rows-1 and do nothing. The recentScrollEvents
-  //    ring caught the bug: SU n=22 events were producing only +3 ybase
-  //    growth instead of +22 because the LFs no-op'd.
-  let scrollRegionTop = 0;
-  let scrollRegionBottom: number | null = null;  // null = treat as term.rows-1
-
-  // Diagnostic ring buffer of recent scroll-affecting events. The
-  // SU FIXME in xterm.js dropped the top scrolled-out line silently;
-  // there may be other sequences with the same shape (IL/DL/ED
-  // patterns, raw CUP-then-write redraws). Logging each event with
-  // the buffer/scroll state at that instant — then surfacing the
-  // ring in getDebugState() — lets a single Ctrl+Shift+D snapshot
-  // tell us which class of sequence is doing the damage, rather
-  // than guessing from symptoms. Bounded so memory stays flat.
+  // Diagnostic ring buffer of recent scroll-affecting events. Each
+  // SU/IL/DL/SD/ED/DECSTBM observation records the buffer state at
+  // the instant the parser handled it. Surfaced in getDebugState()
+  // so a single Ctrl+Shift+D snapshot during a scrollback regression
+  // shows exactly which class of sequence is doing the damage.
+  // Bounded so memory stays flat over long sessions.
   const RECENT_SCROLL_EVENTS_MAX = 200;
   const recentScrollEvents: Array<{
     t: number;
@@ -434,102 +388,97 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     });
   };
 
-  const rewriteScrollUpInBytes = (data: Uint8Array): Uint8Array => {
-    // Only rewrite when the scroll region's TOP is row 0 (the start
-    // of the live grid). In that case, xterm's buggy SU drops a
-    // line that should have been pushed to scrollback. For a
-    // non-zero scroll-region top, the line being dropped is
-    // mid-screen and the in-place shift is the correct semantics.
-    if (scrollRegionTop !== 0) return data;
-
-    let foundEsc = false;
-    for (let k = 0; k < data.length; k++) {
-      if (data[k] === ESC) { foundEsc = true; break; }
-    }
-    if (!foundEsc) return data;
-
-    // CUP target = bottom of current scroll region, 1-indexed. We
-    // use the CURRENT scrollRegionBottom (not term.rows) so the
-    // synthetic LFs actually fire `index()`'s scrollBottom branch.
-    // Earlier versions used term.rows here and the LFs no-op'd
-    // whenever DECSTBM was narrower than the screen.
-    const cupRow1Indexed =
-      (scrollRegionBottom != null ? scrollRegionBottom : term.rows - 1) + 1;
-
-    const out: number[] = [];
-    let i = 0;
-    while (i < data.length) {
-      if (data[i] === ESC && i + 1 < data.length && data[i + 1] === LBRACKET) {
-        let j = i + 2;
-        let digits = "";
-        while (j < data.length && data[j] >= DIGIT_0 && data[j] <= DIGIT_9) {
-          digits += String.fromCharCode(data[j]);
-          j++;
-        }
-        if (j < data.length && data[j] === S) {
-          const count = parseInt(digits || "1", 10) || 1;
-          logScrollEvent("SU(rewritten)", count);
-          const synth = `\x1b7\x1b[${cupRow1Indexed};1H${"\n".repeat(count)}\x1b8`;
-          for (let c = 0; c < synth.length; c++) {
-            out.push(synth.charCodeAt(c));
-          }
-          i = j + 1;
-          continue;
-        }
+  // Patch xterm.js's CSI SU (`\x1b[<n>S`) so the scrolled-out top
+  // line of the scroll region actually lands in scrollback. The
+  // upstream InputHandler.scrollUp (InputHandler.ts:~1407) splices
+  // the top line out and inserts a blank at the bottom — the
+  // spliced line is silently DISCARDED, never pushed to the
+  // scrollback ring. The upstream source even has a `FIXME`
+  // comment acknowledging this. claude code's TUI (Ink) emits SU
+  // continuously for incremental rendering, so every "lines reach
+  // the edge" event was dropping the top line and the user saw
+  // their scrollback never grow.
+  //
+  // A prior attempt rewrote SU at the byte level in writeToTerm:
+  // substitute each `\x1b[<n>S` with a synthetic
+  // `DECSC + CUP-to-region-bottom + N×LF + DECRC` so the LFs route
+  // through `BufferService.scroll()` (the path that DOES push to
+  // scrollback). That had a fatal flaw: byte-level rewriting
+  // computes the CUP target once per writeToTerm chunk, but Ink
+  // toggles DECSTBM mid-chunk constantly. By the time the synthetic
+  // LFs executed, xterm's current scrollBottom had changed and many
+  // LFs landed at y > scrollBottom, hitting the `y >= rows` clamp
+  // path instead of the `y === scrollBottom + 1` scroll path.
+  // Diagnostic data showed ~143 SU scrolls producing only +35 ybase
+  // growth on the user's session.
+  //
+  // Patch the InputHandler instance directly so the fix runs
+  // SYNCHRONOUSLY during parser processing with xterm's current
+  // scrollTop/scrollBottom — no stale data, no DECSTBM tracking
+  // needed. For non-zero scrollTop (mid-screen scroll region), fall
+  // back to upstream's in-place behaviour, which IS the correct
+  // semantics there.
+  const core = (term as unknown as {
+    _core?: {
+      _inputHandler?: {
+        scrollUp?: (params: { params: number[] }) => boolean;
+        _eraseAttrData?: () => unknown;
+        _dirtyRowTracker?: { markRangeDirty?: (a: number, b: number) => void };
+      };
+      _bufferService?: {
+        scroll?: (attr: unknown) => void;
+        buffer?: { scrollTop: number; scrollBottom: number };
+      };
+    };
+  })._core;
+  const ih = core?._inputHandler;
+  const bs = core?._bufferService;
+  if (
+    ih && bs &&
+    typeof ih.scrollUp === "function" &&
+    typeof bs.scroll === "function" &&
+    typeof ih._eraseAttrData === "function" &&
+    bs.buffer
+  ) {
+    const originalScrollUp = ih.scrollUp.bind(ih);
+    ih.scrollUp = function (params: { params: number[] }): boolean {
+      const buf = bs.buffer!;
+      if (buf.scrollTop !== 0) {
+        // Non-default scroll region top — in-place shift is correct
+        // semantics (content above the region must not be touched).
+        return originalScrollUp(params);
       }
-      out.push(data[i]);
-      i++;
-    }
-    return new Uint8Array(out);
-  };
+      let count = (params.params?.[0] as number | undefined) || 1;
+      logScrollEvent("SU(patched)", count);
+      while (count-- > 0) {
+        bs.scroll!(ih._eraseAttrData!());
+      }
+      ih._dirtyRowTracker?.markRangeDirty?.(buf.scrollTop, buf.scrollBottom);
+      return true;
+    };
+  } else {
+    console.warn(
+      "ccpipe: xterm.js SU patch failed — internal API not found. " +
+      "Scrollback may drop lines when claude emits CSI SU."
+    );
+  }
 
-  const writeToTerm = (data: Uint8Array | string, after?: () => void) => {
-    // Only rewrite Uint8Array — PTY output always arrives as bytes.
-    // String writes come from synthetic internal callers (none today)
-    // and we don't need to scan them. Skipping keeps the string fast
-    // path zero-copy.
-    const payload = typeof data === "string" ? data : rewriteScrollUpInBytes(data);
-    if (after) {
-      term.write(payload, after);
-    } else {
-      term.write(payload);
-    }
-  };
-
-  // DECSTBM (`\x1b[<top>;<bot>r`) — track the current scroll region
-  // so the SU rewriter knows (a) whether to rewrite at all (only
-  // when top is row 0) and (b) where to put the synthetic CUP for
-  // the LFs. Mirrors xterm.js's own setScrollRegion clamping:
-  // bottom is clamped to term.rows; top/bot are 1-indexed in the
-  // CSI and converted to 0-indexed here. Return false so xterm
-  // still applies the DECSTBM change.
+  // DECSTBM logger (`\x1b[<top>;<bot>r`) — diagnostic only; doesn't
+  // alter behaviour. Return false so xterm still applies the change.
   term.parser.registerCsiHandler({ final: "r" }, (params): boolean => {
     const first = Array.isArray(params[0]) ? params[0][0] : params[0];
     const second = Array.isArray(params[1]) ? params[1][0] : params[1];
     const topRaw = typeof first === "number" && first > 0 ? first : 1;
     const botRaw = typeof second === "number" && second > 0 ? second : term.rows;
-    const botClamped = Math.min(botRaw, term.rows);
-    scrollRegionTop = topRaw - 1;
-    scrollRegionBottom = botClamped - 1;
     logScrollEvent(
-      scrollRegionTop === 0 ? "DECSTBM(top0)" : "DECSTBM(non-zero-top)",
+      topRaw === 1 ? "DECSTBM(top0)" : "DECSTBM(non-zero-top)",
       topRaw * 1000 + botRaw,
     );
     return false;
   });
 
-  // On resize, xterm.js resets the buffer's scrollTop/scrollBottom
-  // to (0, rows-1). Stay in sync — otherwise a stale
-  // scrollRegionBottom from before the resize would point past the
-  // new bottom, the synthetic CUP would land mid-screen, and the LFs
-  // would no-op (the bug we just diagnosed). The app may re-issue
-  // DECSTBM afterwards; if it doesn't, the default region is
-  // correct.
-  term.onResize(({ rows }) => {
-    scrollRegionTop = 0;
-    scrollRegionBottom = rows - 1;
-    logScrollEvent("resize", rows);
-  });
+  // Resize logger — diagnostic only.
+  term.onResize(({ rows }) => logScrollEvent("resize", rows));
 
   // Passive observers for the other CSI sequences that can re-flow
   // content within the live grid without growing scrollback. All
