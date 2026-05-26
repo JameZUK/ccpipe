@@ -131,6 +131,27 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   term.parser.registerCsiHandler({ prefix: "?", final: "h" }, suppressIfAltScreen);
   term.parser.registerCsiHandler({ prefix: "?", final: "l" }, suppressIfAltScreen);
 
+  // Suppress ED 3 (`\x1b[3J`) and its DECSED variant (`\x1b[?3J`),
+  // "Erase Saved Lines" — i.e. wipe the scrollback. tmux + Ink-based
+  // TUIs (claude code) emit this during active redraws; xterm.js'
+  // InputHandler implements it by calling `lines.trimStart(scrollbackSize)`
+  // and clamping `ydisp = max(ydisp - scrollbackSize, 0)`. If the user
+  // is scrolled into that scrollback when the sequence lands, the
+  // rows they were viewing are deleted and ydisp snaps to 0 — the
+  // viewport then renders the live grid where scrollback was, which
+  // reads as "top of scrolled-up view got overwritten by new
+  // content". Refresh appears to fix it because reconnect re-fills
+  // from tmux's `capture-pane`. Same suppression pattern as the
+  // alt-screen block above. ED params 0/1/2 are left alone (they
+  // affect the live viewport only and are needed for normal TUI
+  // operation).
+  const suppressEraseSavedLines = (params: (number | number[])[]): boolean => {
+    const first = Array.isArray(params[0]) ? params[0][0] : params[0];
+    return first === 3;
+  };
+  term.parser.registerCsiHandler({ final: "J" }, suppressEraseSavedLines);
+  term.parser.registerCsiHandler({ prefix: "?", final: "J" }, suppressEraseSavedLines);
+
   // Upgrade to the WebGL renderer when available. 2-5x faster on Claude
   // Code's busy TUI redraws; falls back silently to the default DOM
   // renderer if the addon fails to attach (no WebGL2, context lost, etc.).
