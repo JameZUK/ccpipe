@@ -131,26 +131,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   term.parser.registerCsiHandler({ prefix: "?", final: "h" }, suppressIfAltScreen);
   term.parser.registerCsiHandler({ prefix: "?", final: "l" }, suppressIfAltScreen);
 
-  // Suppress ED 3 (`\x1b[3J`) and its DECSED variant (`\x1b[?3J`),
-  // "Erase Saved Lines" — i.e. wipe the scrollback. tmux + Ink-based
-  // TUIs (claude code) emit this during active redraws; xterm.js'
-  // InputHandler implements it by calling `lines.trimStart(scrollbackSize)`
-  // and clamping `ydisp = max(ydisp - scrollbackSize, 0)`. If the user
-  // is scrolled into that scrollback when the sequence lands, the
-  // rows they were viewing are deleted and ydisp snaps to 0 — the
-  // viewport then renders the live grid where scrollback was, which
-  // reads as "top of scrolled-up view got overwritten by new
-  // content". Refresh appears to fix it because reconnect re-fills
-  // from tmux's `capture-pane`. Same suppression pattern as the
-  // alt-screen block above. ED params 0/1/2 are left alone (they
-  // affect the live viewport only and are needed for normal TUI
-  // operation).
-  const suppressEraseSavedLines = (params: (number | number[])[]): boolean => {
-    const first = Array.isArray(params[0]) ? params[0][0] : params[0];
-    return first === 3;
-  };
-  term.parser.registerCsiHandler({ final: "J" }, suppressEraseSavedLines);
-  term.parser.registerCsiHandler({ prefix: "?", final: "J" }, suppressEraseSavedLines);
+  // NOTE: ED 3 (`\x1b[3J` / `\x1b[?3J`, "Erase Saved Lines" = wipe
+  // scrollback) is suppressed too, but that handler is registered
+  // further down alongside the diagnostic ED logger so there is a
+  // SINGLE custom handler per `J`/`?J` final char (see
+  // registerCsiHandler for "J" below). Keeping it in two places led
+  // to a brittle dependency on handler-stack ordering — consolidated.
 
   // Upgrade to the WebGL renderer when available. 2-5x faster on Claude
   // Code's busy TUI redraws; falls back silently to the default DOM
@@ -501,11 +487,28 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   term.parser.registerCsiHandler({ final: "T" }, (params) => {
     logScrollEvent("SD", firstParam(params) || 1); return false;
   });
+  // ED / DECSED (`\x1b[<n>J` / `\x1b[?<n>J`): log every variant, and
+  // additionally SUPPRESS param 3 ("Erase Saved Lines" = wipe the
+  // scrollback). xterm.js implements ED 3 by `lines.trimStart(...)` +
+  // clamping `ydisp = max(ydisp - scrollbackSize, 0)`. tmux + Ink TUIs
+  // (claude code) emit it during active redraws; if the user is
+  // scrolled into that scrollback when it lands, the rows they were
+  // viewing are deleted and ydisp snaps to 0 — reads as "top of the
+  // scrolled-up view got overwritten by new content" (refresh appears
+  // to fix it because reconnect re-fills from tmux's `capture-pane`).
+  // Params 0/1/2 only touch the live viewport, so they pass through.
+  // Returning true here suppresses; false falls through to xterm's
+  // default handler. One handler per final char keeps the
+  // log-then-suppress decision in a single place.
   term.parser.registerCsiHandler({ final: "J" }, (params) => {
-    logScrollEvent(`ED${firstParam(params)}`, 0); return false;
+    const n = firstParam(params);
+    logScrollEvent(`ED${n}`, 0);
+    return n === 3;
   });
   term.parser.registerCsiHandler({ prefix: "?", final: "J" }, (params) => {
-    logScrollEvent(`DECSED${firstParam(params)}`, 0); return false;
+    const n = firstParam(params);
+    logScrollEvent(`DECSED${n}`, 0);
+    return n === 3;
   });
 
   // Terminal input → PTY. Most data is small (single keystrokes), so
@@ -909,7 +912,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
         viewport ? viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop : null,
       // Most recent scroll-affecting CSI sequences observed in the
       // PTY byte stream, with the buffer/scroll state at each
-      // event. Populated by the byte rewriter (SU) plus the passive
+      // event. Populated by the patched scrollUp (SU) plus the passive
       // parser handlers (IL/DL/SD/ED/DECSTBM). Ring-buffer-capped at
       // 200; oldest evicted. Look here first when scrollback regresses.
       recentScrollEvents: recentScrollEvents.slice(),
