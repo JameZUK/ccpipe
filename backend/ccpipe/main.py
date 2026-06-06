@@ -221,7 +221,27 @@ app.add_middleware(
 if _BEHIND_TLS:
     from starlette.middleware.trustedhost import TrustedHostMiddleware
     allowed = [h.strip() for h in os.environ.get(
-        "CCPIPE_TRUSTED_HOSTS", "*").split(",") if h.strip()]
+        "CCPIPE_TRUSTED_HOSTS", "").split(",") if h.strip()]
+    # Fail CLOSED under TLS: an unset or wildcard host list means
+    # TrustedHostMiddleware accepts `Host: anything.attacker.example`,
+    # which enables Host-header / DNS-rebinding attacks against a
+    # TLS-fronted deployment. Rather than silently running wide open
+    # (the old `"*"` default), refuse to start so the operator pins the
+    # hostname. CCPIPE_ALLOW_WILDCARD_HOST=1 is an explicit escape hatch
+    # for the rare operator who really wants the wildcard.
+    if (not allowed) or ("*" in allowed):
+        if os.environ.get("CCPIPE_ALLOW_WILDCARD_HOST", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            allowed = ["*"]
+        else:
+            raise RuntimeError(
+                "CCPIPE_BEHIND_TLS=1 but CCPIPE_TRUSTED_HOSTS is unset or '*'. "
+                "Set it to your public hostname (e.g. "
+                "CCPIPE_TRUSTED_HOSTS=ccpipe.example.com) so the Host header is "
+                "validated, or set CCPIPE_ALLOW_WILDCARD_HOST=1 to opt into the "
+                "wildcard explicitly."
+            )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed)
 
 

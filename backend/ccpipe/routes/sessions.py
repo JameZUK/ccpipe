@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import sticky, tmux
+from .. import sticky, tmux, ws
 from ..auth import AuthDep, CsrfDep
 from ..tmux_control import CONTROL_SESSION_NAME
 from .fs import _enforce_fs_jail, content_disposition_attachment
@@ -188,6 +188,10 @@ async def rename_session_endpoint(name: str, body: RenameSessionBody) -> Session
         # Preserve sticky flag across rename — without this a sticky
         # session would silently lose its persisted entry on rename.
         sticky.rename(name, new_name)
+        # Drop any cached capture-pane blob under BOTH names so a
+        # reconnect can't be served the prior occupant's history.
+        ws.invalidate_history_cache(name)
+        ws.invalidate_history_cache(new_name)
     sticky_names = sticky.sticky_names()
     for s in await tmux.list_sessions():
         if s.name == new_name:
@@ -209,6 +213,9 @@ async def delete_session_endpoint(name: str) -> dict[str, bool]:
     # Auto-unflip sticky: kill implies the user no longer wants this
     # session, so don't quietly resurrect it on the next backend start.
     sticky.clear(name)
+    # A new session reusing this name must not inherit the dead one's
+    # cached scrollback.
+    ws.invalidate_history_cache(name)
     return {"deleted": True}
 
 

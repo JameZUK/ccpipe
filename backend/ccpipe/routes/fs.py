@@ -80,6 +80,14 @@ _FS_DENY_SUBPATHS = (
     # this directory directly (not through /api/fs/*) so denying
     # the fs route doesn't affect normal operation.
     ".claude",
+    # ~/.claude.json is Claude Code's GLOBAL config — a sibling FILE of
+    # the ~/.claude dir, not under it, so the prefix match above does
+    # NOT cover it. It holds the `oauthAccount` identity block and ~50
+    # config keys; letting an authenticated session read it leaks
+    # account identity, and letting it write tampers with Claude Code's
+    # config. The live OAuth token lives in ~/.claude/.credentials.json
+    # (already covered by the `.claude` entry above).
+    ".claude.json",
 )
 
 def content_disposition_attachment(name: str) -> str:
@@ -182,6 +190,12 @@ def _resolve_fs_parent_for_new(path: str) -> tuple[Path, Path]:
     if target.name in ("", ".", ".."):
         raise HTTPException(status_code=400, detail="invalid basename")
     final = parent / target.name
+    # Enforce the jail/denylist on the FINAL target too, not just the
+    # parent: otherwise a denied *leaf* name (e.g. creating ~/.claude.json
+    # or ~/.claude when it doesn't yet exist) slips through because its
+    # parent (~) is allowed. The deny model must cover the thing being
+    # created/written, not only where it lives.
+    _enforce_fs_jail(final)
     return parent, final
 
 
@@ -591,20 +605,36 @@ async def fs_download(path: str) -> StreamingResponse:
 async def fs_rename(body: FsRenameBody) -> dict[str, Any]:
     src = _resolve_fs_path(body.src)
     _, final = _resolve_fs_parent_for_new(body.dst)
-    # lstat (not exists) so we don't follow a symlink whose target
-    # happens to be missing — we'd otherwise quietly overwrite the
-    # symlink target on rename, not the link itself.
+    # Close the intermediate-symlink TOCTOU the same way read/write/
+    # upload/download do (M1 fix): walk both parents with per-component
+    # O_NOFOLLOW and perform the rename via *dir_fd* so the kernel never
+    # re-walks the path strings after canonicalisation. Without this a
+    # same-UID concurrent writer (notably `claude` under prompt
+    # injection) could swap an intermediate dir for an out-of-jail
+    # symlink between resolve() and os.rename().
+    src_parent_fd, src_leaf = _walk_parent_nofollow(str(src))
     try:
-        final.lstat()
-        raise HTTPException(status_code=409, detail="dst already exists")
-    except FileNotFoundError:
-        pass
-    try:
-        os.rename(src, final)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="permission denied")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"rename failed: {exc}")
+        dst_parent_fd, dst_leaf = _walk_parent_nofollow(str(final))
+        try:
+            # lstat (follow_symlinks=False) so we don't follow a symlink
+            # whose target happens to be missing — we'd otherwise quietly
+            # overwrite the symlink target on rename, not the link itself.
+            try:
+                os.stat(dst_leaf, dir_fd=dst_parent_fd, follow_symlinks=False)
+                raise HTTPException(status_code=409, detail="dst already exists")
+            except FileNotFoundError:
+                pass
+            try:
+                os.rename(src_leaf, dst_leaf,
+                          src_dir_fd=src_parent_fd, dst_dir_fd=dst_parent_fd)
+            except PermissionError:
+                raise HTTPException(status_code=403, detail="permission denied")
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"rename failed: {exc}")
+        finally:
+            os.close(dst_parent_fd)
+    finally:
+        os.close(src_parent_fd)
     return {"path": str(final)}
 
 
@@ -614,14 +644,22 @@ async def fs_delete(body: FsPathBody) -> dict[str, bool]:
     walks a confirm UX for those; we don't recursively rm to keep
     a missed click from nuking a tree)."""
     target = _resolve_fs_path(body.path)
+    # Same M1 nofollow walk + dir_fd-relative syscall as rename/write so
+    # an intermediate-directory symlink swap between resolve() and the
+    # unlink/rmdir can't redirect the delete outside the jail.
+    parent_fd, leaf = _walk_parent_nofollow(str(target))
     try:
-        if target.is_dir():
-            os.rmdir(target)
-        else:
-            target.unlink()
-    except OSError as exc:
-        raise HTTPException(status_code=400,
-                            detail=f"delete failed: {exc}")
+        try:
+            st = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            if stat_mod.S_ISDIR(st.st_mode):
+                os.rmdir(leaf, dir_fd=parent_fd)
+            else:
+                os.unlink(leaf, dir_fd=parent_fd)
+        except OSError as exc:
+            raise HTTPException(status_code=400,
+                                detail=f"delete failed: {exc}")
+    finally:
+        os.close(parent_fd)
     return {"deleted": True}
 
 

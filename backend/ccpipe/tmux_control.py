@@ -11,6 +11,7 @@ is a separate `tmux attach-session` PTY (see pty_relay.py / ws.py).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -170,23 +171,44 @@ class TmuxControlClient:
         )
         self._proc = proc
         assert proc.stdout is not None
+        # Liveness watchdog. IMPORTANT: tmux control mode does NOT emit a
+        # periodic heartbeat — it is completely silent whenever no
+        # session/window structural change happens (the control client is
+        # attached to a detached sleep-infinity session, so it never sees
+        # %output). So a plain read timeout cannot distinguish "idle" from
+        # "wedged": the old code treated 90 s of silence as wedged and
+        # restarted, churning a supervisor restart (and the WS reconnects
+        # that ride on it) every 90 s of quiet. Instead, on a read timeout
+        # we actively PROBE by sending a harmless command; a live tmux
+        # answers with a %begin/%end block (which resets the loop), and
+        # only if the probe ITSELF goes unanswered do we conclude the
+        # process is genuinely wedged (kernel pause / swap thrash).
+        silent_probes = 0
         try:
             while True:
-                # 90 s timeout on readline so a frozen-but-alive tmux
-                # (kernel pause, swap thrash) triggers a supervisor
-                # restart instead of wedging every WS's session-event
-                # delivery indefinitely. Tmux emits at least periodic
-                # heartbeat / detach notifications during normal idle,
-                # so 90 s of pure silence is genuinely abnormal.
                 try:
                     line_bytes = await asyncio.wait_for(
                         proc.stdout.readline(), timeout=90.0)
                 except asyncio.TimeoutError:
-                    log.warning("tmux control-mode silent for 90s — "
-                                "treating as wedged, restarting supervisor")
-                    break
+                    silent_probes += 1
+                    if silent_probes >= 2:
+                        log.warning("tmux control-mode unresponsive to keepalive "
+                                    "probe — treating as wedged, restarting supervisor")
+                        break
+                    # Send a no-op command to elicit a %begin/%end response.
+                    # If tmux is alive this lands within ms and the next
+                    # readline succeeds, resetting silent_probes to 0.
+                    if proc.stdin is None or proc.stdin.is_closing():
+                        break
+                    try:
+                        proc.stdin.write(b"refresh-client\n")
+                        await proc.stdin.drain()
+                    except (OSError, ConnectionError):
+                        break
+                    continue
                 if not line_bytes:
                     break
+                silent_probes = 0
                 line = line_bytes.decode("utf-8", errors="replace").rstrip("\n")
                 await self._handle_line(line)
         finally:
@@ -194,7 +216,17 @@ class TmuxControlClient:
                 proc.terminate()
             except ProcessLookupError:
                 pass
-            await proc.wait()
+            # Bound the wait: a tmux -C that ignores SIGTERM would
+            # otherwise hang stop() (and app shutdown) on an unbounded
+            # proc.wait(). Escalate to SIGKILL after a short grace,
+            # matching the pattern in tmux._pane_pid / ws capture.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
             self._proc = None
 
     async def _handle_line(self, line: str) -> None:

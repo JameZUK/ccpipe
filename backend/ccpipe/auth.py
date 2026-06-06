@@ -768,6 +768,11 @@ def _origin_allowed(websocket: WebSocket) -> bool:
     return False
 
 
+# One-shot guard so the plain-HTTP Host-derived origin fallback is
+# logged at most once per process rather than on every WS upgrade.
+_logged_host_origin_fallback = False
+
+
 def _allowed_origins(websocket: WebSocket) -> set[str]:
     """Build the WS upgrade allowlist.
 
@@ -807,6 +812,17 @@ def _allowed_origins(websocket: WebSocket) -> set[str]:
     out = set()
     host = websocket.headers.get("host")
     if host:
+        # Surface the soft fallback once so an operator who never set
+        # CCPIPE_ALLOWED_ORIGINS knows the WS gate is Host-derived
+        # rather than a configured allowlist.
+        global _logged_host_origin_fallback
+        if not _logged_host_origin_fallback:
+            _logged_host_origin_fallback = True
+            log.warning(
+                "ws origin allowlist unset on plain HTTP — deriving from Host "
+                "header %r; set CCPIPE_ALLOWED_ORIGINS to pin the origin",
+                host,
+            )
         # Browsers may send Origin with either scheme; allow both.
         out.add(f"http://{host}")
         out.add(f"https://{host}")

@@ -715,9 +715,16 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         # WS stall) and the client should have reconnected to recover
         # via capture-pane replay. Search the journal for "ws closed:".
         # Fold in any chunks that pty_relay's bounded read queue had
-        # to drop (saturated by a stalled WS pump).
+        # to drop (saturated by a stalled WS pump). These bytes WERE
+        # read off the master fd, so they count toward bytes_read_pty
+        # as well as bytes_lost — otherwise the documented invariant
+        # `bytes_read_pty == bytes_sent_ws + bytes_lost` (debug.py +
+        # test_ws_byte_accounting) is false precisely in the loss case
+        # it exists to detect.
         try:
-            counters.bytes_lost += pty_proc.bytes_dropped()
+            dropped = pty_proc.bytes_dropped()
+            counters.bytes_lost += dropped
+            counters.bytes_read_pty += dropped
         except Exception:
             pass
         duration = time.monotonic() - counters.started_at
@@ -751,7 +758,14 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         # pending send_text/send_bytes doesn't race with the socket close.
         try:
             await asyncio.wait_for(pty_task, timeout=2.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        except asyncio.TimeoutError:
+            # pump didn't honour cancellation within 2s — likely stuck in a
+            # send on a wedged transport. terminate()'s fd-identity guards
+            # make the subsequent teardown safe, but surface it so a
+            # non-cancelling pump is visible rather than silent.
+            log.warning("pty pump did not exit within 2s of cancel "
+                        "(session=%s); tearing down anyway", counters.session)
+        except (asyncio.CancelledError, Exception):
             pass
         try:
             await pty_proc.terminate()
@@ -780,18 +794,36 @@ def _clamp_dim(v: int) -> int:
     return max(1, min(_RESIZE_MAX, v))
 
 _HISTORY_CAPTURE_TIMEOUT_S = 2.0
-# Match the frontend's xterm scrollback setting (terminal.ts). Lines older
-# than this would fall out of the browser's buffer anyway.
+# Capture at most this many lines of scrollback on attach. This is
+# deliberately matched to the frontend's xterm scrollback cap
+# (terminal.ts maxScrollback) — lines older than what xterm retains
+# can't be displayed anyway, so capturing them just wastes bytes.
+# NOTE: tmux history-limit is set to 50_000 (tmux_setup.py) for safety
+# margin / future use, but only the most recent _HISTORY_MAX_LINES are
+# delivered to the browser. The other ~40k lines are intentionally
+# undeliverable via reconnect replay; raise BOTH this and xterm's
+# maxScrollback together if deeper reachable history is ever wanted.
 _HISTORY_MAX_LINES = 10_000
+# Hard ceiling on the captured/cached blob size. With -e, each line
+# carries its full escape-sequence run, so a wide, densely-coloured pane
+# could otherwise produce a multi-MB transient (held in the subprocess
+# buffer + the cache + the outgoing frame simultaneously). Truncate from
+# the FRONT (oldest) so the newest content — what the user is looking at
+# — always survives.
+_HISTORY_MAX_BYTES = 4 * 1024 * 1024
 
 # Tiny per-session cache for the most recent capture-pane output, so
 # that a mobile reconnect storm (Wi-Fi → cellular handoff fires several
 # online/visibility events in quick succession) doesn't pay one full
-# `tmux capture-pane` for each WS attempt. A 1 s window means the
-# served bytes are at most that stale, which is well within tmux's own
-# pane-flush cadence. Keyed by session name; the few-KiB output per
-# entry caps the memory cost.
-_HISTORY_CACHE_TTL_S = 1.0
+# `tmux capture-pane` for each WS attempt. The window is kept SHORT:
+# a cached blob is a point-in-time snapshot, and the longer it's reused
+# the more a busy streaming session can mutate between the snapshot and
+# the attach redraw — content that scrolls out of the visible region in
+# that gap lands in neither the blob nor tmux's redraw, a dropped/
+# duplicated band at the seam. 250 ms still coalesces a handoff storm
+# (those events fire within tens of ms) while bounding staleness an
+# order of magnitude tighter than the old 1 s. Keyed by session name.
+_HISTORY_CACHE_TTL_S = 0.25
 _history_cache: dict[str, tuple[float, bytes]] = {}
 
 
@@ -800,6 +832,14 @@ def _clear_history_cache() -> None:
     between runs so a stale entry from one test case doesn't bypass
     the subprocess mock in the next one."""
     _history_cache.clear()
+
+
+def invalidate_history_cache(session: str) -> None:
+    """Drop the cached capture for *session*. Called when a session is
+    renamed or killed so a recreated session reusing the same name (or
+    the rename's new name) can't be served a stale blob from the prior
+    occupant within the TTL window."""
+    _history_cache.pop(session, None)
 
 
 async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
@@ -850,6 +890,12 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
             "-t", session,
             "-p",                              # print to stdout
             "-e",                              # include escape sequences
+            "-J",                              # join wrapped lines (+ trailing
+                                               # spaces) so xterm can re-wrap a
+                                               # logically-long line to the
+                                               # client viewport instead of
+                                               # rendering it hard-broken at the
+                                               # capture-time pane width
             "-S", f"-{_HISTORY_MAX_LINES}",    # start: N lines into history
             # No -E flag: capture extends through the visible pane to
             # the bottom, so the resulting bytes describe the WHOLE
@@ -880,6 +926,13 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     normalised = out.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     if not normalised.endswith(b"\r\n"):
         normalised += b"\r\n"
+    # Cap the blob size, truncating the OLDEST content from the front so
+    # the newest (visible) lines always survive. Trim to the next CRLF
+    # boundary so we never emit a half escape sequence / partial line.
+    if len(normalised) > _HISTORY_MAX_BYTES:
+        cut = len(normalised) - _HISTORY_MAX_BYTES
+        nl = normalised.find(b"\r\n", cut)
+        normalised = normalised[nl + 2:] if nl != -1 else normalised[cut:]
     # Cache for the coalesce window. Periodic eviction of stale entries
     # keeps the dict bounded — a session whose name is renamed/killed
     # ages out within TTL; until then we just have one stale ~MB entry.

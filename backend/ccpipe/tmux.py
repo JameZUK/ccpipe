@@ -384,6 +384,11 @@ def safe_name(name: str) -> str:
     code that interpolates a session name into a filesystem path."""
     if not name or name.startswith("-"):
         raise ValueError(f"invalid session name: {name!r}")
+    # Defense-in-depth length cap: a session name is a short human label;
+    # anything past 128 chars is abuse, not a real name, and bounds the
+    # size of every tmux argv / log line / display-message it flows into.
+    if len(name) > 128:
+        raise ValueError(f"invalid session name (too long): {name[:32]!r}…")
     if any(c in name for c in " \t\n.:/'\"\\$`;&|<>(){}[]*?#"):
         raise ValueError(f"invalid session name: {name!r}")
     return name

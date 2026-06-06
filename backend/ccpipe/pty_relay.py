@@ -114,6 +114,10 @@ class PtyProcess:
         # task that waits on the master fd becoming writable.
         self._write_buffer: bytearray = bytearray()
         self._drain_task: asyncio.Task[None] | None = None
+        # Child-reaper task. Held so asyncio doesn't GC it mid-flight
+        # (it only keeps a weak ref to running tasks) and so terminate()
+        # can cancel/await it during shutdown.
+        self._exit_task: asyncio.Task[None] | None = None
         # Signalled by write() whenever it enqueues bytes the drain
         # task needs to push. asyncio.Event.set() is loop-thread-safe
         # so write() can call it directly from the receive loop.
@@ -160,8 +164,9 @@ class PtyProcess:
         flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
         fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-        # Watch for child exit in background
-        loop.create_task(self._wait_for_exit())
+        # Watch for child exit in background. Keep the reference (see
+        # _exit_task docstring) — a bare create_task() is GC-vulnerable.
+        self._exit_task = loop.create_task(self._wait_for_exit())
         # Drain pending writes asynchronously when the FD is writable.
         self._drain_task = loop.create_task(self._drain_writes())
         # Register the master-fd reader ONCE for the PTY's lifetime.
@@ -228,6 +233,14 @@ class PtyProcess:
             data = b""
         if not data:
             self._read_eof = True
+            # A PTY master fd at child-EOF stays *persistently* readable,
+            # so leaving the reader registered makes the event loop invoke
+            # this callback in a tight 100%-of-one-core spin until
+            # terminate() finally removes it (a WS round-trip away, longer
+            # on a half-dead transport). Drop the reader the instant we see
+            # EOF; terminate()'s remove_reader is idempotent (try/except).
+            with contextlib.suppress(ValueError, KeyError, OSError):
+                asyncio.get_running_loop().remove_reader(fd)
         try:
             self._read_queue.put_nowait(data)
         except asyncio.QueueFull:
@@ -470,6 +483,22 @@ class PtyProcess:
             except Exception:
                 pass
             self._drain_task = None
+
+        # 4b. Reap the exit-watcher task. Normally already finished (the
+        #     child is dead and its finally set _exit_event), but cancel+
+        #     await guarantees it's not left pending and surfaces no
+        #     unobserved exception.
+        if self._exit_task is not None:
+            self._exit_task.cancel()
+            try:
+                await self._exit_task
+            except asyncio.CancelledError:
+                if asyncio.current_task() is not None and \
+                   asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                pass
+            self._exit_task = None
 
         # 5. Close the master FD.
         if fd is not None and self._master_fd is None:

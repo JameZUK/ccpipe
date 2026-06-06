@@ -40,6 +40,11 @@ _LRU_CAP = 5000
 # can't grow it unbounded.
 _QUEUE_MAX = 1000
 
+# Per-subscriber callback timeout. A subscriber callback ships audio over
+# a WS; a wedged transport must not pin a _speak task indefinitely and
+# starve the global speak-task budget. Mirrors tmux_control._dispatch.
+_SUB_CB_TIMEOUT_S = 5.0
+
 log = logging.getLogger(__name__)
 
 ChunkCallback = Callable[[bytes], Awaitable[None]]
@@ -622,22 +627,38 @@ class TtsService:
                  len(sentences), len(targets))
         await self._speak_pipelined(sentences, targets)
 
+    @staticmethod
+    async def _safe_sub_call(coro: Awaitable[None], what: str) -> None:
+        """Await one subscriber callback with a bounded timeout.
+
+        A subscriber's on_start/on_chunk/on_end sends bytes over a WS; a
+        wedged/half-dead transport could otherwise block the await
+        indefinitely and pin the whole _speak task, starving the global
+        speak-task budget (capped at 50). Time-box it like
+        tmux_control._dispatch's per-subscriber timeout so one stuck WS
+        can't stall TTS for everyone.
+        """
+        try:
+            await asyncio.wait_for(coro, timeout=_SUB_CB_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.warning("tts: subscriber %s timed out after %ss — skipping",
+                        what, _SUB_CB_TIMEOUT_S)
+        except Exception:
+            log.exception("%s failed", what)
+
     async def _speak_one(self, text: str, targets: list[_Subscription]) -> None:
         """Single Kokoro round-trip — used when there's only one sentence."""
         async for evt in self._kokoro_stream(text):
             kind, payload = evt
             if kind == "start":
                 for sub in targets:
-                    try: await sub.on_start(text)
-                    except Exception: log.exception("on_start failed")
+                    await self._safe_sub_call(sub.on_start(text), "on_start")
             elif kind == "chunk":
                 for sub in targets:
-                    try: await sub.on_chunk(payload)
-                    except Exception: log.exception("on_chunk failed")
+                    await self._safe_sub_call(sub.on_chunk(payload), "on_chunk")
             elif kind == "end":
                 for sub in targets:
-                    try: await sub.on_end()
-                    except Exception: log.exception("on_end failed")
+                    await self._safe_sub_call(sub.on_end(), "on_end")
 
     async def _speak_pipelined(self, sentences: list[str],
                                 targets: list[_Subscription]) -> None:
@@ -724,13 +745,11 @@ class TtsService:
                         # here is purely defensive against a duplicate event.
                         if not sent_start:
                             for sub in targets:
-                                try: await sub.on_start(sentence)
-                                except Exception: log.exception("on_start failed")
+                                await self._safe_sub_call(sub.on_start(sentence), "on_start")
                             sent_start = True
                     elif kind == "chunk":
                         for sub in targets:
-                            try: await sub.on_chunk(payload)
-                            except Exception: log.exception("on_chunk failed")
+                            await self._safe_sub_call(sub.on_chunk(payload), "on_chunk")
                     elif kind == "end":
                         # We'll fire on_end below after EOS, so we know we've
                         # actually exhausted the queue.
@@ -741,8 +760,7 @@ class TtsService:
                 # had started, which corrupts its visualiser state.
                 if sent_start:
                     for sub in targets:
-                        try: await sub.on_end()
-                        except Exception: log.exception("on_end failed")
+                        await self._safe_sub_call(sub.on_end(), "on_end")
                 # Reap the producer task cleanly. Cancel-then-gather so if
                 # we ourselves are being cancelled (outer task teardown),
                 # the producer is told to stop AND its result is reaped —
