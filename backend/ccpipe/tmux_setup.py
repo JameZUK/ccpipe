@@ -41,6 +41,19 @@ def _resolve_shell() -> str:
 
 async def apply_server_defaults() -> None:
     shell = _resolve_shell()
+    # Ensure the tmux server is actually running before we set anything.
+    # On a cold boot ccpipe's lifespan calls apply_server_defaults() BEFORE
+    # anything else spawns the server (sticky restore + control client come
+    # afterwards), so without this every set-option below fails with
+    # "error connecting to /tmp/tmux-*/default (No such file or directory)"
+    # and is silently lost — leaving the server at tmux's built-in defaults
+    # (alternate-screen ON, history-limit 2000), which breaks scrollback.
+    # `start-server` is idempotent, creates the server without a session,
+    # and guarantees both that the options below stick AND that any sessions
+    # created later (sticky restore) inherit them.
+    code, out = await _run_tmux("start-server")
+    if code != 0:
+        log.warning("tmux start-server failed (rc=%s): %s", code, out)
     options = [
         ("default-shell", shell),
         ("default-command", shell),       # so login-shell quirks don't bite
@@ -65,9 +78,9 @@ async def apply_server_defaults() -> None:
     for name, value in options:
         code, out = await _run_tmux("set-option", "-g", name, value)
         if code != 0:
-            log.info("tmux set-option -g %s %s: %s", name, value, out)
+            log.warning("tmux set-option -g %s %s failed: %s", name, value, out)
     for name, value in window_options:
         code, out = await _run_tmux("set-window-option", "-g", name, value)
         if code != 0:
-            log.info("tmux set-window-option -g %s %s: %s", name, value, out)
+            log.warning("tmux set-window-option -g %s %s failed: %s", name, value, out)
     log.info("tmux server defaults applied (shell=%s)", shell)
