@@ -31,11 +31,15 @@ def test_safe_name_rejects_leading_dash():
 
 
 @pytest.mark.asyncio
-async def test_apply_server_defaults_starts_server_before_options(monkeypatch):
+async def test_apply_server_defaults_anchors_server_before_options(monkeypatch):
     # Regression: on a cold boot apply_server_defaults() runs before any
-    # tmux server exists, so it must `start-server` FIRST or every
-    # set-option is lost against a missing socket (silently reverting
-    # alternate-screen->on / history-limit->2000 and breaking scrollback).
+    # tmux session exists. A session-less server exits immediately, so the
+    # -g options must be set on a server kept alive by a real session —
+    # otherwise sticky-restore spawns a fresh, unconfigured server and the
+    # sessions come up at tmux defaults (alternate-screen ON / history 2000),
+    # breaking scrollback. So a persistent anchor `new-session` must be the
+    # FIRST command, before any set-option.
+    from ccpipe.tmux_control import CONTROL_SESSION_NAME
     calls: list[tuple[str, ...]] = []
 
     async def fake_run_tmux(*args: str) -> tuple[int, str]:
@@ -46,10 +50,13 @@ async def test_apply_server_defaults_starts_server_before_options(monkeypatch):
     await tmux_setup.apply_server_defaults()
 
     assert calls, "expected tmux commands to be issued"
-    assert calls[0] == ("start-server",), (
-        f"start-server must be the first command, got {calls[0]}"
+    # First command creates the long-lived anchor session.
+    assert calls[0][0] == "new-session", (
+        f"a persistent anchor new-session must be first, got {calls[0]}"
     )
-    # Every set-option / set-window-option must come AFTER start-server.
+    assert CONTROL_SESSION_NAME in calls[0]
+    assert "sleep" in calls[0] and "infinity" in calls[0]
+    # Every set-option / set-window-option must come AFTER the anchor.
     first_set = next(
         i for i, c in enumerate(calls)
         if c and c[0] in ("set-option", "set-window-option")

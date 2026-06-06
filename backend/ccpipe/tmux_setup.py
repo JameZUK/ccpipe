@@ -40,20 +40,32 @@ def _resolve_shell() -> str:
 
 
 async def apply_server_defaults() -> None:
+    # Lazy import to avoid the tmux <-> tmux_control import cycle.
+    from .tmux_control import CONTROL_SESSION_NAME
     shell = _resolve_shell()
-    # Ensure the tmux server is actually running before we set anything.
     # On a cold boot ccpipe's lifespan calls apply_server_defaults() BEFORE
-    # anything else spawns the server (sticky restore + control client come
-    # afterwards), so without this every set-option below fails with
-    # "error connecting to /tmp/tmux-*/default (No such file or directory)"
-    # and is silently lost — leaving the server at tmux's built-in defaults
-    # (alternate-screen ON, history-limit 2000), which breaks scrollback.
-    # `start-server` is idempotent, creates the server without a session,
-    # and guarantees both that the options below stick AND that any sessions
-    # created later (sticky restore) inherit them.
-    code, out = await _run_tmux("start-server")
-    if code != 0:
-        log.warning("tmux start-server failed (rc=%s): %s", code, out)
+    # anything else spawns the tmux server (sticky restore + control client
+    # come afterwards). We must set the -g options on a server that will
+    # still be alive when those later sessions are created — otherwise the
+    # sessions come up with tmux's built-in defaults (alternate-screen ON,
+    # history-limit 2000), which breaks scrollback.
+    #
+    # `tmux start-server` is NOT enough: a tmux server with zero sessions
+    # exits immediately, so the options set on it evaporate and the next
+    # `new-session` (sticky restore) spawns a fresh, unconfigured server.
+    # Instead, create the long-lived control/anchor session FIRST (the same
+    # detached `sleep infinity` session control_client uses). That keeps the
+    # server alive so the -g options below persist, and every session
+    # created afterwards inherits them. control_client.start() is
+    # idempotent and reuses this session, so creating it here is safe.
+    code, out = await _run_tmux(
+        "new-session", "-d", "-s", CONTROL_SESSION_NAME, "sleep", "infinity",
+    )
+    if code != 0 and "duplicate session" not in out.lower():
+        # Non-zero is expected only when the anchor already exists (warm
+        # path). Anything else means the server may not be up — log it; the
+        # set-option calls below will then also warn and the cause is clear.
+        log.warning("tmux anchor session create (rc=%s): %s", code, out)
     options = [
         ("default-shell", shell),
         ("default-command", shell),       # so login-shell quirks don't bite
