@@ -68,6 +68,23 @@ concurrent writer (e.g. `claude` under prompt injection) can't swap an
 intermediate directory for an out-of-jail symlink between path
 resolution and the syscall.
 
+## Pre-auth request-body DoS
+
+FastAPI reads and parses a route's JSON body *before* its auth/CSRF
+dependencies run, so an unauthenticated request could otherwise make the
+server ingest up to the proxy's `client_max_body_size` (64 MB) and
+`json.loads` it before the 401 — a memory/CPU amplification primitive,
+plus a slow-body connection-slot hold. `main.py`'s `_BodyCapMiddleware`
+caps every body-taking route (64 KiB default; explicit higher caps for
+`/api/fs/write`, `/api/debug/snapshot`; `/api/fs/upload` is exempt and
+self-caps while streaming). It counts bytes **as they stream**, so a
+chunked or Content-Length-spoofed body can't bypass it. The bundled
+nginx sample adds `client_header_timeout`/`client_body_timeout` (and a
+commented per-IP `limit_req`) to close the slow-client slot-hold for
+nginx-only deployments; an edge proxy that buffers request bodies (e.g.
+Cloudflare) already absorbs the slow path. Login additionally costs a
+rate-limit bucket slot regardless of body (see `auth.py`).
+
 ## WebSocket fuzz coverage
 
 T7 of the original pen-test ("WebSocket message-type abuse") is

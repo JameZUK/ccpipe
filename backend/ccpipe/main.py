@@ -13,7 +13,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import PlainTextResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -269,32 +269,89 @@ async def _warn_on_tls_misconfig(request: Request, call_next):
     return await call_next(request)
 
 
-# ─── Pre-auth body-size cap (DoS hardening) ───────────────────────────────
-# Pass-2 review finding #9: a deeply nested JSON body (~6 KB, ~990 levels)
-# on POST /api/auth/login tripped an unhandled RecursionError → 500,
-# generated BEFORE the rate-limit check so it didn't even cost the
-# attacker their attempt budget. A realistic login body is <500 bytes;
-# anything above a few KB on this endpoint is an attack. Reject early
-# with 413 so the JSON parser never sees the payload.
-_AUTH_LOGIN_BODY_CAP = 4 * 1024  # 4 KiB — generous over any real body
+# ─── Pre-auth request-body size cap (DoS hardening) ───────────────────────
+# FastAPI reads and json.loads-es a route's request body BEFORE that route's
+# dependencies (auth / CSRF) run, so without a cap an UNAUTHENTICATED request
+# can make the server ingest up to the proxy's client_max_body_size (64 MB)
+# and parse it before returning 401 — a pre-auth memory/CPU amplification
+# primitive and a slow-body connection-slot exhaustion primitive (pentest
+# pass-4 findings #22/#23). Originally only POST /api/auth/login was capped
+# (pass-2 #9, a deep-nested-JSON RecursionError→500); that one-off left every
+# other body-taking route exposed.
+#
+# This caps ALL body-taking routes by default and — crucially — counts bytes
+# AS THEY STREAM, not just the declared Content-Length, so a chunked or
+# Content-Length-spoofed body can't slip past (the old login cap, and the
+# obvious "generalise the Content-Length check" fix, are both bypassable that
+# way). Routes that legitimately carry large bodies get explicit higher caps;
+# `None` exempts a route that streams + caps itself.
+_DEFAULT_BODY_CAP = 64 * 1024                          # control-plane JSON
+_BODY_CAPS: dict[str, int | None] = {
+    "/api/auth/login":     4 * 1024,                   # realistic body <500 B
+    "/api/fs/write":       4 * 1024 * 1024,            # 1 MiB editor limit + JSON-escape slack
+    "/api/fs/upload":      None,                       # streamed + capped by upload_limit_mb
+    "/api/debug/snapshot": 512 * 1024,                 # 256 KiB payload cap + envelope slack
+}
 
 
-@app.middleware("http")
-async def _cap_auth_login_body(request: Request, call_next):
-    if request.method == "POST" and request.url.path == "/api/auth/login":
-        cl = request.headers.get("content-length")
-        if cl is not None:
-            try:
-                if int(cl) > _AUTH_LOGIN_BODY_CAP:
-                    return PlainTextResponse(
-                        "request body too large",
-                        status_code=413,
-                        headers={"Content-Type": "text/plain"},
-                    )
-            except ValueError:
-                # Malformed Content-Length — let the server reject it.
-                pass
-    return await call_next(request)
+def _body_cap_for(method: str, path: str) -> int | None:
+    if method not in ("POST", "PUT", "PATCH"):
+        return None
+    return _BODY_CAPS.get(path, _DEFAULT_BODY_CAP)
+
+
+async def _send_413(send) -> None:
+    await send({
+        "type": "http.response.start",
+        "status": 413,
+        "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+    })
+    await send({"type": "http.response.body", "body": b"request body too large"})
+
+
+class _BodyCapMiddleware:
+    """Pure-ASGI middleware enforcing a per-path request-body byte ceiling
+    before the route reads the body. Pure ASGI (not BaseHTTPMiddleware) so it
+    can wrap `receive` and count streamed bytes reliably."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        cap = _body_cap_for(scope.get("method", ""), scope.get("path", ""))
+        if cap is None:
+            return await self.app(scope, receive, send)
+        # Fast path: reject a declared-oversize body before reading anything.
+        for name, value in scope.get("headers") or ():
+            if name == b"content-length":
+                try:
+                    if int(value) > cap:
+                        return await _send_413(send)
+                except ValueError:
+                    pass
+                break
+        # Streaming guard: count actual bytes so chunked / spoofed
+        # Content-Length can't bypass the fast path. The body is read before
+        # any route emits a response, so raising HTTPException(413) here is
+        # rendered cleanly (FastAPI re-raises HTTPException; Starlette's
+        # exception handler turns it into the 413 response).
+        total = 0
+
+        async def capped_receive():
+            nonlocal total
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > cap:
+                    raise HTTPException(status_code=413, detail="request body too large")
+            return message
+
+        await self.app(scope, capped_receive, send)
+
+
+app.add_middleware(_BodyCapMiddleware)
 
 
 # Belt-and-braces: if a payload ever slips past the size guard (chunked

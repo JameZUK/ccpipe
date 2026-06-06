@@ -1071,6 +1071,30 @@ def test_login_rejects_oversized_body(authed_client):
     assert r.status_code == 413, r.text
 
 
+def test_body_cap_generalised_to_nonlogin_routes(authed_client):
+    """Pentest pass-4 #22/#23: the body-size cap must cover EVERY
+    body-taking route, not just /api/auth/login — otherwise an unauth
+    request makes the server ingest up to the proxy's 64 MB and json.loads
+    it before the auth check. An 80 KiB body to a default-capped (64 KiB)
+    control route is rejected with 413 before the route runs."""
+    big = '{"path":"/tmp/x","content":"' + ("a" * 80 * 1024) + '"}'
+    r = authed_client.post(
+        "/api/fs/mkdir",
+        headers={"X-Requested-By": "ccpipe", "Content-Type": "application/json"},
+        content=big,
+    )
+    assert r.status_code == 413, r.text
+    # A normal-sized body to the same route is NOT rejected by the cap —
+    # it proceeds to the route's own validation (here a jail 403 for an
+    # out-of-root path). Proves we didn't over-cap legitimate requests.
+    r2 = authed_client.post(
+        "/api/fs/mkdir",
+        headers={"X-Requested-By": "ccpipe", "Content-Type": "application/json"},
+        content='{"path":"/tmp/ccpipe_probe_should_not_exist"}',
+    )
+    assert r2.status_code != 413, r2.text
+
+
 def test_recursion_error_handler_returns_400(authed_client):
     """Belt-and-braces: if a payload ever slips past the body-size
     cap and triggers RecursionError during parsing, the handler must
