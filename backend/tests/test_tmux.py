@@ -42,7 +42,7 @@ async def test_apply_server_defaults_anchors_server_before_options(monkeypatch):
     from ccpipe.tmux_control import CONTROL_SESSION_NAME
     calls: list[tuple[str, ...]] = []
 
-    async def fake_run_tmux(*args: str) -> tuple[int, str]:
+    async def fake_run_tmux(*args: str, capture: bool = True) -> tuple[int, str]:
         calls.append(args)
         return 0, ""
 

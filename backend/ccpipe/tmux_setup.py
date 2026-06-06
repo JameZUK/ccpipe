@@ -16,15 +16,22 @@ import shutil
 log = logging.getLogger(__name__)
 
 
-async def _run_tmux(*args: str) -> tuple[int, str]:
+async def _run_tmux(*args: str, capture: bool = True) -> tuple[int, str]:
+    # capture=False routes stdout to DEVNULL instead of a pipe. REQUIRED
+    # for any tmux command that may SPAWN the server daemon on a cold boot
+    # (the first new-session): the daemon inherits our stdout fd and holds
+    # it open for its whole lifetime, so a pipe we drain via communicate()
+    # never sees EOF and the call hangs forever (this wedged startup on the
+    # 2026-06-06 reboot). stderr stays a pipe for error capture.
     from . import tmux as _tmux
     proc = await asyncio.create_subprocess_exec(
         _tmux.TMUX_BIN, *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stdout=asyncio.subprocess.PIPE if capture else asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.STDOUT if capture else asyncio.subprocess.PIPE,
     )
-    out, _ = await proc.communicate()
-    return proc.returncode or 0, out.decode(errors="replace").strip()
+    out, err = await proc.communicate()
+    blob = out if out is not None else err
+    return proc.returncode or 0, (blob.decode(errors="replace").strip() if blob else "")
 
 
 def _resolve_shell() -> str:
@@ -58,8 +65,11 @@ async def apply_server_defaults() -> None:
     # server alive so the -g options below persist, and every session
     # created afterwards inherits them. control_client.start() is
     # idempotent and reuses this session, so creating it here is safe.
+    # capture=False so the spawned server daemon can't hold our stdout pipe
+    # open and hang startup (see _run_tmux).
     code, out = await _run_tmux(
         "new-session", "-d", "-s", CONTROL_SESSION_NAME, "sleep", "infinity",
+        capture=False,
     )
     if code != 0 and "duplicate session" not in out.lower():
         # Non-zero is expected only when the anchor already exists (warm
