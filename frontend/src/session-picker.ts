@@ -179,10 +179,11 @@ export function renderSessionPicker(
   };
 
   // Start probing AFTER the event loop drains, then re-tick on an
-  // interval. Both timers are stopped automatically once the picker
-  // is detached from the DOM — frame.isConnected goes false when
-  // attachTerminal wipes root, so we don't need a separate dispose
-  // hook.
+  // interval. The interval self-stops when frame.isConnected goes false
+  // (fallback), but we ALSO wire an explicit ccpipe:dispose teardown so
+  // the interval + the pending idle callback + any in-flight probe are
+  // torn down immediately when the picker is replaced, rather than
+  // lingering for up to one poll interval with an in-flight fetch.
   //
   // Why requestIdleCallback for the first probe: a synchronous
   // `void probeHealth()` here would fire while the picker UI is
@@ -194,20 +195,31 @@ export function renderSessionPicker(
   // boot work clear, and the first reading is honest. See
   // [[feedback-rtt-measurement-pitfalls]] for the broader pattern.
   const fireFirstProbe = () => { void probeHealth(); };
+  let idleHandle: number | null = null;
+  let firstProbeTimer: number | null = null;
   if (typeof window.requestIdleCallback === "function") {
-    window.requestIdleCallback(fireFirstProbe, { timeout: 500 });
+    idleHandle = window.requestIdleCallback(fireFirstProbe, { timeout: 500 });
   } else {
-    setTimeout(fireFirstProbe, 0);
+    firstProbeTimer = window.setTimeout(fireFirstProbe, 0);
   }
   healthTimer = window.setInterval(() => {
     if (!frame.isConnected) {
-      if (healthTimer !== null) clearInterval(healthTimer);
-      healthTimer = null;
-      activeProbe?.abort();
+      teardownHealth();
       return;
     }
     void probeHealth();
   }, HEALTH_POLL_MS);
+
+  const teardownHealth = (): void => {
+    if (healthTimer !== null) { clearInterval(healthTimer); healthTimer = null; }
+    if (firstProbeTimer !== null) { clearTimeout(firstProbeTimer); firstProbeTimer = null; }
+    if (idleHandle !== null && typeof window.cancelIdleCallback === "function") {
+      window.cancelIdleCallback(idleHandle);
+    }
+    idleHandle = null;
+    activeProbe?.abort();
+  };
+  frame.addEventListener("ccpipe:dispose", teardownHealth, { once: true });
 
   const picker = document.createElement("div");
   picker.className = "picker";
@@ -746,7 +758,16 @@ export function renderSessionPicker(
       input.replaceWith(restored);
     };
 
+    // Both Enter and blur are wired to commit, and Enter's success path
+    // calls restore() (input.replaceWith) which itself fires blur — so
+    // without this guard a single Enter commits twice (two PATCHes /
+    // spurious "rename failed" on the second). settled latches on the
+    // first commit/restore so every later handler is a no-op.
+    let settled = false;
+
     const commit = async () => {
+      if (settled) return;
+      settled = true;
       const newName = input.value.trim();
       if (!newName || newName === s.name) {
         restore();
@@ -768,7 +789,10 @@ export function renderSessionPicker(
 
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); void commit(); }
-      else if (e.key === "Escape") { e.preventDefault(); restore(); }
+      else if (e.key === "Escape") {
+        e.preventDefault();
+        if (!settled) { settled = true; restore(); }
+      }
     });
     input.addEventListener("blur", () => void commit());
   };

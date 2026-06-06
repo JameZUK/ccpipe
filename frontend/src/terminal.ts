@@ -1,4 +1,4 @@
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -196,6 +196,11 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // listener removal — checking the flag here prevents fit.fit() /
   // term.cols from running against a disposed terminal.
   let disposed = false;
+  // Pending term.onRender disposers from in-flight scrollToBottom calls.
+  // Each scrollToBottom registers one; it's removed when disposed (by the
+  // render callback, the pass-3 timeout, or component dispose()). Tracked
+  // so dispose() can tear down any that are still outstanding.
+  const pendingRenderDisposers = new Set<() => void>();
 
   // Minimum container size below which we refuse to call fit.fit().
   // A real terminal has dozens of cols/rows; anything below this is a
@@ -351,27 +356,45 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // shows exactly which class of sequence is doing the damage.
   // Bounded so memory stays flat over long sessions.
   const RECENT_SCROLL_EVENTS_MAX = 200;
-  const recentScrollEvents: Array<{
-    t: number;
-    kind: string;
-    n: number;
-    ydisp: number;
-    ybase: number;
-    cursorY: number;
-  }> = [];
+  type ScrollEvent = {
+    t: number; kind: string; n: number;
+    ydisp: number; ybase: number; cursorY: number;
+  };
+  // Pre-allocated ring buffer. logScrollEvent runs in the parser hot
+  // path on EVERY IL/DL/SD/ED/DECSTBM/SU — Ink redraws emit these at
+  // high frequency — so it must be allocation-free and O(1). We mutate
+  // a fixed pool of slots in place and advance a write cursor, rather
+  // than push()+shift() (shift is O(n) and push allocates per event).
+  const scrollSlots: ScrollEvent[] = [];
+  let scrollWrite = 0;
+  let scrollCount = 0;
   const logScrollEvent = (kind: string, n: number): void => {
     const buf = term.buffer.active;
-    if (recentScrollEvents.length >= RECENT_SCROLL_EVENTS_MAX) {
-      recentScrollEvents.shift();
+    let slot = scrollSlots[scrollWrite];
+    if (slot === undefined) {
+      slot = { t: 0, kind: "", n: 0, ydisp: 0, ybase: 0, cursorY: 0 };
+      scrollSlots[scrollWrite] = slot;
     }
-    recentScrollEvents.push({
-      t: performance.now(),
-      kind,
-      n,
-      ydisp: buf.viewportY,
-      ybase: buf.baseY,
-      cursorY: buf.cursorY,
-    });
+    slot.t = performance.now();
+    slot.kind = kind;
+    slot.n = n;
+    slot.ydisp = buf.viewportY;
+    slot.ybase = buf.baseY;
+    slot.cursorY = buf.cursorY;
+    scrollWrite = (scrollWrite + 1) % RECENT_SCROLL_EVENTS_MAX;
+    if (scrollCount < RECENT_SCROLL_EVENTS_MAX) scrollCount++;
+  };
+  // Copy the ring out in chronological (oldest→newest) order for a
+  // debug snapshot. Only called on Ctrl+Shift+D, so allocation here is
+  // fine.
+  const snapshotScrollEvents = (): ScrollEvent[] => {
+    const out: ScrollEvent[] = [];
+    const start = (scrollWrite - scrollCount + RECENT_SCROLL_EVENTS_MAX * 2)
+      % RECENT_SCROLL_EVENTS_MAX;
+    for (let i = 0; i < scrollCount; i++) {
+      out.push({ ...scrollSlots[(start + i) % RECENT_SCROLL_EVENTS_MAX] });
+    }
+    return out;
   };
 
   // Patch xterm.js's CSI SU (`\x1b[<n>S`) so the scrolled-out top
@@ -419,6 +442,13 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   })._core;
   const ih = core?._inputHandler;
   const bs = core?._bufferService;
+  // Surfaced in getDebugState() so a snapshot reveals a silent
+  // breakage. A full offscreen self-test (write SU, assert baseY grew)
+  // was considered but rejected: spinning a throwaway Terminal at
+  // startup is heavy and the feature-detection below already catches a
+  // renamed-internals upgrade — this flag just makes that catch
+  // observable from a debug snapshot rather than only the console.
+  let suPatchInstalled = false;
   if (
     ih && bs &&
     typeof ih.scrollUp === "function" &&
@@ -426,6 +456,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     typeof ih._eraseAttrData === "function" &&
     bs.buffer
   ) {
+    suPatchInstalled = true;
     const originalScrollUp = ih.scrollUp.bind(ih);
     ih.scrollUp = function (params: { params: number[] }): boolean {
       const buf = bs.buffer!;
@@ -434,7 +465,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
         // semantics (content above the region must not be touched).
         return originalScrollUp(params);
       }
-      let count = (params.params?.[0] as number | undefined) || 1;
+      // Clamp to rows: scrolling the region up by more than its height
+      // blanks it entirely, so any count > rows is visually identical to
+      // count === rows. Without this a hostile/garbled PTY stream
+      // (`\x1b[2147483647S`, which xterm only caps at 0x7FFFFFFF) would
+      // spin bs.scroll() ~2.1B times and hang the tab.
+      let count = Math.min((params.params?.[0] as number | undefined) || 1, term.rows);
       logScrollEvent("SU(patched)", count);
       while (count-- > 0) {
         bs.scroll!(ih._eraseAttrData!());
@@ -500,6 +536,17 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // Returning true here suppresses; false falls through to xterm's
   // default handler. One handler per final char keeps the
   // log-then-suppress decision in a single place.
+  //
+  // DELIBERATE DIVERGENCE FROM THE PTY: this unconditionally drops ED3,
+  // so a legitimate `clear`/scrollback-wipe from the shell or app is NOT
+  // reflected in xterm — the browser keeps scrollback tmux has discarded.
+  // We considered scoping the suppression to "only when scrolled away
+  // from the tail" (viewportY < baseY) to let clears through at the live
+  // tail, but rejected it: Ink emits ED3 during ordinary redraws, not
+  // just on an explicit clear, so a conditional pass-through would wipe
+  // the browser's scrollback during normal use. Preserving scrollback is
+  // the whole point of this wrapper, so blanket suppression is correct
+  // here even though it diverges from a strict terminal.
   term.parser.registerCsiHandler({ final: "J" }, (params) => {
     const n = firstParam(params);
     logScrollEvent(`ED${n}`, 0);
@@ -817,19 +864,18 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
    * scrollToBottom() after it would run before the buffer has grown. */
   const resetBuffer = (): void => {
     if (disposed) return;
-    // term.reset() is RIS (\x1bc): it clears the visible screen and
-    // terminal state but LEAVES THE SCROLLBACK INTACT. On reconnect
-    // the post-reset history replay then *appends* to the surviving
-    // scrollback; once the combined buffer exceeds maxScrollback
-    // (10000) xterm evicts the OLDEST lines — which were the user's
-    // earliest visible history. Symptom: "scrollback is missing some
-    // history, fixed by a full page reload" (reload re-creates the
-    // xterm instance so there's nothing to survive).
+    // term.reset() in xterm 5.5.0 DOES wipe the scrollback: it routes
+    // through BufferSet.reset(), which allocates brand-new normal+alt
+    // Buffer objects (verified in node_modules @xterm/.../BufferSet.ts).
+    // So a fresh buffer — empty scrollback — is in place before the
+    // reconnect history replay, which is exactly what we want (no stale
+    // history surviving to be appended-onto and then evicted).
     //
-    // term.clear() is the documented way to wipe the entire buffer
-    // *including* scrollback. Call it after reset() so we get both
-    // a clean state machine and a clean buffer before the replay
-    // bytes arrive.
+    // term.clear() afterwards is therefore a belt-and-braces no-op given
+    // this ordering (it clears an already-fresh buffer). Kept defensively
+    // in case a future xterm changes reset() semantics; harmless today.
+    // (NB: an earlier comment here claimed reset() PRESERVES scrollback —
+    // that was inverted and is corrected above.)
     try { term.reset(); } catch {}
     try { term.clear(); } catch {}
     try { term.scrollToBottom(); } catch {}
@@ -864,17 +910,33 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // rows by now, so its scrollHeight reflects the buffer. Force the
     // viewport's scrollTop too because the DOM renderer's CSSOM scroll
     // can lag behind xterm's ydisp on the slow path.
-    const disposable = term.onRender(() => {
-      disposable.dispose();
+    //
+    // The onRender subscription is disposed (a) inside the callback when
+    // it fires, (b) by the pass-3 timeout if a render NEVER fires before
+    // then, and (c) on component dispose() — so it can't leak even when
+    // the terminal is already idle (no further renders) at call time.
+    let renderDisposable: IDisposable | null = null;
+    const disposeRender = (): void => {
+      if (renderDisposable) {
+        try { renderDisposable.dispose(); } catch {}
+        renderDisposable = null;
+        pendingRenderDisposers.delete(disposeRender);
+      }
+    };
+    renderDisposable = term.onRender(() => {
+      disposeRender();
       if (disposed) return;
       try { term.scrollToBottom(); } catch {}
       const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
       if (viewport) viewport.scrollTop = viewport.scrollHeight;
     });
+    pendingRenderDisposers.add(disposeRender);
     // Pass 3 — +100ms safety belt: catches any further async layout
     // settling that onRender missed (notably the canvas-vs-viewport
-    // sync on the DOM renderer's slow path).
+    // sync on the DOM renderer's slow path). Also tears down the
+    // pass-2 subscription if no render ever fired.
     window.setTimeout(() => {
+      disposeRender();
       if (disposed) return;
       try { term.scrollToBottom(); } catch {}
       const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
@@ -915,7 +977,11 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       // event. Populated by the patched scrollUp (SU) plus the passive
       // parser handlers (IL/DL/SD/ED/DECSTBM). Ring-buffer-capped at
       // 200; oldest evicted. Look here first when scrollback regresses.
-      recentScrollEvents: recentScrollEvents.slice(),
+      recentScrollEvents: snapshotScrollEvents(),
+      // Whether the InputHandler.scrollUp scrollback patch installed
+      // successfully. If false, a future xterm upgrade likely renamed
+      // the private internals and scrollback will drop lines on SU.
+      suPatchInstalled,
     };
   };
 
@@ -962,6 +1028,8 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     dispose: () => {
       disposed = true;
       if (wireRetryTimer !== null) { clearTimeout(wireRetryTimer); wireRetryTimer = null; }
+      // Tear down any outstanding scrollToBottom onRender subscriptions.
+      for (const dispose of [...pendingRenderDisposers]) dispose();
       pillCleanup?.();
       scrollCleanup?.();
       if (pending !== null) { clearTimeout(pending); pending = null; }

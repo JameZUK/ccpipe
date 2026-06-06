@@ -158,6 +158,14 @@ async function attachTerminal(session: string): Promise<void> {
   // the same session instead of bouncing to the picker.
   saveLastSession(session);
 
+  // Fire dispose on whatever is currently mounted (session picker or a
+  // prior terminal view) before wiping it, so its timers/listeners
+  // (e.g. the picker's health-poll interval + idle callback) tear down
+  // promptly rather than lingering until a fallback isConnected check.
+  // Clearing via innerHTML alone fires no events.
+  for (const el of app.querySelectorAll(".frame, .terminal-view")) {
+    el.dispatchEvent(new CustomEvent("ccpipe:dispose"));
+  }
   app.innerHTML = "";
   const mobile = isMobileLayout();
   document.body.classList.toggle("mobile", mobile);
@@ -682,6 +690,13 @@ async function attachTerminal(session: string): Promise<void> {
       // into a closed sendBinary).
       if (status !== "open" && recording) {
         setRecording(false);
+        // Reset the PTT state machine and detach the silence callback
+        // here too: otherwise a VAD/max-rec silence callback that was
+        // already armed can fire AFTER the drop, re-enter
+        // handleMicEvent("tap") → toggleMic with recording=false, and
+        // start a brand-new /voice recording over the (now dead) socket.
+        pttHoldActive = false;
+        if (mic) mic.onSilence = null;
         try { mic?.stop(); } catch {}
       }
       setConnected(status === "open");
@@ -912,11 +927,26 @@ function renderSessionLabel(el: HTMLElement, session: string): void {
 
 // ─── Boot ───────────────────────────────────────────────────────────────
 
+// Monotonic bootstrap generation. bootstrap() can be triggered from
+// several independent callbacks (onSessionGone, onAuthRevoked, brand
+// click, settings onSessionInvalidated, login onSuccess) and it awaits
+// network round-trips before mounting. Without a guard, two overlapping
+// runs both clear .terminal-view (which fires no dispose for an
+// innerHTML wipe), so the slower run mounts a second live socket while
+// the first's socket keeps reconnecting/subscribing in the background —
+// the duplicate-subscription / duplicate-TTS class we work hard to
+// avoid. Each run captures its generation; if a newer run started while
+// it was awaiting, the stale run bails before mounting anything.
+let bootstrapGen = 0;
+
 async function bootstrap(): Promise<void> {
+  const myGen = ++bootstrapGen;
+  const isStale = (): boolean => myGen !== bootstrapGen;
   // Dispatch a tear-down event so any pending key listeners cleanly detach.
   app.querySelector(".terminal-view")?.dispatchEvent(new CustomEvent("ccpipe:dispose"));
   try {
     const status = await fetchAuthStatus();
+    if (isStale()) return;
     authRequired = status.required;
     if (status.required && !status.authenticated) {
       // If auth was lost, the stored session is meaningless — clear it
@@ -926,7 +956,14 @@ async function bootstrap(): Promise<void> {
       return;
     }
   } catch (e) {
-    console.warn("auth status failed; proceeding without auth check:", e);
+    console.warn("auth status failed:", e);
+    if (isStale()) return;
+    // Do NOT proceed as if unauthenticated — a transient network/5xx
+    // failure of the auth probe would otherwise drop the user into the
+    // picker (which then 401s on every call) or attach blindly. Show a
+    // retry affordance and leave authRequired untouched.
+    renderBootstrapError(() => bootstrap());
+    return;
   }
 
   // Auto-attach to the last session if it still exists. A short
@@ -936,9 +973,14 @@ async function bootstrap(): Promise<void> {
   if (last) {
     try {
       const res = await fetch("/api/sessions", { credentials: "same-origin" });
+      if (isStale()) return;
       if (res.ok) {
-        const sessions = await res.json() as Array<{ name: string }>;
-        if (sessions.some(s => s.name === last)) {
+        const sessions = await res.json();
+        // Guard the shape: a 200 with a non-array body (error envelope,
+        // proxy interstitial) would otherwise throw on .some and skip
+        // the clearLastSession below, leaving us wedged.
+        if (Array.isArray(sessions)
+            && sessions.some((s: { name?: string }) => s?.name === last)) {
           void attachTerminal(last);
           return;
         }
@@ -950,8 +992,27 @@ async function bootstrap(): Promise<void> {
     }
   }
 
+  if (isStale()) return;
   const { renderSessionPicker } = await import("./session-picker");
+  if (isStale()) return;
   renderSessionPicker(app, attachTerminal);
+}
+
+/** Minimal full-screen retry affordance shown when the initial auth
+ * probe fails (network down / backend 5xx). Avoids silently proceeding
+ * into a half-broken UI. */
+function renderBootstrapError(retry: () => void): void {
+  app.replaceChildren();
+  const wrap = document.createElement("div");
+  wrap.className = "bootstrap-error";
+  const msg = document.createElement("p");
+  msg.textContent = "Can’t reach the server.";
+  const btn = document.createElement("button");
+  btn.className = "btn";
+  btn.textContent = "Retry";
+  btn.addEventListener("click", retry);
+  wrap.append(msg, btn);
+  app.append(wrap);
 }
 
 export function isAuthRequired(): boolean { return authRequired; }

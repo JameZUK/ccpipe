@@ -45,6 +45,12 @@ export function fireResponseReady(text: string, session?: string): void {
   const preview = (text || "").trim().slice(0, 140);
   const title = session ? `claude · ${session}` : "claude responded";
   try {
+    // Explicitly close the previous notification before creating a new
+    // one. The `tag` collapses the *visible* notification, but each
+    // new Notification is a distinct JS object with its own onclick
+    // closure; without closing the old one those objects (and their
+    // closures) accumulate over a long hidden session.
+    lastNotification?.close();
     const n = new Notification(title, {
       body: preview || "(response ready)",
       tag: "ccpipe-response",         // collapses duplicates
@@ -53,7 +59,12 @@ export function fireResponseReady(text: string, session?: string): void {
     n.onclick = () => {
       try { window.focus(); n.close(); } catch {}
     };
+    lastNotification = n;
   } catch (e) {
     console.warn("notification failed:", e);
   }
 }
+
+// Most recent notification, kept so we can close() it before firing the
+// next — see fireResponseReady.
+let lastNotification: Notification | null = null;

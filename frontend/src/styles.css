@@ -1254,6 +1254,42 @@ a:hover { color: var(--fg); }
   display: flex;
   flex-direction: column;
 }
+
+/* Small input dialog (file-panel rename / mkdir) — replaces window.prompt
+ * so it works in installed mobile PWAs. */
+.inline-prompt {
+  width: 100%;
+  max-width: 420px;
+  margin: var(--s-4);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.inline-prompt__label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  font-size: 0.9rem;
+}
+.inline-prompt__input {
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font: inherit;
+}
+.inline-prompt__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
 .modal__header {
   display: flex;
   align-items: center;
@@ -2746,13 +2782,19 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
 
 @media (max-width: 480px) {
   .modal-overlay { padding: 0; }
-  .modal__sheet {
+  .modal__sheet,
+  .modal {
     max-width: 100%;
     /* `dvh` tracks the *visible* viewport — it shrinks when the mobile
      * URL bar is showing and grows when it slides away. `100vh` on iOS
      * Safari / Chrome is the URL-bar-hidden height, so a sheet sized
      * with it extends below the address bar and the bottom row (foot
-     * with the action buttons) gets hidden in portrait. */
+     * with the action buttons) gets hidden in portrait.
+     *
+     * `.modal` (the Settings dialog) gets the same full-screen + dvh
+     * treatment as `.modal__sheet` (directory browser): it was
+     * previously left at `max-height: 88vh`, so the tall Display tab's
+     * Save/Reset action bar could sit under the URL bar on mobile. */
     max-height: 100dvh;
     height: 100dvh;
     border-radius: 0;

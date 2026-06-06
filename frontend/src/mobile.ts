@@ -495,6 +495,9 @@ export function mountMobileUI(parent: HTMLElement,
     review.className = "share-review";
     review.setAttribute("role", "dialog");
     review.setAttribute("aria-label", "Shared text — review before insert");
+    // Announce to assistive tech when it appears (it's injected, not
+    // navigated to).
+    review.setAttribute("aria-live", "polite");
 
     const label = document.createElement("div");
     label.className = "share-review__label";
@@ -521,20 +524,31 @@ export function mountMobileUI(parent: HTMLElement,
       review.remove();
     });
 
+    const discard = (): void => {
+      discardPendingShare();
+      review.removeEventListener("keydown", onReviewKey);
+      review.remove();
+    };
+    // Escape discards (the safe default — never auto-inserts).
+    const onReviewKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") { e.preventDefault(); discard(); }
+    };
+    review.addEventListener("keydown", onReviewKey);
+
     const discardBtn = document.createElement("button");
     discardBtn.type = "button";
     discardBtn.className = "btn btn--ghost";
     discardBtn.textContent = "discard";
-    discardBtn.addEventListener("click", () => {
-      discardPendingShare();
-      review.remove();
-    });
+    discardBtn.addEventListener("click", discard);
 
     actions.append(discardBtn, insertBtn);
     review.append(label, body, actions);
     // Insert above the composer so it's the first thing the operator
     // sees on session-open. They have to actively choose to insert.
     composer.parentElement?.insertBefore(review, composer);
+    // Focus the SAFE action (discard) so a keyboard/switch-access user
+    // lands on the non-destructive default and Escape works immediately.
+    discardBtn.focus({ preventScroll: true });
   }
 
   // Focus the composer so the user can start typing immediately on

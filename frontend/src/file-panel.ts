@@ -36,6 +36,63 @@ function loadStoredWidth(): number {
   return DEFAULT_WIDTH_PX;
 }
 
+/** A small styled input dialog returning the entered text, or null if
+ * cancelled. Replaces window.prompt(), which installed mobile PWAs
+ * suppress (returning null with no UI), making rename / mkdir appear to
+ * silently no-op. Enter confirms, Escape / backdrop / Cancel dismisses. */
+function inlinePrompt(title: string, initial = ""): Promise<string | null> {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "inline-prompt";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", title);
+    const label = document.createElement("label");
+    label.className = "inline-prompt__label";
+    label.textContent = title;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "inline-prompt__input";
+    input.value = initial;
+    const actions = document.createElement("div");
+    actions.className = "inline-prompt__actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn";
+    cancel.textContent = "Cancel";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "btn btn--primary";
+    ok.textContent = "OK";
+
+    let done = false;
+    const finish = (val: string | null): void => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      ov.remove();
+      resolve(val);
+    };
+    function onKey(e: KeyboardEvent): void {
+      if (e.key === "Escape") { e.preventDefault(); finish(null); }
+      else if (e.key === "Enter") { e.preventDefault(); finish(input.value); }
+    }
+    cancel.addEventListener("click", () => finish(null));
+    ok.addEventListener("click", () => finish(input.value));
+    ov.addEventListener("click", (e) => { if (e.target === ov) finish(null); });
+    document.addEventListener("keydown", onKey, true);
+
+    label.append(input);
+    actions.append(cancel, ok);
+    box.append(label, actions);
+    ov.append(box);
+    document.body.append(ov);
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+  });
+}
+
 function saveStoredWidth(px: number): void {
   try { localStorage.setItem(LS_WIDTH_KEY, String(Math.round(px))); } catch {}
 }
@@ -416,7 +473,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   };
 
   const promptRename = async (currentName: string, srcPath: string) => {
-    const newName = window.prompt(`Rename "${currentName}" to:`, currentName);
+    const newName = await inlinePrompt(`Rename "${currentName}" to:`, currentName);
     if (!newName || newName === currentName) return;
     if (newName.includes("/")) {
       setStatus("name cannot contain '/'", true);
@@ -471,7 +528,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
   // New dir
   mkdirBtn.addEventListener("click", async () => {
-    const name = window.prompt("new directory name:");
+    const name = await inlinePrompt("New directory name:");
     if (!name || name.includes("/")) return;
     const target = joinPath(currentPath, name);
     try {
@@ -638,8 +695,12 @@ function openEditor(path: string): void {
 
   let dragStart = { x: 0, y: 0, w: 0, h: 0, axis: "both" as "both"|"w"|"h" };
   const clamp = () => ({
-    minW: 480,
-    minH: 320,
+    // Derive the minimums from the viewport so a 481–599px device (small
+    // tablet / large phone, below the editor's full-screen breakpoint
+    // but narrower than a hardcoded 480) can't be forced wider than its
+    // own screen.
+    minW: Math.min(480, Math.floor(window.innerWidth * 0.9)),
+    minH: Math.min(320, Math.floor(window.innerHeight * 0.9)),
     maxW: Math.floor(window.innerWidth * 0.98),
     maxH: Math.floor(window.innerHeight * 0.98),
   });
@@ -699,8 +760,20 @@ function openEditor(path: string): void {
   });
   ro.observe(sheet);
 
-  const dismiss = () => {
+  // Baseline for the dirty check — the content as loaded (and as last
+  // saved). textarea.value diverging from this means unsaved edits.
+  let savedContent: string | null = null;
+  const isDirty = (): boolean =>
+    savedContent !== null && textarea.value !== savedContent;
+
+  const dismiss = (force = false): void => {
+    // Guard against losing unsaved edits on close / Escape / backdrop.
+    if (!force && isDirty()
+        && !window.confirm("Discard unsaved changes?")) {
+      return;
+    }
     try { ro.disconnect(); } catch {}
+    document.removeEventListener("keydown", onKey);
     overlay.remove();
   };
 
@@ -709,6 +782,7 @@ function openEditor(path: string): void {
     `/api/fs/read?path=${encodeURIComponent(path)}`,
   ).then((data) => {
     textarea.value = data.content;
+    savedContent = data.content;
     setStatus(`${fmtSize(data.size)} loaded`);
     textarea.focus();
   }).catch((err) => {
@@ -719,12 +793,14 @@ function openEditor(path: string): void {
     setStatus("saving…");
     saveBtn.disabled = true;
     try {
+      const justSaved = textarea.value;
       await apiJson("/api/fs/write", {
         method: "POST",
-        body: JSON.stringify({ path, content: textarea.value }),
+        body: JSON.stringify({ path, content: justSaved }),
       });
+      savedContent = justSaved;        // no longer dirty
       setStatus("saved");
-      setTimeout(dismiss, 700);
+      setTimeout(() => dismiss(true), 700);
     } catch (err) {
       setStatus(`save failed: ${(err as Error).message}`, true);
     } finally {
@@ -732,16 +808,18 @@ function openEditor(path: string): void {
     }
   });
 
-  closeBtn.addEventListener("click", dismiss);
-  const onKey = (e: KeyboardEvent) => {
+  closeBtn.addEventListener("click", () => dismiss());
+  function onKey(e: KeyboardEvent): void {
     if (e.key === "Escape") {
       e.preventDefault();
+      // dismiss() removes this listener itself once it actually closes;
+      // don't remove it here or a cancelled discard-confirm would leave
+      // Escape dead for the rest of the session.
       dismiss();
-      document.removeEventListener("keydown", onKey);
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       saveBtn.click();
     }
-  };
+  }
   document.addEventListener("keydown", onKey);
 }

@@ -56,13 +56,21 @@ export const DEFAULT_PREFS: DisplayPrefs = {
   terminalFontMobile: "jetbrains-mono",
 };
 
+// Canonical terminal font-size bounds. Used by BOTH the global clamp in
+// sanitize() and the per-session override below so a stored session
+// size can't fall outside the range the Settings slider can represent
+// (the two previously disagreed: 8..22 vs 8..32, so a stored 23-32
+// desynced from the slider).
+export const FONT_SIZE_MIN = 8;
+export const FONT_SIZE_MAX = 22;
+
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
 function sanitize(p: Partial<DisplayPrefs>): DisplayPrefs {
   return {
-    fontSize: clamp(Math.round(p.fontSize ?? DEFAULT_PREFS.fontSize), 8, 22),
+    fontSize: clamp(Math.round(p.fontSize ?? DEFAULT_PREFS.fontSize), FONT_SIZE_MIN, FONT_SIZE_MAX),
     lineHeight: clamp(Number(p.lineHeight ?? DEFAULT_PREFS.lineHeight), 1.0, 1.6),
     letterSpacing: clamp(Number(p.letterSpacing ?? DEFAULT_PREFS.letterSpacing), 0, 3),
     cursorStyle: (["bar", "block", "underline"] as const).includes(p.cursorStyle as CursorStyle)
@@ -104,7 +112,7 @@ export function loadDisplayPrefs(session?: string): DisplayPrefs {
   if (session) {
     try {
       const sz = parseInt(localStorage.getItem(`ccpipe.fontSize.${session}`) ?? "", 10);
-      if (Number.isFinite(sz) && sz >= 8 && sz <= 32) base.fontSize = sz;
+      if (Number.isFinite(sz) && sz >= FONT_SIZE_MIN && sz <= FONT_SIZE_MAX) base.fontSize = sz;
     } catch {}
   }
   return base;

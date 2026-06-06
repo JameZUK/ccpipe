@@ -111,9 +111,16 @@ export interface SettingsOpts {
 }
 
 let activeOverlay: HTMLDivElement | null = null;
+// Element that had focus when the dialog opened; focus is restored to it
+// on close so keyboard/switch-access users don't lose their place.
+let settingsOpener: HTMLElement | null = null;
 
 export function openSettings(opts: SettingsOpts): void {
   if (activeOverlay) return;
+
+  // Remember what had focus so we can restore it on close (keyboard /
+  // switch-access users otherwise lose their place to <body>).
+  settingsOpener = (document.activeElement as HTMLElement | null) ?? null;
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -175,11 +182,31 @@ export function openSettings(opts: SettingsOpts): void {
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) closeSettings();
   });
-  // Esc → close.
+  // Esc → close; Tab/Shift+Tab is trapped so focus can't escape to the
+  // terminal behind the (aria-)modal dialog.
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+    'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
       closeSettings();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusable = Array.from(
+      modal.querySelectorAll<HTMLElement>(FOCUSABLE),
+    ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+    if (e.shiftKey && (active === first || !modal.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
     }
   };
   document.addEventListener("keydown", onKey);
@@ -196,6 +223,9 @@ export function closeSettings(): void {
   activeOverlay.dispatchEvent(new CustomEvent("close-cleanup"));
   activeOverlay.remove();
   activeOverlay = null;
+  // Restore focus to whatever opened the dialog.
+  try { settingsOpener?.focus(); } catch {}
+  settingsOpener = null;
 }
 
 // ─── Header ─────────────────────────────────────────────────────────────
@@ -376,11 +406,19 @@ function buildVoiceSection(): HTMLElement {
       // Default to last_paragraph if the server returned an unknown value.
       const knownScope = SCOPE_OPTIONS.some(o => o.value === cfg.scope);
       scopeSelect.value = knownScope ? cfg.scope : "last_paragraph";
+      // Only now is the form populated with the server's real config —
+      // enable Save. Until this point Save stays disabled so a failed
+      // load can't be "saved", overwriting the server's voice/rate/scope
+      // with the inputs' default placeholder values.
+      saveBtn.disabled = false;
     } catch (err) {
       status.textContent = `failed to load: ${(err as Error).message}`;
       status.classList.add("modal__status--error");
+      // Leave Save disabled: the form does not reflect server state.
     }
   };
+  // Gate Save until loadConfig succeeds (see below).
+  saveBtn.disabled = true;
   loadConfig();
 
   // Test button: plays a sample with the currently-selected voice
@@ -676,6 +714,13 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
   // browser fetches the woff2 as soon as a card lands, so previews
   // settle within a few hundred ms). Mobile-friendly fonts get a
   // ★ glyph so small-screen users can spot them at a glance.
+  //
+  // SAFETY INVARIANT: f.id / f.label / f.hint below are interpolated
+  // into innerHTML WITHOUT escaping. That is safe ONLY because
+  // TERMINAL_FONTS is a static, developer-authored catalogue (see
+  // terminal-fonts.ts) — none of it is user- or server-supplied. If a
+  // future change ever sources font entries from user input or the
+  // network, switch this to textContent/setAttribute construction.
   const fontCardsHTML = (selected: string, gridName: string) =>
     `<div class="font-picker" role="radiogroup" aria-label="${gridName}">`
     + TERMINAL_FONTS.map(f => {
@@ -863,13 +908,34 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
     });
   });
 
-  sec.querySelector<HTMLButtonElement>("[data-role=reset]")!
-    .addEventListener("click", () => {
-      apply({ ...DEFAULT_PREFS });
-      // Refresh inputs to reflect defaults
-      closeSettings();
-      setTimeout(() => openSettings(opts), 50);
-    });
+  // "Reset defaults" wipes every display pref (fonts, cursor, sizes) and
+  // there's no undo, so require a confirming second click — the same
+  // inline arm pattern used for destructive delete/kill actions
+  // elsewhere — rather than nuking on a single mis-tap.
+  const resetBtn = sec.querySelector<HTMLButtonElement>("[data-role=reset]")!;
+  const resetLabel = resetBtn.textContent;
+  let resetArmed = false;
+  let resetArmTimer: number | null = null;
+  const disarmReset = (): void => {
+    resetArmed = false;
+    if (resetArmTimer !== null) { clearTimeout(resetArmTimer); resetArmTimer = null; }
+    resetBtn.textContent = resetLabel;
+    resetBtn.classList.remove("btn--armed");
+  };
+  resetBtn.addEventListener("click", () => {
+    if (!resetArmed) {
+      resetArmed = true;
+      resetBtn.textContent = "Click again to reset";
+      resetBtn.classList.add("btn--armed");
+      resetArmTimer = window.setTimeout(disarmReset, 3000);
+      return;
+    }
+    disarmReset();
+    apply({ ...DEFAULT_PREFS });
+    // Refresh inputs to reflect defaults
+    closeSettings();
+    setTimeout(() => openSettings(opts), 50);
+  });
 
   return sec;
 }

@@ -286,6 +286,11 @@ export class TerminalSocket {
               // same time base.
               if (this.lastPingSentAt) {
                 const rtt = ev.timeStamp - this.lastPingSentAt;
+                // Clear immediately so a duplicate/unsolicited pong
+                // doesn't produce a second, bogus RTT reading measured
+                // against a ping we already accounted for. Reset on the
+                // next sendPing().
+                this.lastPingSentAt = 0;
                 this.handlers.onLatency?.(Math.round(rtt));
               }
               return;
@@ -322,6 +327,15 @@ export class TerminalSocket {
       // connect() above) would otherwise re-schedule pendingRetry and
       // race the fresh socket — producing the multi-WS subscription
       // pile-up we hit last time. Drop these.
+      //
+      // KNOWN RACE: if the stale-check watchdog kicks (nulls this.ws +
+      // reconnects) at the same instant the server is closing this
+      // socket with 1008 (auth revoked / origin reject), this guard
+      // swallows that 1008 and we reconnect instead of bouncing to
+      // login. Self-correcting: the very next connect re-receives 1008
+      // and runs the onAuthRevoked → close() path below. Cost is one
+      // extra reconnect round-trip, so we accept the race rather than
+      // thread close-code state through the watchdog kick.
       if (this.ws !== ws) return;
       this.stopKeepalive();
       this.stopStaleCheck();
@@ -417,7 +431,12 @@ export class TerminalSocket {
         // a no-op.
         try { this.ws.close(); } catch {}
         this.ws = null;
-        this.reconnectNow(true);
+        // Watchdog reconnect: do NOT reset backoff here. Against a
+        // half-open server (TCP/WS handshake succeeds, then silence) this
+        // branch fires every STALE_AFTER_MS; resetting backoff each time
+        // would defeat it. A genuinely healthy reconnect still resets
+        // backoff via onopen.
+        this.reconnectNow(true, false);
       }
     }, 5_000);
   }
@@ -508,7 +527,7 @@ export class TerminalSocket {
    * `force=true` bypasses the debounce so the user-facing "retry now"
    * button in the offline banner is never silently ignored just because
    * a lifecycle event happened to fire 200ms ago. */
-  reconnectNow(force = false): void {
+  reconnectNow(force = false, resetBackoff = true): void {
     if (this.closed) return;
     if (this.ws) {
       const rs = this.ws.readyState;
@@ -528,8 +547,10 @@ export class TerminalSocket {
       clearTimeout(this.pendingRetry);
       this.pendingRetry = null;
     }
-    this.reconnectDelayMs = 500;     // reset backoff for any subsequent failure
-    this.retryAttempt = 0;
+    if (resetBackoff) {
+      this.reconnectDelayMs = 500;   // reset backoff for any subsequent failure
+      this.retryAttempt = 0;
+    }
     this.connect();
   }
 
