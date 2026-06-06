@@ -27,7 +27,12 @@ async def _run_tmux(*args: str, capture: bool = True) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
         _tmux.TMUX_BIN, *args,
         stdout=asyncio.subprocess.PIPE if capture else asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.STDOUT if capture else asyncio.subprocess.PIPE,
+        # When capture=False, stderr ALSO goes to DEVNULL — not a pipe.
+        # communicate() waits for EOF on BOTH stdout and stderr, and a
+        # server-spawning new-session leaves the daemon holding EVERY
+        # inherited pipe fd open for its lifetime. Leaving stderr as a pipe
+        # hangs communicate() exactly as a stdout pipe would.
+        stderr=asyncio.subprocess.STDOUT if capture else asyncio.subprocess.DEVNULL,
     )
     out, err = await proc.communicate()
     blob = out if out is not None else err
