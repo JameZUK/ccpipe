@@ -55,6 +55,19 @@ If `/api/fs/config.root` (`CCPIPE_FS_ROOT`) is configurable, set it to
 the narrowest directory you actually need — not `/` or `~`. Anything
 Claude can read could carry an injection.
 
+Within the jail, a denylist refuses both reads and writes to ccpipe's
+own state (`.local/state/ccpipe`, `.config/ccpipe`) and to Claude Code's
+state — `.claude` (transcripts, settings, and the live OAuth token in
+`.claude/.credentials.json`) and the sibling `.claude.json` (global
+config + `oauthAccount` identity). The denylist is enforced on the
+resolved final target, not just its parent, so a denied leaf can't be
+created or written even when its parent dir is allowed. All `/api/fs/*`
+operations — including `rename` and `delete` — walk every intermediate
+path component with `O_NOFOLLOW` and act via `dir_fd`, so a same-UID
+concurrent writer (e.g. `claude` under prompt injection) can't swap an
+intermediate directory for an out-of-jail symlink between path
+resolution and the syscall.
+
 ## WebSocket fuzz coverage
 
 T7 of the original pen-test ("WebSocket message-type abuse") is

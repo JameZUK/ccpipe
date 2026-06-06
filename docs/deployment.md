@@ -69,7 +69,10 @@ What `CCPIPE_BEHIND_TLS=1` flips on:
 - Session cookie gets `Secure` + the `__Host-` prefix so it refuses to
   travel over plain HTTP.
 - `TrustedHostMiddleware` binds to your hostname so HTTP `Host` header
-  spoofing is rejected.
+  spoofing is rejected. **`CCPIPE_TRUSTED_HOSTS` is now required here:**
+  if it's unset or `*`, ccpipe refuses to start rather than silently
+  accepting any `Host` (set it as in the drop-in above; use
+  `CCPIPE_ALLOW_WILDCARD_HOST=1` only if you really want the wildcard).
 - WebSocket Origin checks restricted to the HTTPS origin so a page
   loaded over HTTP can't hijack the WS upgrade.
 - `Strict-Transport-Security` is sent on every response.

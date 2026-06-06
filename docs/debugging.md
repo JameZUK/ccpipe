@@ -32,6 +32,34 @@ the May-2026 fix, a send failure also closes the WS so the auto-
 reconnect path runs immediately and the user only sees a momentary
 flicker rather than persistent gap.
 
+## First check after a reboot/restart: tmux server defaults
+
+If scrollback is broken *right after a reboot or `systemctl restart`* —
+content not accumulating, or duplicated bands on reconnect — check the
+tmux server-wide options before anything else:
+
+```bash
+tmux show-options -g history-limit          # want 50000, not 2000
+tmux show-window-options -g alternate-screen # want off, not on
+tmux display-message -p -t <session> '#{history_limit} #{alternate_on}'
+```
+
+`alternate-screen on` (the tmux default) sends Claude/Ink output to a
+discarded alt buffer instead of the scrollback the browser can drag
+through, so it looks like scrollback is dead. These are applied by
+`tmux_setup.apply_server_defaults()` at startup; if they show defaults,
+that step failed or didn't stick. The journal should show
+`tmux server defaults applied` with **no** `error connecting` lines and a
+completed `Application startup complete`. Two gotchas historically broke
+this (see the `apply_server_defaults()` comments + git history): a
+session-less tmux server exits before `-g` options stick (so an anchor
+session is created first), and a server-spawning tmux subprocess with
+pipe stdio hangs startup (so the anchor call routes stdio to DEVNULL).
+To repair a live server without a restart:
+`tmux set-option -g history-limit 50000 && tmux set-window-option -g
+alternate-screen off` (sticks immediately; only **new** sessions pick up
+the history-limit — existing ones keep their creation-time value).
+
 ## Step 1 — passive: watch the journal
 
 Every WS handler logs a one-line summary at close:
