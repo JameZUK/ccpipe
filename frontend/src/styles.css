@@ -1630,6 +1630,16 @@ a:hover { color: var(--fg); }
   font-size: var(--t-xs);
   letter-spacing: 0.08em;
 }
+.modal__footer-right {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.modal__footer-reload {
+  font-size: var(--t-xs);
+  padding: var(--s-1) var(--s-3);
+  white-space: nowrap;
+}
 
 /* Two-factor (TOTP) section status pill */
 .totp-status {

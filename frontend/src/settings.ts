@@ -1241,9 +1241,38 @@ function buildDebugSection(opts: SettingsOpts): HTMLElement {
 function buildAboutFooter(): HTMLElement {
   const f = document.createElement("div");
   f.className = "modal__footer";
-  f.innerHTML = `
-    <span class="wordmark small">cc<span class="dot"></span>pipe</span>
-    <span class="modal__footer-meta">v${VERSION}</span>
-  `;
+
+  // Wordmark (left). Built with DOM nodes rather than innerHTML.
+  const mark = document.createElement("span");
+  mark.className = "wordmark small";
+  mark.append("cc");
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  mark.append(dot, "pipe");
+
+  // Right group: version + build id, then a Force-reload button.
+  const right = document.createElement("div");
+  right.className = "modal__footer-right";
+
+  const meta = document.createElement("span");
+  meta.className = "modal__footer-meta";
+  // __BUILD_ID__ is injected at compile time (git sha + UTC build time), so
+  // this shows exactly which deployed build the page is actually running —
+  // the way to tell a stale PWA from a fresh one.
+  meta.textContent = `v${VERSION} · ${__BUILD_ID__}`;
+
+  const reload = document.createElement("button");
+  reload.type = "button";
+  reload.className = "btn modal__footer-reload";
+  reload.textContent = "Force reload";
+  reload.title = "Reload the app to pick up the latest deployed build";
+  reload.addEventListener("click", () => {
+    // index.html is served no-store, so a plain reload refetches it and the
+    // current hashed bundle — fixing the "installed PWA stuck on old code".
+    location.reload();
+  });
+
+  right.append(meta, reload);
+  f.append(mark, right);
   return f;
 }
