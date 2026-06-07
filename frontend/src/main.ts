@@ -710,21 +710,27 @@ async function attachTerminal(session: string): Promise<void> {
       }
     },
     onHello(msg) {
-      // Reset xterm BEFORE the server's pane-replay bytes arrive on the
-      // wire so the replay replaces, not appends. On initial connect
-      // this is a no-op (buffer is empty); on reconnect it discards
-      // stale content so the replay accurately reflects tmux's current
-      // pane — closing the "new output not in scrollback" gap.
-      resetTerminal?.();
-      // Arm a one-shot "scroll to bottom" for the first PTY chunk that
-      // arrives next (which is the history replay). After reset()
-      // xterm.js sometimes leaves its auto-follow flag in a state where
-      // it WON'T track the cursor as the replay scrolls lines into
-      // scrollback — the viewport stays at scrollTop=0 and the user
-      // sees the OLDEST replayed entries. Forcing scrollToBottom after
-      // the first post-hello write puts auto-follow back in the
-      // correct state for the live tail that follows.
-      bottomOnNextOutput = true;
+      // Seamless reconnect (short-gap reconnect to the same session): the
+      // existing buffer is still accurate, and ws.ts drops the pane replay,
+      // so we must NOT wipe and must NOT yank the view to the bottom — the
+      // live stream (incl. tmux's attach redraw) just resumes in place and
+      // the user's scroll position is preserved. No flicker, no jump.
+      if (!socket.seamlessReconnect) {
+        // Reset xterm BEFORE the server's pane-replay bytes arrive on the
+        // wire so the replay replaces, not appends. On initial connect this
+        // is a no-op (buffer is empty); on a long-gap reconnect it discards
+        // stale content so the replay accurately reflects tmux's current
+        // pane — closing the "new output not in scrollback" gap.
+        resetTerminal?.();
+        // Arm a one-shot "scroll to bottom" for the first PTY chunk that
+        // arrives next (the history replay). After reset() xterm.js can
+        // leave its auto-follow flag such that it won't track the cursor as
+        // the replay scrolls into scrollback — the viewport stays at
+        // scrollTop=0 showing the OLDEST entries. Forcing scrollToBottom
+        // after the first post-hello write restores auto-follow for the
+        // live tail that follows.
+        bottomOnNextOutput = true;
+      }
       renderSessionLabel(sessionLabel, msg.session);
       // Cache the session's working dir so the Files pill + the
       // mobile composer's folder button default to the project root

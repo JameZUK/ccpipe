@@ -112,6 +112,16 @@ export class TerminalSocket {
   private lastReceivedAt = 0;
   private static readonly STALE_AFTER_MS = 45_000;
   private staleCheckTimer: number | null = null;
+  // Timestamp of the last actual PTY DATA frame (not pings/onopen, which
+  // reset lastReceivedAt). Used to size the disconnect gap on reconnect.
+  private lastDataAt = 0;
+  // True when the current attach is a reconnect after only a SHORT gap, so
+  // the terminal buffer is still accurate. main.ts reads this in onHello to
+  // skip the wipe, and we drop the pane replay below, so the reconnect is
+  // seamless (no flicker / no scroll jump). A first attach or a long gap
+  // (content likely changed a lot) gets the full wipe+replay for correctness.
+  seamlessReconnect = false;
+  private static readonly SEAMLESS_MAX_GAP_MS = 15_000;
   // Timestamp of the most recent ping we sent. Subtracting from the
   // matching pong's arrival time gives us RTT. We only track a single
   // in-flight ping because the keepalive interval is much longer than
@@ -219,6 +229,16 @@ export class TerminalSocket {
               // the server enters its main receive loop.
               this.helloCount += 1;
               this.lastHelloAt = Date.now();
+              // Decide seamless vs full replay BEFORE onHello (main.ts reads
+              // seamlessReconnect there). Seamless only when this is a
+              // reconnect (helloCount > 1) and little time passed since the
+              // last real data — so the existing buffer is still accurate.
+              {
+                const gap = this.lastDataAt > 0
+                  ? Date.now() - this.lastDataAt : Infinity;
+                this.seamlessReconnect =
+                  this.helloCount > 1 && gap < TerminalSocket.SEAMLESS_MAX_GAP_MS;
+              }
               this.receivingHistory = true;
               this.historyBytesInFlight = 0;
               this.handlers.onHello(parsed as unknown as ServerHello);
@@ -310,7 +330,15 @@ export class TerminalSocket {
           const payload = buf.subarray(1);
           this.framesReceived += 1;
           this.bytesReceived += payload.length;
-          if (this.receivingHistory) this.historyBytesInFlight += payload.length;
+          this.lastDataAt = Date.now();
+          if (this.receivingHistory) {
+            this.historyBytesInFlight += payload.length;
+            // Seamless reconnect: the buffer already holds this content, so
+            // drop the pane replay and let the live stream (incl. tmux's
+            // attach redraw) resume over the existing buffer — no wipe, no
+            // flicker, no scroll jump. Still counted above for accounting.
+            if (this.seamlessReconnect) return;
+          }
           this.handlers.onOutput(payload);
           return;
         }
