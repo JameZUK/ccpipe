@@ -450,6 +450,17 @@ export function mountMobileUI(parent: HTMLElement,
     // over the label and blurs the input (CSS user-select:none covers the
     // selection; this covers the menu).
     btn.addEventListener("contextmenu", (e) => e.preventDefault());
+    // THE focus-retention fix: prevent the textarea from blurring (which
+    // dismisses the Android soft keyboard). The default action of
+    // mousedown/touchstart on a focusable <button> is to move focus to it;
+    // preventing it keeps focus — and the keyboard — on the textarea.
+    // pointerdown's preventDefault is NOT enough on Android Chrome; the
+    // touchstart default is what actually drives the focus shift, and it
+    // must be a non-passive listener to be cancelable. (Programmatic
+    // re-focus afterwards doesn't reliably re-open Gboard, so we have to
+    // stop the blur from happening at all.)
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
 
     const isCtrl = k.key === "ctrl";
     let initialTimer: number | null = null;
