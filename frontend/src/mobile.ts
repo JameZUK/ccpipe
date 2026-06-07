@@ -607,11 +607,17 @@ export function mountMobileUI(parent: HTMLElement,
   });
   textarea.addEventListener("compositionend", () => { consumeCtrlInsert(); });
 
-  // Build the Ctrl-combo strip keys. The 10 most useful control combos;
-  // each sends its control byte directly (a→1 … z→26) so it works without
-  // any soft-keyboard / IME involvement. Same focus-retention + fire-on-up
-  // + edge-swipe-reject discipline as the modifier row.
-  const CTRL_COMBOS = ["c", "d", "z", "r", "l", "a", "e", "u", "k", "w"];
+  // Build the Ctrl-combo strip keys: the FULL A–Z so every Ctrl+letter is
+  // reachable (the soft-keyboard capture path can't be made reliable on
+  // Firefox Android, so this strip is the real control-key input). Each
+  // sends its control byte directly (a→1 … z→26) — no keyboard, no IME.
+  // Most-used combos are listed first so they're visible without scrolling;
+  // the rest follow (the row scrolls horizontally). Same focus-retention +
+  // fire-on-up + edge-swipe-reject discipline as the modifier row.
+  const CTRL_COMBOS = [
+    "c", "d", "z", "r", "l", "o", "a", "e", "u", "k", "w",   // most common first (incl. ^O)
+    "b", "f", "g", "h", "i", "j", "m", "n", "p", "q", "s", "t", "v", "x", "y",
+  ];
   for (const letter of CTRL_COMBOS) {
     const ck = document.createElement("button");
     ck.type = "button";
