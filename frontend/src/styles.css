@@ -2302,7 +2302,8 @@ body.file-editor-resizing {
   50%      { box-shadow: 0 0 0 0.45rem rgba(233, 81, 65, 0.06); }
 }
 
-.modifier-row {
+.modifier-row,
+.ctrl-strip {
   display: flex;
   gap: var(--s-1);
   padding: var(--s-2) var(--s-3);
@@ -2313,7 +2314,35 @@ body.file-editor-resizing {
   scrollbar-width: none;
   flex-shrink: 0;
 }
-.modifier-row::-webkit-scrollbar { display: none; }
+.modifier-row::-webkit-scrollbar,
+.ctrl-strip::-webkit-scrollbar { display: none; }
+
+/* Ctrl-combo strip: revealed above the modifier row when Ctrl is armed.
+   Accent-tinted so it reads as a distinct "now pick a combo" mode. */
+.ctrl-strip {
+  border-top: 1px dashed var(--accent);
+}
+.ctrl-strip[hidden] { display: none; }
+.ctrl-strip__key {
+  flex: 1 1 0;
+  min-width: 2.4rem;
+  padding: var(--s-2) var(--s-2);
+  background: var(--bg-input);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-md);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+.ctrl-strip__key:active {
+  background: var(--accent);
+  color: var(--bg);
+}
 .modifier-row button {
   /* Equal-share distribution across the row. Enter moved to the
    * composer row, so what's left (Esc / Tab / / / Ctrl / arrows) has

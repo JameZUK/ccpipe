@@ -391,11 +391,21 @@ export function mountMobileUI(parent: HTMLElement,
   const modifierRow = document.createElement("div");
   modifierRow.className = "modifier-row";
 
+  // Ctrl-combo strip: revealed when Ctrl is armed. Tapping a key sends the
+  // control byte DIRECTLY (no soft keyboard, no IME) — the reliable path on
+  // Firefox Android, where capturing a typed letter and converting it is
+  // not dependable (the keyboard routes letters through IME composition).
+  const ctrlStrip = document.createElement("div");
+  ctrlStrip.className = "ctrl-strip";
+  ctrlStrip.hidden = true;
+
   let ctrlArmed = false;
   // Field state captured when Ctrl is armed (and refined in beforeinput) so
   // the next inserted letter can be undone and re-emitted as a control code.
   // Snapshotting at arm time means it still works on engines that don't fire
-  // a usable beforeinput for the soft keyboard. See the handlers below.
+  // a usable beforeinput for the soft keyboard. See the handlers below. (This
+  // keyboard-capture path is a bonus for Chrome; the ctrl-strip above is the
+  // reliable path everywhere.)
   let ctrlPre: { value: string; start: number; end: number } | null = null;
   const snapshotCtrl = (): void => {
     ctrlPre = {
@@ -407,6 +417,7 @@ export function mountMobileUI(parent: HTMLElement,
   const setCtrl = (on: boolean) => {
     ctrlArmed = on;
     if (on) snapshotCtrl(); else ctrlPre = null;
+    ctrlStrip.hidden = !on;
     modifierRow.querySelector('[data-key="ctrl"]')?.classList.toggle("armed", on);
   };
 
@@ -596,7 +607,42 @@ export function mountMobileUI(parent: HTMLElement,
   });
   textarea.addEventListener("compositionend", () => { consumeCtrlInsert(); });
 
-  parent.append(composer, modifierRow);
+  // Build the Ctrl-combo strip keys. The 10 most useful control combos;
+  // each sends its control byte directly (a→1 … z→26) so it works without
+  // any soft-keyboard / IME involvement. Same focus-retention + fire-on-up
+  // + edge-swipe-reject discipline as the modifier row.
+  const CTRL_COMBOS = ["c", "d", "z", "r", "l", "a", "e", "u", "k", "w"];
+  for (const letter of CTRL_COMBOS) {
+    const ck = document.createElement("button");
+    ck.type = "button";
+    ck.className = "ctrl-strip__key";
+    ck.textContent = "^" + letter.toUpperCase();
+    ck.addEventListener("contextmenu", (e) => e.preventDefault());
+    ck.addEventListener("mousedown", (e) => e.preventDefault());
+    ck.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+    let sx = 0, sy = 0, aborted = false;
+    ck.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 && e.pointerType !== "touch") return;
+      e.preventDefault();
+      sx = e.clientX; sy = e.clientY; aborted = false;
+    });
+    ck.addEventListener("pointermove", (e) => {
+      if (!aborted && (Math.abs(e.clientX - sx) > MOVE_CANCEL_PX ||
+                       Math.abs(e.clientY - sy) > MOVE_CANCEL_PX)) {
+        aborted = true;
+      }
+    });
+    ck.addEventListener("pointerup", () => {
+      if (aborted) { aborted = false; return; }
+      socket.send({ type: "input", data: String.fromCharCode(letter.charCodeAt(0) - 96) });
+      setCtrl(false);   // one combo → disarm + hide strip; keeps keyboard up
+      try { if (document.activeElement !== textarea && !textarea.disabled) textarea.focus({ preventScroll: true }); } catch {}
+    });
+    ck.addEventListener("pointercancel", () => { aborted = true; });
+    ctrlStrip.append(ck);
+  }
+
+  parent.append(composer, ctrlStrip, modifierRow);
 
   // PWA share_target hand-off: if the user shared text into ccpipe
   // from another app, render an explicit review chip ABOVE the composer
@@ -688,6 +734,7 @@ export function mountMobileUI(parent: HTMLElement,
         try { stop(); } catch {}
       }
       composer.remove();
+      ctrlStrip.remove();
       modifierRow.remove();
     },
   };
