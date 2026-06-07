@@ -2328,8 +2328,12 @@ body.file-editor-resizing {
 .ctrl-strip::-webkit-scrollbar { display: none; }
 
 /* Ctrl-combo strip: revealed above the modifier row when Ctrl is armed.
-   Accent-tinted so it reads as a distinct "now pick a combo" mode. */
+   Accent-tinted so it reads as a distinct "now pick a combo" mode. WRAPS to
+   multiple rows (not horizontal scroll) so every letter — incl. ^O — is
+   visible at once rather than scrolling off the screen edge. */
 .ctrl-strip {
+  flex-wrap: wrap;
+  overflow-x: visible;
   border-top: 1px dashed var(--accent);
 }
 .ctrl-strip[hidden] { display: none; }
