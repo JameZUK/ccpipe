@@ -420,63 +420,118 @@ export function mountMobileUI(parent: HTMLElement,
   // if the finger slides off (pointercancel) or the OS reclaims focus.
   const REPEAT_DELAY_MS = 400;
   const REPEAT_INTERVAL_MS = 30;
+  // A press that slides more than this between pointerdown and release is
+  // a scroll or a system edge-swipe, not a tap — so it emits no key.
+  const MOVE_CANCEL_PX = 12;
   // Collected so dispose() can kill any held-key repeat that would
   // otherwise outlive the UI (closures pin socket.send). Each entry
   // is the per-button stop() closure; calling it clears that
   // button's initial + repeat timers.
   const modifierStopFns: Array<() => void> = [];
+  // Re-assert textarea focus after a modifier press so the soft keyboard
+  // doesn't dismiss. Tapping a <button> blurs the textarea, which on
+  // Android hides Gboard and makes "tap Ctrl then press a letter"
+  // impossible. We preventDefault on the press so focus shouldn't leave,
+  // and re-focus afterwards as belt-and-braces — but ONLY when the
+  // keyboard was already up (textarea focused at press time), so tapping
+  // an arrow with the keyboard closed doesn't pop it open unprompted.
+  const keepKeyboard = (wasFocused: boolean): void => {
+    if (wasFocused && !textarea.disabled) {
+      try { textarea.focus({ preventScroll: true }); } catch {}
+    }
+  };
+
   for (const k of KEYS) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = k.label;
     btn.dataset.key = k.key;
-    if (k.key === "ctrl") {
-      // Ctrl arms the next regular key; no repeat semantics.
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        setCtrl(!ctrlArmed);
-      });
-      modifierRow.append(btn);
-      continue;
-    }
+    // Long-press otherwise pops a text-selection callout / context menu
+    // over the label and blurs the input (CSS user-select:none covers the
+    // selection; this covers the menu).
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    const isCtrl = k.key === "ctrl";
     let initialTimer: number | null = null;
     let repeatTimer: number | null = null;
-    const fire = () => {
-      socket.send({ type: "input", data: k.bytes ?? "" });
-    };
+    let startX = 0;
+    let startY = 0;
+    let holding = false;
+    let aborted = false;
+    let wasFocused = false;
+
+    const fire = () => { socket.send({ type: "input", data: k.bytes ?? "" }); };
     const stop = () => {
       if (initialTimer !== null) { clearTimeout(initialTimer); initialTimer = null; }
       if (repeatTimer !== null) { clearInterval(repeatTimer); repeatTimer = null; }
     };
     modifierStopFns.push(stop);
+
     btn.addEventListener("pointerdown", (e) => {
-      // Primary button only. Mouse right-click and touch-secondary
-      // shouldn't fire.
+      // Primary mouse button or any touch only.
       if (e.button !== 0 && e.pointerType !== "touch") return;
+      // Don't steal focus from the textarea (keeps the soft keyboard up).
       e.preventDefault();
-      try { btn.setPointerCapture(e.pointerId); } catch {}
-      fire();
-      initialTimer = window.setTimeout(() => {
-        repeatTimer = window.setInterval(fire, REPEAT_INTERVAL_MS);
-      }, REPEAT_DELAY_MS);
+      wasFocused = document.activeElement === textarea;
+      startX = e.clientX;
+      startY = e.clientY;
+      holding = false;
+      aborted = false;
+      // Hold-to-repeat (not Ctrl). The FIRST hit is deferred to the
+      // pointerup tap below rather than fired here, so a system edge-swipe
+      // from the screen bottom — delivered as pointerdown→(move|cancel)
+      // with no clean pointerup on the button — never emits a stray key.
+      if (!isCtrl) {
+        initialTimer = window.setTimeout(() => {
+          holding = true;
+          fire();
+          keepKeyboard(wasFocused);
+          repeatTimer = window.setInterval(fire, REPEAT_INTERVAL_MS);
+        }, REPEAT_DELAY_MS);
+      }
     });
-    btn.addEventListener("pointerup", () => { stop(); });
-    btn.addEventListener("pointercancel", () => { stop(); });
-    btn.addEventListener("pointerleave", () => { stop(); });
-    // Defence in depth: if the page is hidden mid-press (lock screen,
-    // app switch), kill the repeat so we don't stream characters into
-    // a backgrounded tab.
-    btn.addEventListener("lostpointercapture", () => { stop(); });
+    btn.addEventListener("pointermove", (e) => {
+      if (aborted) return;
+      if (Math.abs(e.clientX - startX) > MOVE_CANCEL_PX ||
+          Math.abs(e.clientY - startY) > MOVE_CANCEL_PX) {
+        aborted = true;       // scroll / edge-swipe, not a tap
+        stop();
+      }
+    });
+    btn.addEventListener("pointerup", () => {
+      stop();
+      if (!aborted && !holding) {        // clean tap
+        if (isCtrl) setCtrl(!ctrlArmed); else fire();
+        keepKeyboard(wasFocused);
+      }
+      holding = false;
+      aborted = false;
+    });
+    // System reclaimed the gesture (Android home/back edge swipe, etc.) —
+    // never emit a key.
+    btn.addEventListener("pointercancel", () => { aborted = true; stop(); });
     modifierRow.append(btn);
   }
-  textarea.addEventListener("keypress", (e) => {
+
+  // Ctrl-combine for the on-screen Ctrl: once armed, the next single
+  // letter becomes a control char. Use `beforeinput`, NOT `keypress` —
+  // Android IME keyboards (Gboard) don't fire a usable keypress for
+  // letters (keyCode 229 / no key) but DO fire beforeinput with
+  // inputType "insertText" and the character in `data`. beforeinput also
+  // covers hardware keyboards, so the old keypress handler is removed
+  // (keeping both would double-send the control char).
+  textarea.addEventListener("beforeinput", (e) => {
     if (!ctrlArmed) return;
+    const ie = e as InputEvent;
+    if (ie.inputType !== "insertText" && ie.inputType !== "insertCompositionText") return;
     e.preventDefault();
-    const c = e.key.length === 1 ? e.key.toLowerCase() : null;
-    if (c && c >= "a" && c <= "z") {
-      const code = c.charCodeAt(0) - 96;
-      socket.send({ type: "input", data: String.fromCharCode(code) });
+    const data = ie.data ?? "";
+    const c = data.length === 1 ? data.toLowerCase() : "";
+    if (c >= "a" && c <= "z") {
+      socket.send({ type: "input", data: String.fromCharCode(c.charCodeAt(0) - 96) });
     }
+    // Any single character consumes the armed Ctrl (matches a physical
+    // Ctrl released after one combo).
     setCtrl(false);
   });
 
