@@ -524,26 +524,60 @@ export function mountMobileUI(parent: HTMLElement,
     modifierRow.append(btn);
   }
 
-  // Ctrl-combine for the on-screen Ctrl: once armed, the next single
-  // letter becomes a control char. Use `beforeinput`, NOT `keypress` —
-  // Android IME keyboards (Gboard) don't fire a usable keypress for
-  // letters (keyCode 229 / no key) but DO fire beforeinput with
-  // inputType "insertText" and the character in `data`. beforeinput also
-  // covers hardware keyboards, so the old keypress handler is removed
-  // (keeping both would double-send the control char).
-  textarea.addEventListener("beforeinput", (e) => {
-    if (!ctrlArmed) return;
-    const ie = e as InputEvent;
-    if (ie.inputType !== "insertText" && ie.inputType !== "insertCompositionText") return;
-    e.preventDefault();
-    const data = ie.data ?? "";
-    const c = data.length === 1 ? data.toLowerCase() : "";
+  // Ctrl-combine for the on-screen Ctrl: once armed, the next typed letter
+  // becomes a control char. Soft keyboards make this engine-specific:
+  //   - Chrome/Gboard: beforeinput(insertText) is CANCELABLE → intercept
+  //     cleanly (preventDefault, the letter never inserts).
+  //   - Firefox Android: beforeinput for the soft keyboard is NOT
+  //     cancelable, so preventDefault is a no-op and the letter inserts
+  //     anyway (this is exactly why "Ctrl then o" typed "o"). keypress /
+  //     keydown report no usable key for IME input either. So we snapshot
+  //     the field in beforeinput, let the insert land, then UNDO it in the
+  //     `input` event and emit the control code instead.
+  let ctrlPre: { value: string; start: number; end: number } | null = null;
+  const sendCtrlForChar = (s: string): void => {
+    const c = s && s.length ? s[s.length - 1].toLowerCase() : "";
     if (c >= "a" && c <= "z") {
       socket.send({ type: "input", data: String.fromCharCode(c.charCodeAt(0) - 96) });
     }
     // Any single character consumes the armed Ctrl (matches a physical
     // Ctrl released after one combo).
     setCtrl(false);
+  };
+  textarea.addEventListener("beforeinput", (e) => {
+    if (!ctrlArmed) return;
+    const ie = e as InputEvent;
+    if (!ie.inputType.startsWith("insert")) return;   // ignore deletes etc.
+    // Snapshot pre-insert state for the input-undo fallback (Firefox).
+    ctrlPre = {
+      value: textarea.value,
+      start: textarea.selectionStart ?? textarea.value.length,
+      end: textarea.selectionEnd ?? textarea.value.length,
+    };
+    // Clean path (Chrome): cancelable plain insert → letter never lands.
+    if (e.cancelable && ie.inputType === "insertText") {
+      e.preventDefault();
+      ctrlPre = null;
+      sendCtrlForChar(ie.data ?? "");
+    }
+  });
+  textarea.addEventListener("input", (e) => {
+    if (!ctrlArmed || ctrlPre === null) return;        // Chrome path handled it
+    const snap = ctrlPre;
+    ctrlPre = null;
+    const ie = e as InputEvent;
+    // What got inserted: prefer the event data, else diff the value.
+    let inserted = ie.data ?? "";
+    if (!inserted) {
+      const caret = textarea.selectionStart ?? snap.start;
+      inserted = textarea.value.slice(snap.start, Math.max(snap.start, caret));
+    }
+    // Undo the insert (the letter must not stay in the composer) and emit
+    // the control code instead.
+    textarea.value = snap.value;
+    try { textarea.setSelectionRange(snap.start, snap.end); } catch {}
+    autoresize();
+    sendCtrlForChar(inserted);
   });
 
   parent.append(composer, modifierRow);
