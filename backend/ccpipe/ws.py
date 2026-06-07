@@ -340,6 +340,10 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     # tells us how much PTY data flowed and whether any was lost.
     counters = WsCounters(session=session, started_at=time.monotonic())
     _active_counters.append(counters)
+    # Captured from the client's disconnect frame so the close reason shows
+    # in the "ws closed" line — diagnoses periodic reconnects (1000 client
+    # close / 1001 going-away-backgrounded / 1006 abnormal-drop).
+    disconnect_code: int | None = None
     # Register for credential-rotation kicks (M2). Deregistration is in
     # the WS handler's finally block alongside _active_counters.remove.
     _live_ws.add(websocket)
@@ -542,6 +546,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         while True:
             msg = await websocket.receive()
             if msg.get("type") == "websocket.disconnect":
+                disconnect_code = msg.get("code")
                 break
             if (text := msg.get("text")) is not None:
                 # Per-frame size cap. Frontend chunks input at 4 KiB
@@ -730,10 +735,11 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         duration = time.monotonic() - counters.started_at
         log.info(
             "ws closed: session=%s duration=%.1fs frames=%d "
-            "bytes_read_pty=%d bytes_sent_ws=%d bytes_lost=%d send_failures=%d",
+            "bytes_read_pty=%d bytes_sent_ws=%d bytes_lost=%d send_failures=%d "
+            "close_code=%s",
             counters.session, duration, counters.frames_forwarded,
             counters.bytes_read_pty, counters.bytes_sent_ws,
-            counters.bytes_lost, counters.send_failures,
+            counters.bytes_lost, counters.send_failures, disconnect_code,
         )
         try:
             _active_counters.remove(counters)

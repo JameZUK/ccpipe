@@ -392,8 +392,21 @@ export function mountMobileUI(parent: HTMLElement,
   modifierRow.className = "modifier-row";
 
   let ctrlArmed = false;
+  // Field state captured when Ctrl is armed (and refined in beforeinput) so
+  // the next inserted letter can be undone and re-emitted as a control code.
+  // Snapshotting at arm time means it still works on engines that don't fire
+  // a usable beforeinput for the soft keyboard. See the handlers below.
+  let ctrlPre: { value: string; start: number; end: number } | null = null;
+  const snapshotCtrl = (): void => {
+    ctrlPre = {
+      value: textarea.value,
+      start: textarea.selectionStart ?? textarea.value.length,
+      end: textarea.selectionEnd ?? textarea.value.length,
+    };
+  };
   const setCtrl = (on: boolean) => {
     ctrlArmed = on;
+    if (on) snapshotCtrl(); else ctrlPre = null;
     modifierRow.querySelector('[data-key="ctrl"]')?.classList.toggle("armed", on);
   };
 
@@ -534,51 +547,54 @@ export function mountMobileUI(parent: HTMLElement,
   //     keydown report no usable key for IME input either. So we snapshot
   //     the field in beforeinput, let the insert land, then UNDO it in the
   //     `input` event and emit the control code instead.
-  let ctrlPre: { value: string; start: number; end: number } | null = null;
+  // Ctrl-combine for the on-screen Ctrl: once armed, the next typed letter
+  // becomes a control char. This must survive soft-keyboard quirks:
+  //   - Chrome/Gboard: beforeinput(insertText) is cancelable → intercept
+  //     cleanly so the letter never lands.
+  //   - Firefox Android: beforeinput isn't cancelable for the soft keyboard
+  //     AND it may route the letter through IME COMPOSITION. preventDefault
+  //     is a no-op there, so the letter inserts; we then UNDO it and emit
+  //     the control code — on `input` for a plain insert, or on
+  //     `compositionend` when composed (undoing mid-composition just gets
+  //     reverted on commit, which is why the earlier attempt still showed
+  //     the "o"). Inserted text is extracted by value-diff, not event.data,
+  //     so it doesn't depend on the engine populating it.
   const sendCtrlForChar = (s: string): void => {
     const c = s && s.length ? s[s.length - 1].toLowerCase() : "";
     if (c >= "a" && c <= "z") {
       socket.send({ type: "input", data: String.fromCharCode(c.charCodeAt(0) - 96) });
     }
-    // Any single character consumes the armed Ctrl (matches a physical
-    // Ctrl released after one combo).
-    setCtrl(false);
+    setCtrl(false);   // one combo consumes the armed Ctrl
+  };
+  const consumeCtrlInsert = (): void => {
+    if (!ctrlArmed || ctrlPre === null) return;
+    const snap = ctrlPre;
+    const addedLen = textarea.value.length - snap.value.length;
+    if (addedLen <= 0) { setCtrl(false); return; }   // not an insert (e.g. backspace) → just disarm
+    const inserted = textarea.value.slice(snap.start, snap.start + addedLen);
+    textarea.value = snap.value;                      // remove the letter from the composer
+    try { textarea.setSelectionRange(snap.start, snap.end); } catch {}
+    autoresize();
+    sendCtrlForChar(inserted);
   };
   textarea.addEventListener("beforeinput", (e) => {
     if (!ctrlArmed) return;
     const ie = e as InputEvent;
     if (!ie.inputType.startsWith("insert")) return;   // ignore deletes etc.
-    // Snapshot pre-insert state for the input-undo fallback (Firefox).
-    ctrlPre = {
-      value: textarea.value,
-      start: textarea.selectionStart ?? textarea.value.length,
-      end: textarea.selectionEnd ?? textarea.value.length,
-    };
-    // Clean path (Chrome): cancelable plain insert → letter never lands.
+    snapshotCtrl();                                   // refine the arm-time snapshot
     if (e.cancelable && ie.inputType === "insertText") {
-      e.preventDefault();
+      e.preventDefault();                             // Chrome clean path: never inserts
       ctrlPre = null;
       sendCtrlForChar(ie.data ?? "");
     }
   });
   textarea.addEventListener("input", (e) => {
-    if (!ctrlArmed || ctrlPre === null) return;        // Chrome path handled it
-    const snap = ctrlPre;
-    ctrlPre = null;
-    const ie = e as InputEvent;
-    // What got inserted: prefer the event data, else diff the value.
-    let inserted = ie.data ?? "";
-    if (!inserted) {
-      const caret = textarea.selectionStart ?? snap.start;
-      inserted = textarea.value.slice(snap.start, Math.max(snap.start, caret));
-    }
-    // Undo the insert (the letter must not stay in the composer) and emit
-    // the control code instead.
-    textarea.value = snap.value;
-    try { textarea.setSelectionRange(snap.start, snap.end); } catch {}
-    autoresize();
-    sendCtrlForChar(inserted);
+    // Plain insert → consume now. Composed input (Firefox IME) would revert
+    // an in-composition undo, so defer those to compositionend.
+    if ((e as InputEvent).isComposing) return;
+    consumeCtrlInsert();
   });
+  textarea.addEventListener("compositionend", () => { consumeCtrlInsert(); });
 
   parent.append(composer, modifierRow);
 
