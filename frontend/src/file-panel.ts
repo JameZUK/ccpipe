@@ -18,7 +18,15 @@
 // <textarea> for v1 (UTF-8, ≤1 MB enforced server-side).
 
 import { apiJson } from "./api";
-import { CLOSE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
+import { CLOSE_SVG, EYE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
+
+// Matches Markdown files for the "view rendered" affordances.
+const MARKDOWN_RE = /\.(md|markdown)$/i;
+
+/** Open the rendered-Markdown viewer for *absPath* in a new tab. */
+function openMarkdownView(absPath: string): void {
+  window.open(`/view?path=${encodeURIComponent(absPath)}`, "_blank", "noopener");
+}
 
 const LS_WIDTH_KEY = "ccpipe.filePanelWidth";
 const DEFAULT_WIDTH_PX = 480;
@@ -384,6 +392,12 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
     const fullPath = joinPath(currentPath, entry.name);
 
     if (entry.type === "file") {
+      if (MARKDOWN_RE.test(entry.name)) {
+        menu.append(menuItem("view", () => {
+          closeMenu();
+          openMarkdownView(fullPath);
+        }));
+      }
       menu.append(menuItem("edit", () => {
         closeMenu();
         openEditor(fullPath);
@@ -656,7 +670,19 @@ function openEditor(path: string): void {
   closeBtn.type = "button";
   closeBtn.className = "btn btn--ghost btn--icon";
   closeBtn.innerHTML = CLOSE_SVG;
-  head.append(title, maxBtn, closeBtn);
+  // Markdown files get a "preview" eye that opens the rendered viewer in
+  // a new tab, so the edit pane and the rendered output sit side by side.
+  if (MARKDOWN_RE.test(path)) {
+    const previewBtn = document.createElement("button");
+    previewBtn.type = "button";
+    previewBtn.className = "btn btn--ghost btn--icon";
+    previewBtn.title = "Open rendered preview in a new tab";
+    previewBtn.insertAdjacentHTML("afterbegin", EYE_SVG);  // trusted static icon
+    previewBtn.addEventListener("click", () => openMarkdownView(path));
+    head.append(title, previewBtn, maxBtn, closeBtn);
+  } else {
+    head.append(title, maxBtn, closeBtn);
+  }
 
   const textarea = document.createElement("textarea");
   textarea.className = "file-editor__area";

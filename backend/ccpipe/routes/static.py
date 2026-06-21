@@ -68,6 +68,37 @@ def _serve_file(relative: str) -> FileResponse:
 async def index() -> FileResponse: return _serve_file("index.html")
 
 
+# The rendered-Markdown viewer is its own page (own bundle) so the heavy
+# markdown/mermaid/KaTeX libraries never load into the terminal app. It
+# gets a PAGE-SCOPED CSP that adds 'unsafe-eval' to script-src: Mermaid
+# builds diagrams via the Function constructor, which the app-wide CSP
+# (script-src 'self') forbids. Scoping the relaxation to /view only is a
+# contained trade-off — this page has no session/terminal control and
+# only renders a file the authenticated operator already has FS access
+# to. The _security_headers middleware in main.py uses
+# response.headers.setdefault(...), so this explicit header is preserved.
+_VIEWER_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "font-src 'self'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "worker-src 'self' blob:; "
+    "object-src 'none'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'none'"
+)
+
+
+@router.get("/view")
+async def markdown_viewer() -> FileResponse:
+    resp = _serve_file("viewer.html")
+    resp.headers["Content-Security-Policy"] = _VIEWER_CSP
+    return resp
+
+
 @router.get("/manifest.webmanifest")
 async def manifest() -> FileResponse: return _serve_file("manifest.webmanifest")
 
