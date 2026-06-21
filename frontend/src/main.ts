@@ -297,8 +297,9 @@ async function attachTerminal(session: string): Promise<void> {
         loading.textContent = "No project directory yet.";
         return;
       }
+      const root = sessionCwd;
       const { listMarkdown } = await import("./api");
-      const data = await listMarkdown(sessionCwd);
+      const data = await listMarkdown(root);
       if (docsMenu !== menu) return;   // closed/reopened while loading
       menu.replaceChildren();
       if (!data.entries.length) {
@@ -316,8 +317,9 @@ async function attachTerminal(session: string): Promise<void> {
         item.title = ent.rel;
         item.addEventListener("click", () => {
           closeDocsMenu();
-          window.open(`/view?path=${encodeURIComponent(ent.path)}`,
-                      "_blank", "noopener");
+          window.open(
+            `/view?path=${encodeURIComponent(ent.path)}&root=${encodeURIComponent(root)}`,
+            "_blank", "noopener");
         });
         menu.append(item);
       }

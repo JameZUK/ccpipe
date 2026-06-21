@@ -23,9 +23,15 @@ import { CLOSE_SVG, EYE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
 // Matches Markdown files for the "view rendered" affordances.
 const MARKDOWN_RE = /\.(md|markdown)$/i;
 
+/** Build a /view URL for *absPath*, optionally scoping the viewer's
+ *  document switcher to a project *root*. */
+function mdViewUrl(absPath: string, root?: string): string {
+  const u = `/view?path=${encodeURIComponent(absPath)}`;
+  return root ? `${u}&root=${encodeURIComponent(root)}` : u;
+}
 /** Open the rendered-Markdown viewer for *absPath* in a new tab. */
-function openMarkdownView(absPath: string): void {
-  window.open(`/view?path=${encodeURIComponent(absPath)}`, "_blank", "noopener");
+function openMarkdownView(absPath: string, root?: string): void {
+  window.open(mdViewUrl(absPath, root), "_blank", "noopener");
 }
 
 const LS_WIDTH_KEY = "ccpipe.filePanelWidth";
@@ -395,12 +401,12 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
       if (MARKDOWN_RE.test(entry.name)) {
         menu.append(menuItem("view", () => {
           closeMenu();
-          openMarkdownView(fullPath);
+          openMarkdownView(fullPath, opts.initialPath);
         }));
       }
       menu.append(menuItem("edit", () => {
         closeMenu();
-        openEditor(fullPath);
+        openEditor(fullPath, opts.initialPath);
       }));
       menu.append(menuItem("download", () => {
         closeMenu();
@@ -470,7 +476,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
     main.addEventListener("click", () => {
       if (entry.type === "dir") reload(fullPath);
-      else openEditor(fullPath);
+      else openEditor(fullPath, opts.initialPath);
     });
 
     row.append(main, meta, actions);
@@ -619,7 +625,7 @@ function saveEditorMaximised(v: boolean): void {
   try { localStorage.setItem(LS_EDITOR_MAX, v ? "1" : "0"); } catch {}
 }
 
-function openEditor(path: string): void {
+function openEditor(path: string, root?: string): void {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.setAttribute("role", "dialog");
@@ -678,7 +684,7 @@ function openEditor(path: string): void {
     previewBtn.className = "btn btn--ghost btn--icon";
     previewBtn.title = "Open rendered preview in a new tab";
     previewBtn.insertAdjacentHTML("afterbegin", EYE_SVG);  // trusted static icon
-    previewBtn.addEventListener("click", () => openMarkdownView(path));
+    previewBtn.addEventListener("click", () => openMarkdownView(path, root));
     head.append(title, previewBtn, maxBtn, closeBtn);
   } else {
     head.append(title, maxBtn, closeBtn);
