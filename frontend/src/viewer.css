@@ -118,9 +118,25 @@ button.md-bar__btn { cursor: pointer; font: inherit; }
   text-align: left;
   padding: 0.4rem 0.7rem;
   cursor: pointer;
-  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  overflow: hidden;
+}
+/* Dimmed directory shrinks/ellipsises first; filename stays visible. */
+.md-docs-menu__dir {
+  flex: 0 100 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--md-muted);
+}
+.md-docs-menu__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .md-docs-menu__item:hover { background: color-mix(in srgb, var(--md-accent) 16%, transparent); }
 .md-docs-menu__item--active {

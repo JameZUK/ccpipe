@@ -330,8 +330,24 @@ function setupDocsMenu(): void {
         item.type = "button";
         item.className = "md-docs-menu__item";
         if (ent.path === filePath) item.classList.add("md-docs-menu__item--active");
-        item.textContent = ent.rel;
         item.title = ent.rel;
+        // Keep the filename visible: dimmed, truncatable directory + a
+        // pinned filename that never ellipsises away.
+        const slash = ent.rel.lastIndexOf("/");
+        if (slash >= 0) {
+          const d = document.createElement("span");
+          d.className = "md-docs-menu__dir";
+          d.textContent = ent.rel.slice(0, slash);
+          const n = document.createElement("span");
+          n.className = "md-docs-menu__name";
+          n.textContent = ent.rel.slice(slash);   // includes leading "/"
+          item.append(d, n);
+        } else {
+          const n = document.createElement("span");
+          n.className = "md-docs-menu__name";
+          n.textContent = ent.rel;
+          item.append(n);
+        }
         item.addEventListener("click", () => {
           closeDocsMenu();
           if (ent.path !== filePath) location.assign(mdViewUrl(ent.path));
