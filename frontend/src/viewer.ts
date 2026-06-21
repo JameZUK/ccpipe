@@ -326,9 +326,12 @@ function setupDocsMenu(): void {
         return;
       }
       for (const ent of data.entries as { name: string; path: string; rel: string }[]) {
-        const item = document.createElement("button");
-        item.type = "button";
+        // A div (not a <button>): Firefox collapses block children inside
+        // a button onto one line (the two-line item rendered overlapping).
+        const item = document.createElement("div");
         item.className = "md-docs-menu__item";
+        item.setAttribute("role", "button");
+        item.tabIndex = 0;
         if (ent.path === filePath) item.classList.add("md-docs-menu__item--active");
         item.title = ent.rel;
         // Two-line item: filename on its own full-width line (always
@@ -348,6 +351,9 @@ function setupDocsMenu(): void {
         item.addEventListener("click", () => {
           closeDocsMenu();
           if (ent.path !== filePath) location.assign(mdViewUrl(ent.path));
+        });
+        item.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); item.click(); }
         });
         menu.append(item);
       }
