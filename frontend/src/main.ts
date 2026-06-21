@@ -323,22 +323,19 @@ async function attachTerminal(session: string): Promise<void> {
         item.type = "button";
         item.className = "docs-menu__item";
         item.title = ent.rel;
-        // Keep the filename visible: the directory is dimmed and
-        // truncatable, the filename is pinned and never ellipsised away.
+        // Two-line item: filename on its own full-width line (always
+        // readable, can't be squeezed by a sibling in any browser) with
+        // the directory dimmed underneath.
         const slash = ent.rel.lastIndexOf("/");
+        const n = document.createElement("span");
+        n.className = "docs-menu__name";
+        n.textContent = slash >= 0 ? ent.rel.slice(slash + 1) : ent.rel;
+        item.append(n);
         if (slash >= 0) {
           const d = document.createElement("span");
           d.className = "docs-menu__dir";
           d.textContent = ent.rel.slice(0, slash);
-          const n = document.createElement("span");
-          n.className = "docs-menu__name";
-          n.textContent = ent.rel.slice(slash);   // includes leading "/"
-          item.append(d, n);
-        } else {
-          const n = document.createElement("span");
-          n.className = "docs-menu__name";
-          n.textContent = ent.rel;
-          item.append(n);
+          item.append(d);
         }
         item.addEventListener("click", () => {
           closeDocsMenu();

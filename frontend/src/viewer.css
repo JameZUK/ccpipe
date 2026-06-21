@@ -109,6 +109,7 @@ button.md-bar__btn { cursor: pointer; font: inherit; }
   border-radius: 8px;
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
 }
+/* Two-line item: filename (own line, full width) + dimmed directory. */
 .md-docs-menu__item {
   background: transparent;
   border: none;
@@ -119,24 +120,22 @@ button.md-bar__btn { cursor: pointer; font: inherit; }
   padding: 0.4rem 0.7rem;
   cursor: pointer;
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
   overflow: hidden;
-}
-/* Dimmed directory shrinks/ellipsises first; filename stays visible. */
-.md-docs-menu__dir {
-  flex: 0 100 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--md-muted);
 }
 .md-docs-menu__name {
-  flex: 0 1 auto;
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.md-docs-menu__dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--md-muted);
 }
 .md-docs-menu__item:hover { background: color-mix(in srgb, var(--md-accent) 16%, transparent); }
 .md-docs-menu__item--active {

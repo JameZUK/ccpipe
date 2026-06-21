@@ -2877,6 +2877,7 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   border-radius: var(--radius-sm);
   box-shadow: 0 12px 28px rgba(0,0,0,0.5);
 }
+/* Two-line item: filename (own line, full width) + dimmed directory. */
 .docs-menu__item {
   background: transparent;
   border: none;
@@ -2887,25 +2888,23 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   padding: var(--s-2) var(--s-3);
   cursor: pointer;
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
   overflow: hidden;
   transition: background var(--dur-fast) var(--ease-out);
 }
-/* Dimmed directory shrinks/ellipsises first; filename stays visible. */
-.docs-menu__dir {
-  flex: 0 100 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg-muted);
-}
 .docs-menu__name {
-  flex: 0 1 auto;
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.docs-menu__dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--fg-muted);
 }
 .docs-menu__item:hover { background: var(--bg-input); }
 .docs-menu__note {
