@@ -2886,10 +2886,26 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   text-align: left;
   padding: var(--s-2) var(--s-3);
   cursor: pointer;
-  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  overflow: hidden;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+/* Dimmed directory shrinks/ellipsises first; filename stays visible. */
+.docs-menu__dir {
+  flex: 0 100 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: background var(--dur-fast) var(--ease-out);
+  white-space: nowrap;
+  color: var(--fg-muted);
+}
+.docs-menu__name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .docs-menu__item:hover { background: var(--bg-input); }
 .docs-menu__note {
