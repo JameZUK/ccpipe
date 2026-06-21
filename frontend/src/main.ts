@@ -292,6 +292,14 @@ async function attachTerminal(session: string): Promise<void> {
     document.body.append(menu);
     docsMenu = menu;
     document.addEventListener("pointerdown", onDocsAway, true);
+    // Once populated the menu may be wider than the space left of its
+    // anchor button (overflows off-screen on narrow phones), so flip it
+    // to left-anchored if its left edge spills past the viewport edge.
+    const clampMenu = () => {
+      const m = menu.getBoundingClientRect();
+      if (m.left < 8) { menu.style.right = "auto"; menu.style.left = "8px"; }
+      else if (m.right > window.innerWidth - 8) { menu.style.right = "8px"; }
+    };
     try {
       if (!sessionCwd) {
         loading.textContent = "No project directory yet.";
@@ -307,6 +315,7 @@ async function attachTerminal(session: string): Promise<void> {
         empty.className = "docs-menu__note";
         empty.textContent = "No Markdown files found.";
         menu.append(empty);
+        clampMenu();
         return;
       }
       for (const ent of data.entries) {
@@ -329,6 +338,7 @@ async function attachTerminal(session: string): Promise<void> {
         note.textContent = `first ${data.entries.length} shown`;
         menu.append(note);
       }
+      clampMenu();
     } catch {
       if (docsMenu === menu) loading.textContent = "Failed to load docs.";
     }
