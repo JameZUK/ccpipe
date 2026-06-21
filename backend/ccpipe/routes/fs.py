@@ -127,6 +127,12 @@ _FS_BINARY_SNIFF = 1024
 # the deny-listed state dirs (.claude, .local/state/ccpipe, …).
 _FS_MD_INDEX_MAX_ENTRIES = 500
 _FS_MD_INDEX_MAX_DEPTH = 8
+# Cap on inline-served images (/api/fs/raw). Unlike /api/fs/download (which
+# is operator-initiated and uncapped), raw is auto-fetched by the viewer for
+# every ![](img) reference in a document, so an oversized image in a crafted
+# doc shouldn't force a huge transfer. Inline preview images don't need to be
+# large.
+_FS_RAW_MAX_BYTES = 25 * 1024 * 1024     # 25 MiB
 _FS_MD_SUFFIXES = (".md", ".markdown")
 _FS_MD_INDEX_PRUNE = frozenset({
     "node_modules", "venv", "__pycache__", "dist", "build", "target",
@@ -375,8 +381,9 @@ async def fs_markdown_index(root: str) -> dict[str, Any]:
     data source for the toolbar "Docs" dropdown. The walk is bounded in
     depth and entry count, does not follow directory symlinks, and prunes
     hidden + known-heavy dirs in place so it stays cheap on a large tree.
-    Each returned path is still re-validated by /api/fs/read when opened,
-    so a symlinked leaf can't escape the jail."""
+    The deny-list is enforced explicitly on every returned path (not left
+    to the incidental hidden-dir prune), and symlinked files are skipped,
+    so the index can never surface a path the rest of /api/fs/* refuses."""
     resolved = _resolve_fs_path(root)
     if not resolved.is_dir():
         raise HTTPException(status_code=400, detail="root is not a directory")
@@ -394,6 +401,21 @@ async def fs_markdown_index(root: str) -> dict[str, Any]:
             if not fn.lower().endswith(_FS_MD_SUFFIXES):
                 continue
             full = os.path.join(dirpath, fn)
+            # Don't surface symlinked "docs": their path is inside the jail
+            # but the target may not be — /api/fs/read would 403 on open, so
+            # listing them just yields broken entries (and leaks the link's
+            # existence). followlinks=False already excludes symlinked dirs.
+            try:
+                if stat_mod.S_ISLNK(os.lstat(full).st_mode):
+                    continue
+            except OSError:
+                continue
+            # Enforce the jail + deny-list on the leaf itself rather than
+            # relying on the hidden-dir prune to coincide with the deny-list.
+            try:
+                _enforce_fs_jail(Path(full))
+            except HTTPException:
+                continue
             out.append({
                 "name": fn,
                 "path": full,
@@ -688,6 +710,10 @@ async def fs_raw(path: str) -> StreamingResponse:
         raise HTTPException(status_code=404, detail="path not found")
     if not stat_mod.S_ISREG(st.st_mode):
         raise HTTPException(status_code=400, detail="not a regular file")
+    if st.st_size > _FS_RAW_MAX_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"image too large for inline render "
+                                   f"({st.st_size} > {_FS_RAW_MAX_BYTES})")
     # SVG is an image MIME but can carry inline script, so exclude it —
     # raster images only. The viewer's CSP forbids script execution
     # anyway, but defence in depth is cheap here.

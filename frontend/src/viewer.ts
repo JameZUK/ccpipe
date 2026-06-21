@@ -145,6 +145,10 @@ function renderSource(source: string): void {
   docEl.querySelectorAll("a[href]").forEach((a) => {
     const href = a.getAttribute("href") ?? "";
     if (isLocalRelative(href)) {
+      // Strip any author-supplied target/rel before rewriting so a rewritten
+      // local link never carries framing attributes the document set.
+      a.removeAttribute("target");
+      a.removeAttribute("rel");
       const target = resolveRelative(baseDir, href);
       if (/\.(md|markdown)$/i.test(target.replace(/[?#].*$/, ""))) {
         a.setAttribute("href", mdViewUrl(target));
@@ -251,7 +255,15 @@ async function poll(): Promise<void> {
     if (key === lastKey) return;
 
     const cr = await fetchJson(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
-    if (!cr.ok) return;   // grew past cap / transient — retry next tick
+    if (!cr.ok) {
+      // A client-error read (e.g. 413: file grew past the 1 MiB cap, 415:
+      // no longer UTF-8) won't succeed until the file changes again. Adopt
+      // this key so we DON'T hot-retry the same unreadable revision every
+      // tick — the next real mtime change re-arms the fetch. (Leave 5xx to
+      // retry, since those are transient.)
+      if (cr.status >= 400 && cr.status < 500) lastKey = key;
+      return;
+    }
     const source = (await cr.json()).content ?? "";
 
     const anchor = captureScroll();
