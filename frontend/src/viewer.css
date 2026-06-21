@@ -109,8 +109,12 @@ button.md-bar__btn { cursor: pointer; font: inherit; }
   border-radius: 8px;
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
 }
-/* Two-line item: filename (own line, full width) + dimmed directory. */
+/* Two-line item: filename (own line, full width) + dimmed directory.
+   Plain block stacking — NOT flex on the <button> (Firefox mis-renders
+   display:flex on button elements, which left the menu blank). */
 .md-docs-menu__item {
+  display: block;
+  width: 100%;
   background: transparent;
   border: none;
   color: var(--md-fg);
@@ -119,18 +123,17 @@ button.md-bar__btn { cursor: pointer; font: inherit; }
   text-align: left;
   padding: 0.4rem 0.7rem;
   cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 1px;
   overflow: hidden;
 }
 .md-docs-menu__name {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .md-docs-menu__dir {
+  display: block;
+  margin-top: 1px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

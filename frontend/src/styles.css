@@ -2877,8 +2877,12 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   border-radius: var(--radius-sm);
   box-shadow: 0 12px 28px rgba(0,0,0,0.5);
 }
-/* Two-line item: filename (own line, full width) + dimmed directory. */
+/* Two-line item: filename (own line, full width) + dimmed directory.
+   Plain block stacking — NOT flex on the <button> (Firefox mis-renders
+   display:flex on button elements, which left the menu blank). */
 .docs-menu__item {
+  display: block;
+  width: 100%;
   background: transparent;
   border: none;
   color: var(--fg);
@@ -2887,19 +2891,18 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   text-align: left;
   padding: var(--s-2) var(--s-3);
   cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 1px;
   overflow: hidden;
   transition: background var(--dur-fast) var(--ease-out);
 }
 .docs-menu__name {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .docs-menu__dir {
+  display: block;
+  margin-top: 1px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
