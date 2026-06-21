@@ -279,6 +279,19 @@ function onDocsAway(e: Event): void {
   const t = e.target as Node;
   if (docsMenu && !docsMenu.contains(t) && docsBtn && !docsBtn.contains(t)) closeDocsMenu();
 }
+/** Keep a right-anchored dropdown on-screen: once populated it may be
+ *  wider than the space left of its anchor button (the bug on narrow
+ *  phones), so flip it to left-anchored if its left edge spills off. */
+function clampMenu(menu: HTMLElement): void {
+  const margin = 8;
+  const r = menu.getBoundingClientRect();
+  if (r.left < margin) {
+    menu.style.right = "auto";
+    menu.style.left = `${margin}px`;
+  } else if (r.right > window.innerWidth - margin) {
+    menu.style.right = `${margin}px`;
+  }
+}
 
 function setupDocsMenu(): void {
   if (!docsBtn) return;
@@ -309,6 +322,7 @@ function setupDocsMenu(): void {
         empty.className = "md-docs-menu__note";
         empty.textContent = "No Markdown files found.";
         menu.append(empty);
+        clampMenu(menu);
         return;
       }
       for (const ent of data.entries as { name: string; path: string; rel: string }[]) {
@@ -330,6 +344,7 @@ function setupDocsMenu(): void {
         trunc.textContent = `first ${data.entries.length} shown`;
         menu.append(trunc);
       }
+      clampMenu(menu);
     } catch {
       if (docsMenu === menu) note.textContent = "Failed to load.";
     }
