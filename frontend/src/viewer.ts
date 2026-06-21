@@ -98,9 +98,19 @@ const nameEl = document.getElementById("md-name");
 const liveEl = document.getElementById("md-live");
 const downloadEl = document.getElementById("md-download") as HTMLAnchorElement | null;
 
-// Resolved once from ?path=.
-const filePath = new URLSearchParams(location.search).get("path") ?? "";
+// Resolved once from the query string. `root` scopes the document
+// switcher to a project directory; it falls back to the file's own
+// directory so a viewer opened without one still lists nearby docs.
+const _params = new URLSearchParams(location.search);
+const filePath = _params.get("path") ?? "";
 const baseDir = dirOf(filePath);
+const rootDir = _params.get("root") || baseDir;
+
+/** /view URL for *absPath*, preserving the project root so the switcher
+ *  stays scoped as the reader navigates between documents. */
+function mdViewUrl(absPath: string): string {
+  return `/view?path=${encodeURIComponent(absPath)}&root=${encodeURIComponent(rootDir)}`;
+}
 
 function fail(message: string): void {
   if (statusEl) {
@@ -137,7 +147,7 @@ function renderSource(source: string): void {
     if (isLocalRelative(href)) {
       const target = resolveRelative(baseDir, href);
       if (/\.(md|markdown)$/i.test(target.replace(/[?#].*$/, ""))) {
-        a.setAttribute("href", `/view?path=${encodeURIComponent(target)}`);
+        a.setAttribute("href", mdViewUrl(target));
       } else {
         a.setAttribute("href", `/api/fs/download?path=${encodeURIComponent(target)}`);
       }
@@ -256,6 +266,76 @@ async function poll(): Promise<void> {
   }
 }
 
+// ── document switcher (the "docs ▾" dropdown) ────────────────────────────
+const docsBtn = document.getElementById("md-docs") as HTMLButtonElement | null;
+let docsMenu: HTMLElement | null = null;
+
+function closeDocsMenu(): void {
+  docsMenu?.remove();
+  docsMenu = null;
+  document.removeEventListener("pointerdown", onDocsAway, true);
+}
+function onDocsAway(e: Event): void {
+  const t = e.target as Node;
+  if (docsMenu && !docsMenu.contains(t) && docsBtn && !docsBtn.contains(t)) closeDocsMenu();
+}
+
+function setupDocsMenu(): void {
+  if (!docsBtn) return;
+  docsBtn.hidden = false;
+  docsBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (docsMenu) { closeDocsMenu(); return; }
+    const menu = document.createElement("div");
+    menu.className = "md-docs-menu";
+    const r = docsBtn.getBoundingClientRect();
+    menu.style.top = `${Math.round(r.bottom + 6)}px`;
+    menu.style.right = `${Math.round(window.innerWidth - r.right)}px`;
+    const note = document.createElement("div");
+    note.className = "md-docs-menu__note";
+    note.textContent = "Loading…";
+    menu.append(note);
+    document.body.append(menu);
+    docsMenu = menu;
+    document.addEventListener("pointerdown", onDocsAway, true);
+    try {
+      const res = await fetchJson(`/api/fs/markdown-index?root=${encodeURIComponent(rootDir)}`);
+      if (docsMenu !== menu) return;
+      if (!res.ok) { note.textContent = "Couldn't list documents."; return; }
+      const data = await res.json();
+      menu.replaceChildren();
+      if (!data.entries.length) {
+        const empty = document.createElement("div");
+        empty.className = "md-docs-menu__note";
+        empty.textContent = "No Markdown files found.";
+        menu.append(empty);
+        return;
+      }
+      for (const ent of data.entries as { name: string; path: string; rel: string }[]) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "md-docs-menu__item";
+        if (ent.path === filePath) item.classList.add("md-docs-menu__item--active");
+        item.textContent = ent.rel;
+        item.title = ent.rel;
+        item.addEventListener("click", () => {
+          closeDocsMenu();
+          if (ent.path !== filePath) location.assign(mdViewUrl(ent.path));
+        });
+        menu.append(item);
+      }
+      if (data.truncated) {
+        const trunc = document.createElement("div");
+        trunc.className = "md-docs-menu__note";
+        trunc.textContent = `first ${data.entries.length} shown`;
+        menu.append(trunc);
+      }
+    } catch {
+      if (docsMenu === menu) note.textContent = "Failed to load.";
+    }
+  });
+}
+
 // ── boot ─────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   if (!filePath) { fail("No file specified."); return; }
@@ -287,6 +367,7 @@ async function main(): Promise<void> {
 
   statusEl?.remove();
   renderSource(body.content ?? "");
+  setupDocsMenu();
 
   // Seed the change key from a stat call so its representation matches the
   // poll's (read returns an int mtime; stat a float — comparing the two
