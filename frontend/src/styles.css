@@ -2877,12 +2877,15 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   border-radius: var(--radius-sm);
   box-shadow: 0 12px 28px rgba(0,0,0,0.5);
 }
-/* Two-line item: filename (own line, full width) + dimmed directory.
-   Plain block stacking — NOT flex on the <button> (Firefox mis-renders
-   display:flex on button elements, which left the menu blank). */
+/* Two-line item: filename (own line, full width) + dimmed directory. */
 .docs-menu__item {
   display: block;
   width: 100%;
+  /* The menu is a flex column with a max-height; without this the items
+     SHRINK to fit (default flex-shrink:1) instead of scrolling, squashing
+     each two-line entry until the text overlaps. flex-shrink:0 keeps each
+     item its natural height and lets the menu scroll. */
+  flex-shrink: 0;
   background: transparent;
   border: none;
   color: var(--fg);

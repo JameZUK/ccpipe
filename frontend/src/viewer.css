@@ -109,12 +109,15 @@ button.md-bar__btn { cursor: pointer; font: inherit; }
   border-radius: 8px;
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
 }
-/* Two-line item: filename (own line, full width) + dimmed directory.
-   Plain block stacking — NOT flex on the <button> (Firefox mis-renders
-   display:flex on button elements, which left the menu blank). */
+/* Two-line item: filename (own line, full width) + dimmed directory. */
 .md-docs-menu__item {
   display: block;
   width: 100%;
+  /* The menu is a flex column with a max-height; without this the items
+     SHRINK to fit (default flex-shrink:1) instead of scrolling, squashing
+     each two-line entry until the text overlaps. flex-shrink:0 keeps each
+     item its natural height and lets the menu scroll. */
+  flex-shrink: 0;
   background: transparent;
   border: none;
   color: var(--md-fg);
