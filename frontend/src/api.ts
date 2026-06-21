@@ -97,6 +97,27 @@ export function getFsConfig(): Promise<FsConfig> {
   return _fsConfigPromise;
 }
 
+// ─── /api/fs/markdown-index ───────────────────────────────────────────
+// Every Markdown file under a project root, for the toolbar "Docs"
+// dropdown. Not cached — the tree changes as the user works, and it's a
+// single cheap GET per open.
+export interface MarkdownIndexEntry {
+  name: string;
+  path: string;   // absolute, for /view?path=
+  rel: string;    // relative to root, for display
+}
+export interface MarkdownIndex {
+  root: string;
+  entries: MarkdownIndexEntry[];
+  truncated: boolean;
+}
+
+export function listMarkdown(root: string): Promise<MarkdownIndex> {
+  return apiJson<MarkdownIndex>(
+    `/api/fs/markdown-index?root=${encodeURIComponent(root)}`,
+  );
+}
+
 // ─── /api/mic/config ──────────────────────────────────────────────────
 // Voice-input behaviour knobs (see backend MicConfig). Not cached —
 // the settings modal mutates this and the mic streamer must see the

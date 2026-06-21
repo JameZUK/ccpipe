@@ -60,3 +60,18 @@ export const PIN_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
   <path d="M12 17v5"/>
   <path d="M9 10.76V6h6v4.76a2 2 0 0 0 .59 1.42L17 13.59V17H7v-3.41l1.41-1.41A2 2 0 0 0 9 10.76z"/>
 </svg>`;
+
+// Document with text lines — the toolbar "Docs" (project Markdown) button.
+export const DOC_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+  <path d="M14 2v6h6"/>
+  <path d="M8 13h8"/>
+  <path d="M8 17h8"/>
+  <path d="M8 9h2"/>
+</svg>`;
+
+// Eye — "open rendered preview" affordance in the file editor.
+export const EYE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>
+  <circle cx="12" cy="12" r="3"/>
+</svg>`;

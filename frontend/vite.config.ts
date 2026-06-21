@@ -1,5 +1,8 @@
 import { defineConfig } from "vite";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const here = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
 
 // Build identifier injected at compile time so the running app can show
 // exactly which build it loaded (the static VERSION string never changes,
@@ -30,5 +33,15 @@ export default defineConfig({
   build: {
     outDir: "dist",
     target: "es2022",
+    rollupOptions: {
+      // Two HTML entry points: the terminal app (index.html) and the
+      // standalone rendered-Markdown viewer (viewer.html). The viewer's
+      // heavy deps (markdown-it, highlight.js, KaTeX, Mermaid) only load
+      // on /view and never weigh down the terminal bundle.
+      input: {
+        main: here("index.html"),
+        viewer: here("viewer.html"),
+      },
+    },
   },
 });

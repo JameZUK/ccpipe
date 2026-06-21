@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import errno
 import logging
+import mimetypes
 import os
 import stat as stat_mod
 from pathlib import Path
@@ -118,6 +119,20 @@ _FS_EDITOR_LIMIT = 1 * 1024 * 1024     # 1 MiB
 # assumed to be a binary blob (matches what `git diff` decides for
 # binary files in practice). UTF-8 decode failures are also rejected.
 _FS_BINARY_SNIFF = 1024
+
+# Markdown index (the toolbar "Docs" dropdown). A bounded walk of the
+# project root for *.md / *.markdown so the list can't blow up on a huge
+# tree, and the walk stays cheap by pruning VCS / build / dependency dirs
+# in place. Hidden dirs are pruned too, which also keeps the walk clear of
+# the deny-listed state dirs (.claude, .local/state/ccpipe, …).
+_FS_MD_INDEX_MAX_ENTRIES = 500
+_FS_MD_INDEX_MAX_DEPTH = 8
+_FS_MD_SUFFIXES = (".md", ".markdown")
+_FS_MD_INDEX_PRUNE = frozenset({
+    "node_modules", "venv", "__pycache__", "dist", "build", "target",
+    "vendor", ".cache", ".next", ".svelte-kit", ".mypy_cache",
+    ".pytest_cache", ".tox", ".git",
+})
 
 
 # ─── Path validation ───────────────────────────────────────────────────────
@@ -353,6 +368,46 @@ async def fs_list(path: str, show_hidden: int = 0,
     }
 
 
+@router.get("/api/fs/markdown-index", dependencies=[AuthDep, SameOriginDep])
+async def fs_markdown_index(root: str) -> dict[str, Any]:
+    """Return every Markdown file under *root* (the session's project
+    directory) as ``{name, path, rel}`` sorted by relative path — the
+    data source for the toolbar "Docs" dropdown. The walk is bounded in
+    depth and entry count, does not follow directory symlinks, and prunes
+    hidden + known-heavy dirs in place so it stays cheap on a large tree.
+    Each returned path is still re-validated by /api/fs/read when opened,
+    so a symlinked leaf can't escape the jail."""
+    resolved = _resolve_fs_path(root)
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="root is not a directory")
+    root_str = str(resolved)
+    out: list[dict[str, Any]] = []
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
+        depth = dirpath[len(root_str):].count(os.sep)
+        if depth >= _FS_MD_INDEX_MAX_DEPTH:
+            dirnames[:] = []
+        else:
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d not in _FS_MD_INDEX_PRUNE]
+        for fn in filenames:
+            if not fn.lower().endswith(_FS_MD_SUFFIXES):
+                continue
+            full = os.path.join(dirpath, fn)
+            out.append({
+                "name": fn,
+                "path": full,
+                "rel": os.path.relpath(full, root_str),
+            })
+            if len(out) >= _FS_MD_INDEX_MAX_ENTRIES:
+                truncated = True
+                break
+        if truncated:
+            break
+    out.sort(key=lambda e: e["rel"].lower())
+    return {"root": root_str, "entries": out, "truncated": truncated}
+
+
 @router.get("/api/fs/read", dependencies=[AuthDep, SameOriginDep])
 async def fs_read(path: str) -> dict[str, Any]:
     """Return the file content as UTF-8 text. Rejects binary files and
@@ -419,6 +474,23 @@ async def fs_read(path: str) -> dict[str, Any]:
         "size": st.st_size,
         "mtime": int(st.st_mtime),
     }
+
+
+@router.get("/api/fs/stat", dependencies=[AuthDep, SameOriginDep])
+async def fs_stat(path: str) -> dict[str, Any]:
+    """Cheap metadata probe (size + float mtime) for one file. The
+    Markdown viewer polls this to detect on-disk edits (from the editor,
+    from ``claude``, from anything) without re-fetching the whole file
+    each tick. ``mtime`` is a float so two saves in the same wall-second
+    still register. Path safety matches /api/fs/read."""
+    resolved = _resolve_fs_path(path)
+    try:
+        st = resolved.stat()
+    except OSError:
+        raise HTTPException(status_code=404, detail="path not found")
+    if not stat_mod.S_ISREG(st.st_mode):
+        raise HTTPException(status_code=400, detail="not a regular file")
+    return {"path": str(resolved), "size": st.st_size, "mtime": st.st_mtime}
 
 
 @router.post("/api/fs/write", dependencies=[AuthDep, CsrfDep])
@@ -597,6 +669,74 @@ async def fs_download(path: str) -> StreamingResponse:
         headers={
             "Content-Length": str(st.st_size),
             "Content-Disposition": content_disposition_attachment(resolved.name),
+        },
+    )
+
+
+@router.get("/api/fs/raw", dependencies=[AuthDep, SameOriginDep])
+async def fs_raw(path: str) -> StreamingResponse:
+    """Serve a file **inline** with its sniffed Content-Type, restricted
+    to ``image/*``. This backs relative ``![](./img.png)`` references in
+    the Markdown viewer. Capping to images means this can never serve an
+    HTML/JS/SVG file inline (an XSS vector that ``download``'s
+    ``attachment`` disposition otherwise neutralises); anything else gets
+    415. Path safety mirrors ``/api/fs/download`` exactly."""
+    resolved = _resolve_fs_path(path)
+    try:
+        st = resolved.stat()
+    except OSError:
+        raise HTTPException(status_code=404, detail="path not found")
+    if not stat_mod.S_ISREG(st.st_mode):
+        raise HTTPException(status_code=400, detail="not a regular file")
+    # SVG is an image MIME but can carry inline script, so exclude it —
+    # raster images only. The viewer's CSP forbids script execution
+    # anyway, but defence in depth is cheap here.
+    ctype, _enc = mimetypes.guess_type(resolved.name)
+    if not ctype or not ctype.startswith("image/") or ctype == "image/svg+xml":
+        raise HTTPException(status_code=415, detail="not a raster image")
+
+    parent_fd, leaf = _walk_parent_nofollow(str(resolved))
+    try:
+        try:
+            fd = os.open(
+                leaf,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise HTTPException(status_code=403, detail="symlink at target")
+            if exc.errno == errno.ENOENT:
+                raise HTTPException(status_code=404, detail="path not found")
+            if exc.errno == errno.EACCES:
+                raise HTTPException(status_code=403, detail="permission denied")
+            raise HTTPException(status_code=500, detail=f"open failed: {exc}")
+    finally:
+        os.close(parent_fd)
+
+    def _gen():
+        try:
+            with os.fdopen(fd, "rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        return
+                    yield chunk
+        except OSError:
+            return
+
+    return StreamingResponse(
+        _gen(),
+        media_type=ctype,
+        headers={
+            "Content-Length": str(st.st_size),
+            "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+            # Short private cache so the viewer's live re-renders reuse the
+            # already-fetched image (no flicker) instead of re-downloading
+            # it every time the document text changes. A changed image is
+            # at most this stale.
+            "Cache-Control": "private, max-age=30",
         },
     )
 

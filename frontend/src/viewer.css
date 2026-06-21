@@ -1,0 +1,223 @@
+/* Rendered-Markdown viewer (/view). Dark theme tuned to ccpipe's warm
+   palette. Self-contained — this stylesheet only loads on the viewer
+   page, never in the terminal app. */
+
+:root {
+  --md-bg: #0d0c08;
+  --md-surface: #16140f;
+  --md-border: #2b2820;
+  --md-fg: #e7e2d6;
+  --md-muted: #9a9484;
+  --md-accent: #d9a441;
+  --md-link: #e0b257;
+  --md-code-bg: #1b1813;
+  --md-code-fg: #e7e2d6;
+  --md-maxw: 56rem;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--md-bg);
+  color: var(--md-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ── top bar ─────────────────────────────────────────────────────────── */
+.md-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 1rem;
+  background: color-mix(in srgb, var(--md-bg) 86%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--md-border);
+}
+.md-bar__name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--md-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* "live" auto-update indicator */
+.md-bar__live {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--md-muted);
+  padding: 0.12rem 0.45rem;
+  border: 1px solid var(--md-border);
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+.md-bar__live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4caf6a;
+}
+.md-bar__live[data-state="removed"] { color: #e0795f; border-color: #6a3328; }
+.md-bar__live[data-state="removed"]::before { background: #e0795f; }
+/* brief flash when a fresh version was just rendered */
+.md-bar__live--pulse { animation: md-live-pulse 1s ease-out; }
+@keyframes md-live-pulse {
+  0%   { background: color-mix(in srgb, #4caf6a 35%, transparent); border-color: #4caf6a; color: var(--md-fg); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-bar__live--pulse { animation: none; }
+}
+
+.md-bar__spacer { flex: 1; }
+.md-bar__btn {
+  color: var(--md-link);
+  text-decoration: none;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--md-border);
+  border-radius: 6px;
+}
+.md-bar__btn:hover { background: var(--md-surface); }
+
+/* ── document ────────────────────────────────────────────────────────── */
+.md-doc {
+  max-width: var(--md-maxw);
+  margin: 0 auto;
+  padding: 2.2rem 1.25rem 6rem;
+  word-wrap: break-word;
+}
+
+.md-status { color: var(--md-muted); padding: 2rem 0; }
+.md-status--error { color: #e0795f; }
+
+.md-doc h1, .md-doc h2, .md-doc h3,
+.md-doc h4, .md-doc h5, .md-doc h6 {
+  margin: 1.8em 0 0.6em;
+  line-height: 1.25;
+  font-weight: 650;
+}
+.md-doc h1 { font-size: 1.95em; border-bottom: 1px solid var(--md-border); padding-bottom: 0.3em; }
+.md-doc h2 { font-size: 1.5em; border-bottom: 1px solid var(--md-border); padding-bottom: 0.3em; }
+.md-doc h3 { font-size: 1.25em; }
+.md-doc h4 { font-size: 1.05em; }
+.md-doc h5 { font-size: 0.95em; color: var(--md-muted); }
+.md-doc h6 { font-size: 0.9em; color: var(--md-muted); }
+.md-doc :first-child { margin-top: 0; }
+
+/* heading anchor link (markdown-it-anchor headerLink) */
+.md-doc h1 a, .md-doc h2 a, .md-doc h3 a,
+.md-doc h4 a, .md-doc h5 a, .md-doc h6 a {
+  color: inherit;
+  text-decoration: none;
+}
+.md-doc h1 a:hover, .md-doc h2 a:hover, .md-doc h3 a:hover,
+.md-doc h4 a:hover, .md-doc h5 a:hover, .md-doc h6 a:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--md-accent);
+}
+
+.md-doc p { margin: 0 0 1em; }
+.md-doc a { color: var(--md-link); text-decoration: none; }
+.md-doc a:hover { text-decoration: underline; }
+
+.md-doc ul, .md-doc ol { margin: 0 0 1em; padding-left: 1.6em; }
+.md-doc li { margin: 0.2em 0; }
+.md-doc li::marker { color: var(--md-muted); }
+
+/* task lists (markdown-it-task-lists) */
+.md-doc .task-list-item { list-style: none; }
+.md-doc .task-list-item-checkbox { margin: 0 0.5em 0 -1.4em; }
+.md-doc ul.contains-task-list { padding-left: 1.6em; }
+
+.md-doc blockquote {
+  margin: 0 0 1em;
+  padding: 0.2em 1em;
+  border-left: 3px solid var(--md-accent);
+  color: var(--md-muted);
+  background: var(--md-surface);
+  border-radius: 0 6px 6px 0;
+}
+
+.md-doc hr {
+  border: 0;
+  border-top: 1px solid var(--md-border);
+  margin: 2em 0;
+}
+
+.md-doc img { max-width: 100%; height: auto; border-radius: 6px; }
+
+/* inline + block code */
+.md-doc code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: var(--md-code-bg);
+  color: var(--md-code-fg);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
+}
+.md-doc pre {
+  margin: 0 0 1.1em;
+  padding: 0.9em 1em;
+  background: var(--md-code-bg);
+  border: 1px solid var(--md-border);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.md-doc pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+
+/* tables */
+.md-doc table {
+  border-collapse: collapse;
+  margin: 0 0 1.2em;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md-doc th, .md-doc td {
+  border: 1px solid var(--md-border);
+  padding: 0.45em 0.8em;
+}
+.md-doc th { background: var(--md-surface); font-weight: 650; text-align: left; }
+.md-doc tr:nth-child(2n) td { background: color-mix(in srgb, var(--md-surface) 50%, transparent); }
+
+/* mermaid */
+.md-doc pre.mermaid {
+  background: var(--md-surface);
+  border: 1px solid var(--md-border);
+  text-align: center;
+  padding: 1.2em;
+}
+.md-doc pre.mermaid svg { max-width: 100%; height: auto; }
+.md-doc pre.mermaid.mermaid--failed::after {
+  content: "⚠ diagram failed to render";
+  color: #e0795f;
+  font-size: 0.85em;
+}
+
+/* katex shouldn't force horizontal page scroll on long display math */
+.md-doc .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2em 0; }
+
+@media (max-width: 600px) {
+  html, body { font-size: 15px; }
+  .md-doc { padding: 1.4rem 1rem 5rem; }
+}

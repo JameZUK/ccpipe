@@ -7,7 +7,7 @@ import {
   onDisplayPrefsChange,
   saveLastSession,
 } from "./display-prefs";
-import { FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
+import { DOC_SVG, FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI } from "./mobile";
 import * as notifications from "./notifications";
 import { attachOptionSpacePtt } from "./ptt";
@@ -261,6 +261,77 @@ async function attachTerminal(session: string): Promise<void> {
     void tts.playText(lastSpokenText);
   });
 
+  // Docs — a dropdown of every Markdown file under the session's project
+  // root; picking one opens the rendered viewer (/view) in a new tab.
+  const docsBtn = document.createElement("button");
+  docsBtn.className = "pill pill--icon";
+  docsBtn.title = "Project docs (Markdown)";
+  docsBtn.innerHTML = DOC_SVG;
+  let docsMenu: HTMLElement | null = null;
+  const closeDocsMenu = () => {
+    docsMenu?.remove();
+    docsMenu = null;
+    document.removeEventListener("pointerdown", onDocsAway, true);
+  };
+  function onDocsAway(e: Event) {
+    const t = e.target as Node;
+    if (docsMenu && !docsMenu.contains(t) && !docsBtn.contains(t)) closeDocsMenu();
+  }
+  docsBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (docsMenu) { closeDocsMenu(); return; }
+    const menu = document.createElement("div");
+    menu.className = "docs-menu";
+    const r = docsBtn.getBoundingClientRect();
+    menu.style.top = `${Math.round(r.bottom + 6)}px`;
+    menu.style.right = `${Math.round(window.innerWidth - r.right)}px`;
+    const loading = document.createElement("div");
+    loading.className = "docs-menu__note";
+    loading.textContent = "Loading…";
+    menu.append(loading);
+    document.body.append(menu);
+    docsMenu = menu;
+    document.addEventListener("pointerdown", onDocsAway, true);
+    try {
+      if (!sessionCwd) {
+        loading.textContent = "No project directory yet.";
+        return;
+      }
+      const { listMarkdown } = await import("./api");
+      const data = await listMarkdown(sessionCwd);
+      if (docsMenu !== menu) return;   // closed/reopened while loading
+      menu.replaceChildren();
+      if (!data.entries.length) {
+        const empty = document.createElement("div");
+        empty.className = "docs-menu__note";
+        empty.textContent = "No Markdown files found.";
+        menu.append(empty);
+        return;
+      }
+      for (const ent of data.entries) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "docs-menu__item";
+        item.textContent = ent.rel;
+        item.title = ent.rel;
+        item.addEventListener("click", () => {
+          closeDocsMenu();
+          window.open(`/view?path=${encodeURIComponent(ent.path)}`,
+                      "_blank", "noopener");
+        });
+        menu.append(item);
+      }
+      if (data.truncated) {
+        const note = document.createElement("div");
+        note.className = "docs-menu__note";
+        note.textContent = `first ${data.entries.length} shown`;
+        menu.append(note);
+      }
+    } catch {
+      if (docsMenu === menu) loading.textContent = "Failed to load docs.";
+    }
+  });
+
   // File panel — opens the upload/download/edit sheet rooted at the
   // session's cwd if we can resolve it, otherwise /home.
   const filesBtn = document.createElement("button");
@@ -314,7 +385,7 @@ async function attachTerminal(session: string): Promise<void> {
   micBtn.innerHTML = MIC_SVG;
   micBtn.hidden = true;
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, filesBtn, settingsBtn);
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, docsBtn, filesBtn, settingsBtn);
   statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0d0c08" />
+    <!-- Standalone rendered-Markdown viewer, opened in its own tab as
+         /view?path=<absolute path>. Served by routes/static.py with a
+         page-scoped CSP. Its bundle is separate from the terminal app. -->
+    <title>ccpipe · markdown</title>
+    <script type="module" src="/src/viewer.ts"></script>
+  </head>
+  <body>
+    <header class="md-bar">
+      <span class="md-bar__name" id="md-name">…</span>
+      <span class="md-bar__live" id="md-live" data-state="off" title="Auto-updates when the file changes on disk" hidden>live</span>
+      <span class="md-bar__spacer"></span>
+      <a class="md-bar__btn" id="md-download" title="Download this file" hidden>download</a>
+    </header>
+    <main class="md-doc" id="md-doc">
+      <div class="md-status" id="md-status">Loading…</div>
+    </main>
+  </body>
+</html>
