@@ -60,6 +60,20 @@ Desktop:
 </tr>
 </table>
 
+**Document viewer.** Any Markdown file in your project opens fully rendered
+in its own browser tab — GitHub-flavoured, with syntax highlighting, KaTeX
+math, and Mermaid diagrams. Open one from the file browser, the editor's
+preview button, or the toolbar **Docs ▾** menu (which lists every `.md`
+under the session's project root). It **live-updates**: edit the file — or
+let `claude` edit it — and the rendered view refreshes in place without
+moving your scroll position. Images and relative links resolve against the
+document's own directory. The page is served with its own tightened CSP,
+separate from the terminal app.
+
+<p align="center">
+  <img src="docs/screenshots/Viewer-Markdown.png" width="520" alt="Rendered Markdown viewer: a live-updating tab showing GFM tables, syntax-highlighted code, a task list, KaTeX math, and a Mermaid diagram">
+</p>
+
 ## Architecture
 
 ccpipe runs as a `systemd --user` service on the host. No Docker — the
