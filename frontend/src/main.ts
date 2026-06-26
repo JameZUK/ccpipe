@@ -540,6 +540,9 @@ async function attachTerminal(session: string): Promise<void> {
   // replay writes the current scrollback into it.
   let resetTerminal: (() => void) | null = null;
   let scrollTerminalToBottom: (() => void) | null = null;
+  // Arms terminal.ts's seamless-reconnect "absorb scrolls in place" window
+  // so an attach redraw / Ink re-render doesn't duplicate into scrollback.
+  let armSeamlessRedrawAbsorb: ((ms?: number) => void) | null = null;
   // Flag set by onHello, cleared on the next onOutput. After the post-
   // hello pane-replay lands we explicitly drop the viewport to the
   // bottom so xterm's auto-follow can't get stuck pinned at the TOP
@@ -832,6 +835,17 @@ async function attachTerminal(session: string): Promise<void> {
         // after the first post-hello write restores auto-follow for the
         // live tail that follows.
         bottomOnNextOutput = true;
+      } else {
+        // Seamless reconnect: the buffer is preserved, but the server still
+        // sends tmux's attach redraw AND claude's Ink re-render (the pane
+        // height typically jitters a row on reattach → SIGWINCH → full
+        // re-render) right after this hello. That re-render repaints a frame
+        // we already show by SCROLLING it — which the SU patch / native
+        // scroll funnel would otherwise push into scrollback as duplicate
+        // lines, once per reconnect (the duplicate-scrollback bug). Absorb
+        // those scrolls in place for a short window so the repaint
+        // overwrites instead of duplicating. See terminal.ts.
+        armSeamlessRedrawAbsorb?.();
       }
       renderSessionLabel(sessionLabel, msg.session);
       // Cache the session's working dir so the Files pill + the
@@ -924,6 +938,7 @@ async function attachTerminal(session: string): Promise<void> {
   writeToTerm = terminalApi.writeToTerm;
   resetTerminal = terminalApi.resetBuffer;
   scrollTerminalToBottom = terminalApi.scrollToBottom;
+  armSeamlessRedrawAbsorb = terminalApi.armSeamlessRedrawAbsorb;
 
   // Ctrl+Shift+D — capture a frontend diagnostic snapshot (WS counters
   // + xterm buffer state + scrollback tail) and pop the debug modal.
