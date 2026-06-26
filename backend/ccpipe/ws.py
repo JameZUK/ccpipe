@@ -982,8 +982,19 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     # a new line at column 0; otherwise lines stack on the right of the
     # previous one. Normalise (idempotent if already CRLF).
     normalised = out.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-    if not normalised.endswith(b"\r\n"):
-        normalised += b"\r\n"
+    # IMPORTANT: do NOT end the blob with a trailing CRLF. On a full
+    # reconnect the frontend replays this blob and tmux's attach redraw
+    # then repaints the visible screen IN PLACE. A trailing CRLF first
+    # scrolls the grid up by one row — so the top visible line is pushed
+    # into scrollback AND immediately repainted on screen by the redraw,
+    # a duplicate line per reconnect that piles up under mobile reconnect
+    # churn ("duplicate data in scrollback"). Ending exactly at the last
+    # line's content lets the redraw overwrite with no scroll, no dup.
+    # The next bytes after this blob are always a cursor-positioning
+    # redraw (\x1b[H…), so nothing concatenates onto that last line.
+    # Validated headless in frontend/test/dup-seam.mjs.
+    if normalised.endswith(b"\r\n"):
+        normalised = normalised[:-2]
     # Cap the blob size, truncating the OLDEST content from the front so
     # the newest (visible) lines always survive. Trim to the next CRLF
     # boundary so we never emit a half escape sequence / partial line.

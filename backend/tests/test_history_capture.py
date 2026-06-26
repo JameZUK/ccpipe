@@ -47,13 +47,16 @@ class _FakeProc:
 
 
 async def test_capture_returns_full_pane_no_padding():
-    """tmux's output is normalised to CRLF; no padding is appended."""
+    """tmux's output is normalised to CRLF; no padding, and NO trailing
+    CRLF (the trailing newline scrolled the grid and duplicated the top
+    visible line against tmux's attach redraw — see ws.py + dup-seam.mjs)."""
     fake = _FakeProc(b"line1\nline2\n\x1b[31mred\x1b[0m\n")
     with patch("ccpipe.ws.asyncio.create_subprocess_exec",
                return_value=fake) as spawn:
         out = await _capture_session_history("work", viewport_rows=4)
-    # CRLF-normalised content, no trailing padding.
-    assert out == b"line1\r\nline2\r\n\x1b[31mred\x1b[0m\r\n"
+    # CRLF-normalised inter-line separators, but the blob ends exactly at
+    # the last line's content — no trailing CRLF.
+    assert out == b"line1\r\nline2\r\n\x1b[31mred\x1b[0m"
 
 
 async def test_capture_uses_no_end_filter():
@@ -91,7 +94,7 @@ async def test_viewport_rows_is_no_op():
     with patch("ccpipe.ws.asyncio.create_subprocess_exec",
                return_value=fake_b):
         out_80 = await _capture_session_history("work", viewport_rows=80)
-    assert out_24 == out_80 == b"alpha\r\n"
+    assert out_24 == out_80 == b"alpha"
 
 
 async def test_capture_returns_empty_on_nonzero_exit():
@@ -130,5 +133,19 @@ async def test_capture_normalises_crlf_idempotently():
     with patch("ccpipe.ws.asyncio.create_subprocess_exec",
                return_value=fake):
         out = await _capture_session_history("work", viewport_rows=2)
-    assert out == b"already\r\nhere\r\nfine\r\n"
+    assert out == b"already\r\nhere\r\nfine"
     assert b"\r\r" not in out
+
+
+async def test_capture_has_no_trailing_crlf():
+    """Regression guard for the reconnect-duplication seam: the replayed
+    blob must NOT end in CRLF. A trailing newline scrolls xterm's grid up
+    one row before tmux's attach redraw repaints it, so the top visible
+    line ends up duplicated (scrollback + screen) on every full reconnect.
+    Reproduced headless in frontend/test/dup-seam.mjs."""
+    fake = _FakeProc(b"top line\nbottom line\n")
+    with patch("ccpipe.ws.asyncio.create_subprocess_exec",
+               return_value=fake):
+        out = await _capture_session_history("work", viewport_rows=2)
+    assert not out.endswith(b"\r\n")
+    assert out == b"top line\r\nbottom line"
