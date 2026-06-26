@@ -448,6 +448,11 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // startup is heavy and the feature-detection below already catches a
   // renamed-internals upgrade — this flag just makes that catch
   // observable from a debug snapshot rather than only the console.
+  // Resize re-render absorb window. Declared before the SU patch so the
+  // patch can consult it; armed from term.onResize below. See armRedrawAbsorb.
+  let absorbRedraw = false;
+  let absorbTimer: number | null = null;
+
   let suPatchInstalled = false;
   if (
     ih && bs &&
@@ -471,6 +476,23 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       // (`\x1b[2147483647S`, which xterm only caps at 0x7FFFFFFF) would
       // spin bs.scroll() ~2.1B times and hang the tab.
       let count = Math.min((params.params?.[0] as number | undefined) || 1, term.rows);
+      // Resize re-render absorb: right after a resize, claude/Ink clears and
+      // repaints its whole live region with a FULL-REGION scroll-up. Archiving
+      // those rows duplicates a frame already on screen (and mixes in blank /
+      // reflowed rows) — the "dups + gaps in scrollback on every soft-keyboard
+      // toggle" bug, proven by a debug snapshot whose recentScrollEvents showed
+      // resize → SU(n=full screen) on a loop, ybase climbing one screen per
+      // toggle (and ZERO SU between resizes — streaming scrolls via native LF,
+      // not SU). Inside the short post-resize window, shift a full-region SU IN
+      // PLACE (upstream: drop the row, don't archive) instead of pushing it to
+      // scrollback. Partial SUs (genuine line-by-line streaming) and ALL SUs
+      // outside the window still archive — Quirk-6 stays intact. We gate ONLY
+      // the SU patch here, never bufferService.scroll, so native-LF scrolling
+      // (streaming + the history-replay blob) is never affected.
+      if (absorbRedraw && count >= buf.scrollBottom - buf.scrollTop + 1) {
+        logScrollEvent("SU(absorbed)", count);
+        return originalScrollUp(params);
+      }
       logScrollEvent("SU(patched)", count);
       while (count-- > 0) {
         bs.scroll!(ih._eraseAttrData!());
@@ -485,49 +507,26 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     );
   }
 
-  // ── Seamless-reconnect "attach-redraw absorb" window ─────────────────
-  // Fixes the duplicate-scrollback bug on reconnect (root-caused via the
-  // headless harnesses in frontend/test/dup-*.mjs):
+  // ── Resize re-render absorb window ───────────────────────────────────
+  // Root cause of the mobile "dups + gaps in scrollback" report, pinned by a
+  // debug-snapshot recentScrollEvents trace: every terminal RESIZE (soft
+  // keyboard 45↔23 rows, height jitter, reconnect) SIGWINCHes claude, which
+  // re-renders its WHOLE live region with a full-region CSI SU. The SU patch
+  // above then archived that entire re-rendered screen into scrollback — a
+  // duplicate of a frame already on screen, with the reflowed/blank rows of
+  // the new size mixed in (the gaps). ybase climbed exactly one screen per
+  // keyboard toggle; between resizes (148s in the trace) there were ZERO SU
+  // events, because streaming output scrolls via native LF, not SU.
   //
-  // On a SEAMLESS reconnect (short gap → ws.ts keeps the buffer and drops
-  // the history blob) the pane height usually jitters by a row (the
-  // DOM-renderer -1 pad vs the client's reported rows), which SIGWINCHes
-  // claude; Ink then re-renders the WHOLE visible frame by SCROLLING the
-  // already-present rows up before repainting (CSI SU and/or a trailing
-  // LF at a top-anchored DECSTBM scroll-region bottom). Because alt-screen
-  // is suppressed (everything lands on the MAIN buffer) BOTH of those
-  // scroll paths funnel through `_bufferService.scroll`, which archives
-  // the displaced top row into the scrollback ring — pushing a second
-  // copy of a frame the buffer already shows. N duplicate lines per
-  // reconnect, accumulating, invisible until you scroll up. tmux's own
-  // attach redraw is in-place (absolute CUP) and does NOT cause this — it
-  // is claude's Ink re-render that scrolls (confirmed by harness shapes).
-  //
-  // Fix: while a short window is armed (main.ts arms it from onHello on a
-  // seamless reconnect only), make `_bufferService.scroll` a no-op so the
-  // re-render repaints IN PLACE — no scrollback growth, no duplicate, and
-  // the visible frame stays intact (proven: dup-onoutput.mjs → 0 dups,
-  // visibleFrameIntact true across 20 reconnects). The guard is armed ONLY
-  // in this sub-second window, so the Quirk-6 SU→scrollback behaviour and
-  // normal live scrolling are untouched the rest of the time. NOT armed on
-  // a full reconnect — that path replays the history blob THROUGH this same
-  // scroll funnel to populate scrollback, which must not be absorbed.
-  let absorbRedraw = false;
-  let absorbTimer: number | null = null;
-  if (bs && typeof bs.scroll === "function") {
-    const realScroll = (bs.scroll as (a: unknown, b?: unknown) => void).bind(bs);
-    (bs as { scroll: (a: unknown, b?: unknown) => void }).scroll = function (eraseAttr, isWrapped) {
-      if (!absorbRedraw) return realScroll(eraseAttr, isWrapped);
-      // Suppress the scroll: the bytes driving it are a re-render of a
-      // frame the buffer already holds, repainted in place by the
-      // cursor-addressed writes around it.
-      return;
-    };
-  }
-  /** Arm the absorb window (default 600ms). Called by main.ts onHello on a
-   * seamless reconnect. Idempotent: re-arming restarts the timer. */
-  const armSeamlessRedrawAbsorb = (ms = 600): void => {
-    if (disposed || !bs || typeof bs.scroll !== "function") return;
+  // Fix: arm this window from term.onResize; while armed, the SU patch shifts
+  // a full-region re-render IN PLACE instead of archiving it (see above).
+  // Gating only the SU patch — never bufferService.scroll — means native-LF
+  // scrolling (live streaming AND the full-reconnect history-replay blob)
+  // still populates scrollback normally. The window is generous (1s) but the
+  // full-region check is the real filter, so legitimate partial-scroll
+  // streaming is archived even inside the window.
+  const armRedrawAbsorb = (ms = 1000): void => {
+    if (disposed) return;
     absorbRedraw = true;
     if (absorbTimer !== null) clearTimeout(absorbTimer);
     absorbTimer = window.setTimeout(() => {
@@ -550,8 +549,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     return false;
   });
 
-  // Resize logger — diagnostic only.
-  term.onResize(({ rows }) => logScrollEvent("resize", rows));
+  // Resize logger + the load-bearing trigger for the absorb window: a resize
+  // SIGWINCHes claude into a full-region SU re-render that we must not archive.
+  term.onResize(({ rows }) => {
+    logScrollEvent("resize", rows);
+    armRedrawAbsorb();
+  });
 
   // Passive observers for the other CSI sequences that can re-flow
   // content within the live grid without growing scrollback. All
@@ -1075,7 +1078,6 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
 
   return {
     term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom,
-    armSeamlessRedrawAbsorb,
     getDebugState, dumpBuffer, dumpAllBuffers,
     dispose: () => {
       disposed = true;
