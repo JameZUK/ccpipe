@@ -485,6 +485,57 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     );
   }
 
+  // ── Seamless-reconnect "attach-redraw absorb" window ─────────────────
+  // Fixes the duplicate-scrollback bug on reconnect (root-caused via the
+  // headless harnesses in frontend/test/dup-*.mjs):
+  //
+  // On a SEAMLESS reconnect (short gap → ws.ts keeps the buffer and drops
+  // the history blob) the pane height usually jitters by a row (the
+  // DOM-renderer -1 pad vs the client's reported rows), which SIGWINCHes
+  // claude; Ink then re-renders the WHOLE visible frame by SCROLLING the
+  // already-present rows up before repainting (CSI SU and/or a trailing
+  // LF at a top-anchored DECSTBM scroll-region bottom). Because alt-screen
+  // is suppressed (everything lands on the MAIN buffer) BOTH of those
+  // scroll paths funnel through `_bufferService.scroll`, which archives
+  // the displaced top row into the scrollback ring — pushing a second
+  // copy of a frame the buffer already shows. N duplicate lines per
+  // reconnect, accumulating, invisible until you scroll up. tmux's own
+  // attach redraw is in-place (absolute CUP) and does NOT cause this — it
+  // is claude's Ink re-render that scrolls (confirmed by harness shapes).
+  //
+  // Fix: while a short window is armed (main.ts arms it from onHello on a
+  // seamless reconnect only), make `_bufferService.scroll` a no-op so the
+  // re-render repaints IN PLACE — no scrollback growth, no duplicate, and
+  // the visible frame stays intact (proven: dup-onoutput.mjs → 0 dups,
+  // visibleFrameIntact true across 20 reconnects). The guard is armed ONLY
+  // in this sub-second window, so the Quirk-6 SU→scrollback behaviour and
+  // normal live scrolling are untouched the rest of the time. NOT armed on
+  // a full reconnect — that path replays the history blob THROUGH this same
+  // scroll funnel to populate scrollback, which must not be absorbed.
+  let absorbRedraw = false;
+  let absorbTimer: number | null = null;
+  if (bs && typeof bs.scroll === "function") {
+    const realScroll = (bs.scroll as (a: unknown, b?: unknown) => void).bind(bs);
+    (bs as { scroll: (a: unknown, b?: unknown) => void }).scroll = function (eraseAttr, isWrapped) {
+      if (!absorbRedraw) return realScroll(eraseAttr, isWrapped);
+      // Suppress the scroll: the bytes driving it are a re-render of a
+      // frame the buffer already holds, repainted in place by the
+      // cursor-addressed writes around it.
+      return;
+    };
+  }
+  /** Arm the absorb window (default 600ms). Called by main.ts onHello on a
+   * seamless reconnect. Idempotent: re-arming restarts the timer. */
+  const armSeamlessRedrawAbsorb = (ms = 600): void => {
+    if (disposed || !bs || typeof bs.scroll !== "function") return;
+    absorbRedraw = true;
+    if (absorbTimer !== null) clearTimeout(absorbTimer);
+    absorbTimer = window.setTimeout(() => {
+      absorbRedraw = false;
+      absorbTimer = null;
+    }, ms);
+  };
+
   // DECSTBM logger (`\x1b[<top>;<bot>r`) — diagnostic only; doesn't
   // alter behaviour. Return false so xterm still applies the change.
   term.parser.registerCsiHandler({ final: "r" }, (params): boolean => {
@@ -1024,10 +1075,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
 
   return {
     term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom,
+    armSeamlessRedrawAbsorb,
     getDebugState, dumpBuffer, dumpAllBuffers,
     dispose: () => {
       disposed = true;
       if (wireRetryTimer !== null) { clearTimeout(wireRetryTimer); wireRetryTimer = null; }
+      if (absorbTimer !== null) { clearTimeout(absorbTimer); absorbTimer = null; absorbRedraw = false; }
       // Tear down any outstanding scrollToBottom onRender subscriptions.
       for (const dispose of [...pendingRenderDisposers]) dispose();
       pillCleanup?.();
