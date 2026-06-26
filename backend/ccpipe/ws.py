@@ -295,7 +295,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     # PTY (and thus the tmux client) at the correct dimensions. With
     # window-size=latest this means the attached window resizes correctly on
     # first attach instead of briefly rendering at the fallback 120x40.
-    initial_cols, initial_rows, leftover = await _wait_for_initial_resize(websocket)
+    initial_cols, initial_rows, leftover = await _wait_for_initial_resize(websocket, session)
 
     # Capture tmux's full pane (history + visible) on EVERY connect, not
     # just the first one. The frontend `term.reset()`s on `hello` so the
@@ -306,12 +306,18 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     # skipped this capture on reconnects.
     history_bytes = await _capture_session_history(session, initial_rows)
 
-    pty_proc = PtyProcess(tmux.attach_argv(session),
-                          cols=initial_cols, rows=initial_rows)
-    await pty_proc.start()
-    # Any non-resize messages we drained while waiting are applied now.
-    for msg in leftover:
-        _handle_client_text(msg, pty_proc)
+    # NOTE: the tmux-attach relay (PtyProcess) is spawned LATER, in the
+    # no-await "commit zone" just before the receive loop's try/finally —
+    # NOT here. Spawning it before the fallible handshake below (hello /
+    # history / stream_ready sends, every one of which raises if the
+    # client has already vanished) used to leak the `tmux attach-session`
+    # child: the guaranteeing finally hadn't been entered yet, so a
+    # mid-handshake disconnect left the relay attached forever. Under
+    # tmux window-size=latest those orphans pinned the shared pane to
+    # their fallback width (120x40), so a later mobile client saw wide
+    # content wrapped into blank-gap scrollback — the "scrambled output /
+    # massive spaces and gaps on mobile" report. Deferring start() past
+    # the last fallible await closes the leak.
 
     # Best-effort: try to open the mic pipe now so the hello message can
     # advertise voice capability accurately.
@@ -528,6 +534,27 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
             except Exception:
                 pass
 
+    # ── Commit zone ──────────────────────────────────────────────────
+    # Spawn the relay HERE, after every fallible handshake await above.
+    # From this point to the receive loop's `try` below there is no await
+    # that can raise-and-escape, so once the `tmux attach-session` child
+    # exists it is guaranteed to be reaped by that loop's finally
+    # (pty_proc.terminate()). See the NOTE near _capture_session_history.
+    pty_proc = PtyProcess(tmux.attach_argv(session),
+                          cols=initial_cols, rows=initial_rows)
+    try:
+        await pty_proc.start()
+    except BaseException:
+        # start() itself failed (fork/exec) — reap any half-spawned child
+        # before propagating, since the finally below is not yet active.
+        with contextlib.suppress(Exception):
+            await pty_proc.terminate()
+        raise
+    # Any non-resize messages we drained while waiting for the initial
+    # resize are applied now that the relay exists.
+    for msg in leftover:
+        _handle_client_text(msg, pty_proc, session)
+
     pty_task = asyncio.create_task(_pty_lifecycle())
     mic_limiter = _MicRateLimiter()
     # Per-WS opaque token used to claim the mic singleton on first use.
@@ -698,7 +725,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
                     log.info("ws closed mid-stream: session no longer authorized (input)")
                     await websocket.close(code=1008, reason="session revoked")
                     break
-                _handle_client_text(text, pty_proc)
+                _handle_client_text(text, pty_proc, session)
             elif (data := msg.get("bytes")) is not None:
                 # Same revoked-credential gate as for text frames — a
                 # session whose cred_version has bumped should stop
@@ -784,11 +811,36 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
 
 
 # Time budget for the client to send its initial 'resize' message before we
-# give up and spawn the PTY at the fallback size. Frontend sends it
-# immediately on ws.onopen, so this should resolve in a few tens of ms.
-_INITIAL_RESIZE_TIMEOUT_S = 0.8
-_FALLBACK_COLS = 120
-_FALLBACK_ROWS = 40
+# give up and spawn the PTY at the fallback size. The frontend sends it
+# immediately on ws.onopen, so on a healthy link this resolves in tens of
+# ms and the timeout is never approached. It's bumped well above that
+# (was 0.8s) so a slow mobile reconnect still delivers the real size
+# BEFORE we attach — attaching at a guessed width and only then resizing
+# is what strands a wide frame in xterm's scrollback (see _FALLBACK_COLS).
+_INITIAL_RESIZE_TIMEOUT_S = 2.5
+# Fallback size used ONLY when a brand-new session's client never sends an
+# initial resize within the timeout. Deliberately NARROW: a fallback WIDER
+# than the real client makes claude draw full-width frames that, once the
+# real (narrower) resize lands and the pane shrinks, are stranded in
+# xterm's scrollback as blank-gap wrapped rows — the "massive spaces /
+# gaps on mobile" symptom. Narrow content never gaps on a wider display,
+# so an under-guess is always safe; the old 120-wide over-guess was not.
+# Reconnects do better still: they seed from the session's last known size
+# (see _last_client_size), so a phone reconnect storm re-attaches at the
+# width it last used (~60) instead of any fallback.
+_FALLBACK_COLS = 80
+_FALLBACK_ROWS = 24
+# Last client size observed per session. Seeds the initial attach size on
+# a RECONNECT before the client's resize arrives, so a mobile reconnect
+# storm re-attaches at the width it last used rather than the fallback.
+# Updated on every resize (initial + live); a timed-out fallback never
+# writes here. Bounded by the number of distinct session names (tiny for
+# a personal tool).
+_last_client_size: dict[str, tuple[int, int]] = {}
+
+
+def _remember_client_size(session: str, cols: int, rows: int) -> None:
+    _last_client_size[session] = (cols, rows)
 # Upper bound on resize dimensions. struct.pack("HHHH", ...) in pty_relay
 # rejects values >65535 with struct.error, which would tear down the WS
 # every time a (possibly compromised) client sent a giant resize. Real
@@ -953,15 +1005,20 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     return normalised
 
 
-async def _wait_for_initial_resize(websocket: WebSocket
+async def _wait_for_initial_resize(websocket: WebSocket, session: str
                                     ) -> tuple[int, int, list[str]]:
     """Drain WS messages until we see a resize or hit the timeout.
 
     Returns (cols, rows, leftover_text_messages). Any non-resize messages
     received while waiting are returned so the caller can apply them once
     the PTY exists.
+
+    On timeout we fall back to this session's LAST KNOWN client size if we
+    have one (a reconnect reuses the width it last attached at), else the
+    narrow default — never the old wide guess that produced gappy
+    scrollback on mobile.
     """
-    cols, rows = _FALLBACK_COLS, _FALLBACK_ROWS
+    cols, rows = _last_client_size.get(session, (_FALLBACK_COLS, _FALLBACK_ROWS))
     leftover: list[str] = []
     # Defense in depth: cap how much pre-resize chatter we'll buffer
     # before bailing. Legitimate clients send at most one or two pre-
@@ -994,6 +1051,7 @@ async def _wait_for_initial_resize(websocket: WebSocket
             try:
                 cols = _clamp_dim(int(parsed["cols"]))
                 rows = _clamp_dim(int(parsed["rows"]))
+                _remember_client_size(session, cols, rows)
             except (KeyError, ValueError, TypeError):
                 pass
             return cols, rows, leftover
@@ -1046,7 +1104,8 @@ def _is_ping(text: str) -> bool:
         return False
 
 
-def _handle_client_text(text: str, pty_proc: PtyProcess) -> None:
+def _handle_client_text(text: str, pty_proc: PtyProcess,
+                        session: str | None = None) -> None:
     try:
         msg = _safe_json_loads(text)
     except (json.JSONDecodeError, ValueError):
@@ -1075,6 +1134,11 @@ def _handle_client_text(text: str, pty_proc: PtyProcess) -> None:
             except (TypeError, ValueError):
                 return  # malformed resize, ignore
             pty_proc.resize(cols, rows)
+            # Keep the per-session size cache fresh so a later reconnect
+            # seeds from the current (possibly rotated) width, not a stale
+            # one. See _last_client_size / _FALLBACK_COLS.
+            if session is not None:
+                _remember_client_size(session, cols, rows)
         case "ping" | "tts_mute" | "mic_stop":
             # These are intercepted by the main WS receive loop where
             # the closures over send_json / tts_sub / _mic_writer live.

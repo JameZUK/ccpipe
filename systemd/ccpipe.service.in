@@ -88,6 +88,17 @@ RestartSec=3
 KillSignal=SIGINT
 TimeoutStopSec=20s
 
+# CRITICAL: kill ONLY the uvicorn process on stop/restart, not the whole
+# control group. ccpipe spawns the user's tmux server (via the
+# __ccpipe_ctrl bootstrap session), which therefore lands in THIS unit's
+# cgroup along with every claude session running inside it. With the
+# default KillMode=control-group, a routine `systemctl --user restart
+# ccpipe` (every code deploy) SIGKILLs that tmux server and destroys all
+# live sessions — the user's running claude conversations included.
+# KillMode=process restarts uvicorn while leaving the tmux server (and
+# all sessions) untouched; the new uvicorn simply re-attaches to it.
+KillMode=process
+
 # ─── Sandboxing — intentionally NOT enabled ──────────────────────────
 # An earlier revision of this file applied the standard hardening
 # stack (ProtectSystem=strict, SystemCallFilter=@system-service,
