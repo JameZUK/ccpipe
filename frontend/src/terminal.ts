@@ -731,7 +731,16 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   livePill.setAttribute("aria-label", "Scroll to live");
   livePill.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><polyline points="6 13 12 19 18 13"/></svg><span>live</span>`;
   container.appendChild(livePill);
-  livePill.addEventListener("click", () => term.scrollToBottom());
+  livePill.addEventListener("click", () => {
+    // If the app owns scroll (mouse tracking on, e.g. claude), a local
+    // scrollToBottom does nothing — nudge the app back to its live tail with a
+    // burst of wheel-down (extra events are no-ops once it's at the bottom).
+    if (term.modes.mouseTrackingMode !== "none") {
+      socket.send({ type: "input", data: "\x1b[<65;1;1M".repeat(40) });
+    } else {
+      term.scrollToBottom();
+    }
+  });
 
   // Hook the xterm viewport for live-pill state, and bind touch-to-scroll
   // via PointerEvents on the outer container in capture phase.
@@ -792,7 +801,20 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     let activeId = -1;
     let lastY = 0;
     let dragging = false;
+    let wheelAccum = 0;
     const DRAG_THRESHOLD_PX = 4;
+
+    // Map a pointer position to a 1-based terminal cell (col;row) for the SGR
+    // mouse report. Cell size is approximated from the viewport so we don't
+    // reach into xterm's private render dimensions.
+    const cellAt = (e: PointerEvent): { col: number; row: number } => {
+      const rect = viewport.getBoundingClientRect();
+      const cw = Math.max(1, viewport.clientWidth / Math.max(1, term.cols));
+      const ch = Math.max(1, viewport.clientHeight / Math.max(1, term.rows));
+      const col = Math.min(term.cols, Math.max(1, Math.floor((e.clientX - rect.left) / cw) + 1));
+      const row = Math.min(term.rows, Math.max(1, Math.floor((e.clientY - rect.top) / ch) + 1));
+      return { col, row };
+    };
 
     const onDown = (e: PointerEvent) => {
       if (e.pointerType !== "touch") return;
@@ -800,18 +822,40 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       activeId = e.pointerId;
       lastY = e.clientY;
       dragging = false;
+      wheelAccum = 0;
     };
     const onMove = (e: PointerEvent) => {
       if (e.pointerId !== activeId) return;
       const dy = lastY - e.clientY;
       if (!dragging && Math.abs(dy) < DRAG_THRESHOLD_PX) return;
       dragging = true;
-      viewport.scrollTop += dy;
       lastY = e.clientY;
       if (e.cancelable) e.preventDefault();
+
+      // When the foreground app has mouse tracking on (e.g. claude), IT owns
+      // the wheel and scrolls its own view — so forward the drag as SGR wheel
+      // events, exactly like a desktop mouse wheel. Scrolling xterm's local
+      // (synthesized) buffer instead is what left the phone showing a
+      // duplicated copy the app never knew about. For apps WITHOUT mouse
+      // tracking (a bare shell) keep the local viewport scroll, so we never
+      // inject wheel bytes into a prompt.
+      if (term.modes.mouseTrackingMode !== "none") {
+        wheelAccum += dy;
+        const ch = Math.max(8, viewport.clientHeight / Math.max(1, term.rows));
+        const notches = Math.trunc(wheelAccum / ch);
+        if (notches !== 0) {
+          wheelAccum -= notches * ch;
+          const btn = notches < 0 ? 64 : 65;          // <0 finger-down = wheel up
+          const { col, row } = cellAt(e);
+          const count = Math.min(Math.abs(notches), 6);
+          socket.send({ type: "input", data: `\x1b[<${btn};${col};${row}M`.repeat(count) });
+        }
+      } else {
+        viewport.scrollTop += dy;
+      }
     };
     const onUp = (e: PointerEvent) => {
-      if (e.pointerId === activeId) { activeId = -1; dragging = false; }
+      if (e.pointerId === activeId) { activeId = -1; dragging = false; wheelAccum = 0; }
     };
 
     container.addEventListener("pointerdown",   onDown, { capture: true });
