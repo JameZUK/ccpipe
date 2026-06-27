@@ -26,10 +26,27 @@ import rust from "highlight.js/lib/languages/rust";
 import go from "highlight.js/lib/languages/go";
 import ini from "highlight.js/lib/languages/ini";
 import dockerfile from "highlight.js/lib/languages/dockerfile";
+import c from "highlight.js/lib/languages/c";
+import cpp from "highlight.js/lib/languages/cpp";
+import csharp from "highlight.js/lib/languages/csharp";
+import java from "highlight.js/lib/languages/java";
+import ruby from "highlight.js/lib/languages/ruby";
+import php from "highlight.js/lib/languages/php";
+import kotlin from "highlight.js/lib/languages/kotlin";
+import swift from "highlight.js/lib/languages/swift";
+import lua from "highlight.js/lib/languages/lua";
+import perl from "highlight.js/lib/languages/perl";
+import r from "highlight.js/lib/languages/r";
+import scss from "highlight.js/lib/languages/scss";
+import makefile from "highlight.js/lib/languages/makefile";
+import graphql from "highlight.js/lib/languages/graphql";
+import plaintext from "highlight.js/lib/languages/plaintext";
 
 for (const [name, lang] of Object.entries({
   bash, javascript, typescript, python, json, diff, yaml, xml, css,
   markdown, sql, rust, go, ini, dockerfile,
+  c, cpp, csharp, java, ruby, php, kotlin, swift, lua, perl, r,
+  scss, makefile, graphql, plaintext,
 })) hljs.registerLanguage(name, lang);
 hljs.registerAliases(["sh", "shell", "zsh", "console"], { languageName: "bash" });
 hljs.registerAliases(["js", "jsx"], { languageName: "javascript" });
@@ -38,6 +55,12 @@ hljs.registerAliases(["py"], { languageName: "python" });
 hljs.registerAliases(["yml"], { languageName: "yaml" });
 hljs.registerAliases(["html"], { languageName: "xml" });
 hljs.registerAliases(["toml"], { languageName: "ini" });
+hljs.registerAliases(["h", "hpp", "cc", "c++"], { languageName: "cpp" });
+hljs.registerAliases(["rb"], { languageName: "ruby" });
+hljs.registerAliases(["cs"], { languageName: "csharp" });
+hljs.registerAliases(["kt"], { languageName: "kotlin" });
+hljs.registerAliases(["pl"], { languageName: "perl" });
+hljs.registerAliases(["text", "txt"], { languageName: "plaintext" });
 
 const md = new MarkdownIt({
   html: true,            // raw HTML allowed through, then DOMPurify-sanitised

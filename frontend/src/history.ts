@@ -143,6 +143,7 @@ async function loadInitial(): Promise<void> {
   try {
     const page = await fetchPage({ limit: PAGE });
     gen = page.gen; total = page.total; pollFails = 0;
+    loadingOlder = false;   // HR2: any in-flight loadOlder now bails on the gen change
     doc.replaceChildren();
     if (!page.blocks.length) {
       const s = document.createElement("div"); s.className = "hist-status";
@@ -169,12 +170,15 @@ async function loadInitial(): Promise<void> {
 async function loadOlder(): Promise<void> {
   if (loadingOlder || !hasOlder || oldestCursor <= 0) return;
   loadingOlder = true;
+  const g = gen;   // HR2: if the transcript rebinds (loadInitial) during the
+                   // await, discard this page rather than prepend stale blocks.
   doc.querySelectorAll(".hist-loading").forEach((n) => n.remove());     // L10: no stacking
   const note = document.createElement("div");
   note.className = "hist-loading"; note.textContent = "loading older…";
   doc.insertBefore(note, doc.firstChild);
   try {
     const page = await fetchPage({ limit: PAGE, before: oldestCursor });
+    if (g !== gen) { note.remove(); return; }
     note.remove();
     // M2: pin to a stable node, not total height (immune to any concurrent change).
     const anchor = doc.querySelector<HTMLElement>(".hist-block");
@@ -196,11 +200,15 @@ async function poll(): Promise<void> {
   try {
     let page = await fetchPage({ after: newestCursor, limit: PAGE_MAX });
     pollFails = 0;
-    if (page.gen !== gen) { polling = false; await loadInitial(); return; }   // L1: transcript rebound
+    // L1: transcript rebound (claude restart). HR1: hold the `polling` guard
+    // across the reload (the finally clears it) so the interval can't start a
+    // second poll mid-reload.
+    if (page.gen !== gen) { await loadInitial(); return; }
     total = page.total;
     // Only render onto the live tail when the reader is there; otherwise just
     // count (avoids yanking them and bounds work while scrolled up).
     if (page.blocks.length && atBottom()) {
+      doc.querySelector(".hist-status")?.remove();   // HR3: clear empty-state on first content
       await appendChunked(page.blocks);
       newestCursor = lastI();
       enforceCapTop();

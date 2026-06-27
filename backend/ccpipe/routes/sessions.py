@@ -364,10 +364,14 @@ def _iter_transcript_records(path: Path, start_offset: int = 0):
             line = f.readline()        # readline (not `for line in f`) so
             if not line:               # f.tell() stays accurate per line
                 break
-            if line.endswith(b"\n"):
-                resume = f.tell()
-            stripped = line.strip()
-            if not stripped:
+            if not line.endswith(b"\n"):
+                break                  # partial trailing line (caught mid-write):
+                                       # never process it and don't advance
+                                       # `resume` past it — re-read it, complete,
+                                       # on the next incremental pass.
+            resume = f.tell()          # advance past EVERY complete line (incl.
+            stripped = line.strip()    # blanks / skipped record types) so growth
+            if not stripped:           # polls don't re-scan a trailing run of them
                 continue
             try:
                 obj = json.loads(stripped)
@@ -506,10 +510,19 @@ def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
             blocks, offset = cached.blocks, cached.offset
         else:
             blocks, offset = [], 0
+        # Incremental appends mutate the live cached list in place; if the parse
+        # raises mid-way, roll those appends back and leave the old cache entry
+        # intact (unchanged size/offset) so the next poll cleanly retries —
+        # otherwise the half-applied blocks compound on every future poll.
+        base = len(blocks)
         resume = offset
-        for rtype, content, ts, off in _iter_transcript_records(path, offset):
-            resume = off
-            _record_to_blocks(blocks, rtype, content, ts)
+        try:
+            for rtype, content, ts, off in _iter_transcript_records(path, offset):
+                resume = off
+                _record_to_blocks(blocks, rtype, content, ts)
+        except Exception:
+            del blocks[base:]
+            raise
         _BLOCKS_CACHE[key] = _CachedBlocks(st.st_mtime_ns, st.st_size, resume, blocks)
         _BLOCKS_CACHE.move_to_end(key)
         while len(_BLOCKS_CACHE) > _BLOCKS_CACHE_MAX:
