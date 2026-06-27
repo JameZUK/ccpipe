@@ -382,6 +382,17 @@ async function attachTerminal(session: string): Promise<void> {
     openFilePanel(document.body, { initialPath: sessionCwd ?? cfg.root });
   });
 
+  // Claude Code conversation history — opens the console-style /history view
+  // for this session. (The terminal's tmux scrollback is separate; this is
+  // for reviewing claude's conversation, which the TUI keeps no scrollback of.)
+  const historyBtn = document.createElement("button");
+  historyBtn.className = "pill pill--icon";
+  historyBtn.title = "Claude Code history";
+  historyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 3"/></svg>`;
+  historyBtn.addEventListener("click", () => {
+    window.open(`/history?session=${encodeURIComponent(session)}`, "_blank", "noopener");
+  });
+
   const settingsBtn = document.createElement("button");
   settingsBtn.className = "pill pill--icon";
   settingsBtn.title = "Settings";
@@ -416,7 +427,7 @@ async function attachTerminal(session: string): Promise<void> {
   micBtn.innerHTML = MIC_SVG;
   micBtn.hidden = true;
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, docsBtn, filesBtn, settingsBtn);
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, historyBtn, docsBtn, filesBtn, settingsBtn);
   statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────

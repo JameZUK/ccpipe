@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0d0c08" />
+    <!-- Standalone Claude Code conversation-history view, opened in its own
+         tab as /history?session=<name>. Console-style monospace, lazy-paged
+         from the transcript newest-first. Served by routes/static.py. -->
+    <title>ccpipe · history</title>
+    <script type="module" src="/src/history.ts"></script>
+  </head>
+  <body>
+    <header class="hist-bar">
+      <span class="hist-bar__name" id="hist-name">…</span>
+      <span class="hist-bar__spacer"></span>
+      <span class="hist-bar__meta" id="hist-meta"></span>
+    </header>
+    <main class="hist-doc" id="hist-doc">
+      <div class="hist-status" id="hist-status">Loading…</div>
+    </main>
+  </body>
+</html>

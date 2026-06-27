@@ -401,6 +401,77 @@ def _iter_jsonl_as_markdown(path: Path):
         except OSError: pass
 
 
+def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
+    """Parse a claude JSONL transcript into ordered conversation blocks
+    ``{i, role, text, ts}`` (one per user/assistant turn that carries text).
+
+    ``i`` is the block's position in this filtered list — stable across
+    appends because the file only ever grows at the end, so a client can use
+    it as a paging cursor. Framework caveats / tool-only records are skipped,
+    matching the export renderer."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    blocks: list[dict[str, Any]] = []
+    with os.fdopen(fd, "rb") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rtype = obj.get("type")
+            if rtype not in ("user", "assistant"):
+                continue
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            text = _stringify_content(msg.get("content"))
+            if not text or (rtype == "user" and text.lstrip().startswith("<")):
+                continue
+            blocks.append({
+                "i": len(blocks),
+                "role": rtype,
+                "text": text.strip(),
+                "ts": obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else None,
+            })
+    return blocks
+
+
+@router.get("/api/sessions/{name}/history", dependencies=[AuthDep])
+async def session_history(name: str, before: int | None = None,
+                          limit: int = 40) -> dict[str, Any]:
+    """Paged conversation history for the session's bound claude transcript,
+    newest last. The /history view renders these as console-style text.
+
+    - no ``before``      → the most recent ``limit`` blocks (the tail).
+    - ``before=<cursor>`` → the ``limit`` blocks immediately older than it.
+
+    ``oldestCursor`` is what to pass as ``before`` for the next older page;
+    ``hasOlder`` is false once the top is reached. This is the conversation
+    REVIEW surface; tmux console scrollback is separate and unaffected."""
+    try:
+        safe = tmux.safe_name(name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad session")
+    limit = max(1, min(limit, 200))
+    sid = await tmux.claude_session_id(safe)
+    cwd = await tmux.session_cwd(safe)
+    if not sid or not cwd:
+        raise HTTPException(status_code=404, detail="no claude session bound to this tmux session")
+    path = _projects_subdir_for_cwd(cwd) / f"{sid}.jsonl"
+    blocks = await asyncio.to_thread(_transcript_blocks, path)
+    total = len(blocks)
+    end = total if before is None else max(0, min(before, total))
+    start = max(0, end - limit)
+    return {
+        "total": total,
+        "blocks": blocks[start:end],
+        "oldestCursor": start,
+        "hasOlder": start > 0,
+    }
+
+
 @router.get("/api/claude-sessions/{session_id}/export", dependencies=[AuthDep])
 async def claude_session_export(session_id: str, cwd: str,
                                   request: Request) -> StreamingResponse:

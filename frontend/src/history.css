@@ -1,0 +1,42 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  display: flex; flex-direction: column; height: 100dvh;
+  background: #0d0c08; color: #d8d4c8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.hist-bar {
+  flex: 0 0 auto; display: flex; align-items: baseline; gap: .5rem;
+  padding: .5rem .75rem; background: #15130d; border-bottom: 1px solid #2a2820;
+  font-size: .8rem; color: #a8a290;
+}
+.hist-bar__name { font-weight: 600; color: #d8d4c8; }
+.hist-bar__spacer { flex: 1 1 auto; }
+.hist-bar__meta { font-size: .7rem; color: #6a6656; }
+
+/* The single scroll container. min-height:0 lets it shrink inside the flex
+   column so it — not the body — owns the scroll (matches the mobile-modal
+   rule used elsewhere in ccpipe). */
+.hist-doc {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: .5rem .75rem 2rem; -webkit-overflow-scrolling: touch;
+}
+.hist-status { color: #8a8470; padding: 1rem; text-align: center; }
+.hist-loading { color: #6a6656; padding: .5rem; text-align: center; font-size: .7rem; }
+
+.hist-block { margin: 0 0 1rem; padding-left: .6rem; border-left: 2px solid transparent; }
+.hist-block--user { border-left-color: #66cc99; }
+.hist-block--claude { border-left-color: #3b6ea5; }
+.hist-block__head {
+  font-size: .7rem; text-transform: uppercase; letter-spacing: .05em;
+  color: #8a8470; display: flex; gap: .5rem; align-items: baseline; margin-bottom: .25rem;
+}
+.hist-block--user .hist-block__head { color: #66cc99; }
+.hist-block--claude .hist-block__head { color: #6f9fd8; }
+.hist-block__ts { color: #5a564a; font-size: .65rem; font-weight: 400; }
+.hist-block__body {
+  margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: inherit; font-size: .82rem; line-height: 1.45; color: #d8d4c8;
+}

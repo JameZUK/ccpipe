@@ -34,13 +34,14 @@ export default defineConfig({
     outDir: "dist",
     target: "es2022",
     rollupOptions: {
-      // Two HTML entry points: the terminal app (index.html) and the
-      // standalone rendered-Markdown viewer (viewer.html). The viewer's
-      // heavy deps (markdown-it, highlight.js, KaTeX, Mermaid) only load
-      // on /view and never weigh down the terminal bundle.
+      // HTML entry points: the terminal app (index.html), the standalone
+      // rendered-Markdown viewer (viewer.html, whose heavy markdown/mermaid/
+      // KaTeX deps only load on /view), and the Claude-history console view
+      // (history.html, a light monospace transcript renderer on /history).
       input: {
         main: here("index.html"),
         viewer: here("viewer.html"),
+        history: here("history.html"),
       },
     },
   },
