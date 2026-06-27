@@ -8,6 +8,7 @@
 //     when you're already there — no manual refresh.
 // This is the review surface; tmux console scrollback is separate.
 import "./history.css";
+import { renderMarkdown } from "./md-chat";
 
 interface Block { i: number; role: string; text: string; ts: string | null; }
 interface Page {
@@ -70,9 +71,19 @@ function renderBlock(b: Block): HTMLElement {
   ts.textContent = fmtTs(b.ts);
   head.append(who, ts);
 
-  const body = document.createElement("pre");
-  body.className = "hist-block__body";
-  body.textContent = b.text;            // textContent: never interprets markup
+  let body: HTMLElement;
+  if (b.role === "tool") {
+    // Commands and diffs stay verbatim, monospace — not markdown.
+    body = document.createElement("pre");
+    body.className = "hist-block__body hist-block__body--tool";
+    body.textContent = b.text;          // textContent: never interprets markup
+  } else {
+    // Prose renders as markdown (DOMPurify-sanitised fragment, no innerHTML),
+    // like Claude Code's TUI.
+    body = document.createElement("div");
+    body.className = "hist-block__body hist-md";
+    body.appendChild(renderMarkdown(b.text));
+  }
 
   el.append(head, body);
   return el;
