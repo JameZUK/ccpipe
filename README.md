@@ -74,6 +74,23 @@ separate from the terminal app.
   <img src="docs/screenshots/Viewer-Markdown.png" width="520" alt="Rendered Markdown viewer: a live-updating tab showing GFM tables, syntax-highlighted code, a task list, KaTeX math, and a Mermaid diagram">
 </p>
 
+**Conversation history.** The toolbar **🕘 History** button opens a
+console-style, Markdown-rendered view of the session's Claude Code transcript
+in its own tab. It shows the whole conversation — your prompts, Claude's
+replies (rendered Markdown: headings, lists, tables, syntax-highlighted code),
+and **the commands run and files edited inline** (`$ …` shell commands, `✎`
+edits with `-/+` diffs). It **live-tails** — new replies and tool calls stream
+in as they happen, no refresh, following the bottom while you're reading it —
+and lazy-pages older history as you scroll up. Claude Code's full-screen TUI
+keeps no scrollback of its own, so this is the place to scroll back through
+what actually happened. On mobile, in-terminal touch-scroll is forwarded to
+Claude as wheel events, so dragging up scrolls Claude's own view (clean), the
+same as a desktop mouse wheel.
+
+<p align="center">
+  <img src="docs/screenshots/History-View.png" width="560" alt="Conversation history view: Markdown-rendered Claude replies with inline tool calls — shell commands run and file edits shown as diffs — live-updating in a console-styled tab">
+</p>
+
 ## Architecture
 
 ccpipe runs as a `systemd --user` service on the host. No Docker — the

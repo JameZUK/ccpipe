@@ -35,11 +35,14 @@ backend/
     routes/
       auth.py          /api/auth/* (login, logout, TOTP, credentials)
       sessions.py      /api/sessions/*, /api/claude-sessions/*,
-                       /api/sessions/{name}/sticky
+                       /api/sessions/{name}/sticky,
+                       /api/sessions/{name}/history (transcript blocks,
+                       before/after paged, for the /history view)
       fs.py            /api/fs/* (list, read, write, upload, download, ...)
       tts.py           /api/tts/* (voices, config, speak, preview)
       mic.py           /api/mic/config (voice-input timing knobs)
-      static.py        /, /manifest.webmanifest, /sw.js, icons
+      static.py        /, /view (Markdown viewer), /history (conversation
+                       view), /manifest.webmanifest, /sw.js, icons
     tmux.py            libtmux wrapper for one-shot ops
     tmux_control.py    Long-lived `tmux -C` listener; pushes events
     tmux_setup.py      Sets server-wide default-shell etc. at startup
@@ -61,9 +64,17 @@ frontend/
     main.ts            Entry: session picker → terminal; lazy-loads heavy UI
     api.ts             Shared fetch helper (CSRF header + same-origin + JSON)
     session-picker.ts
-    terminal.ts        xterm.js setup, resize, input wiring
+    terminal.ts        xterm.js setup, resize, input wiring; mobile
+                       touch-scroll → SGR wheel forwarding when the app
+                       owns the mouse (so Claude scrolls its own view)
     mobile.ts          Composer bar + modifier-key row for phone/tablet
     file-panel.ts      Adaptive file browser + inline editor
+    viewer.ts          /view page: markdown-it + highlight.js + KaTeX +
+                       Mermaid, DOMPurify-sanitised, live file reload
+    history.ts         /history page: console-style conversation review,
+                       lazy older paging + live tail (after cursor)
+    md-chat.ts         Lean markdown renderer (markdown-it + highlight.js
+                       + DOMPurify) shared by the /history prose blocks
     settings.ts        Tabbed settings dialog (Display / Voice / Account)
     mic.ts             Mic capture: getUserMedia + AudioWorkletNode +
                        config-driven VAD + max-record cap
