@@ -101,9 +101,10 @@ async def markdown_viewer() -> FileResponse:
 
 @router.get("/history")
 async def history_view() -> FileResponse:
-    # Claude-history console view. Unlike /view it renders plain monospace
-    # text (no markdown/mermaid), so it keeps the strict app-wide CSP from
-    # the _security_headers middleware — no per-page relaxation needed.
+    # Claude-history console view. It markdown-renders prose (markdown-it +
+    # highlight.js + DOMPurify, returning a sanitised DOM fragment) but,
+    # unlike /view, has no KaTeX/Mermaid — so it keeps the strict app-wide CSP
+    # from the _security_headers middleware with no per-page relaxation.
     return _serve_file("history.html")
 
 

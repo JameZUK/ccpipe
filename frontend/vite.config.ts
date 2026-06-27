@@ -37,7 +37,9 @@ export default defineConfig({
       // HTML entry points: the terminal app (index.html), the standalone
       // rendered-Markdown viewer (viewer.html, whose heavy markdown/mermaid/
       // KaTeX deps only load on /view), and the Claude-history console view
-      // (history.html, a light monospace transcript renderer on /history).
+      // (history.html, the console-style conversation view on /history; it
+      // markdown-renders prose via markdown-it + highlight.js, but only a
+      // curated language set, so its chunk stays well under the viewer's).
       input: {
         main: here("index.html"),
         viewer: here("viewer.html"),

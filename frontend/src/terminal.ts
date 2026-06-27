@@ -50,6 +50,16 @@ function ensureTerminalFontReady(family: string, size: number): Promise<void> {
   return document.fonts.load(`${size}px ${primary}`).then(() => {}, () => {});
 }
 
+/** SGR (1006) mouse-wheel report for the PTY: down=true → wheel-down (button
+ *  65), false → wheel-up (64). We emit these whenever an app has mouse tracking
+ *  on (gated on `mouseTrackingMode`, not the wheel encoding — xterm.js doesn't
+ *  expose that); fine because the only consumer that negotiates mouse here is
+ *  claude/Ink, which speaks SGR. If a non-SGR consumer ever appears this is the
+ *  one place to branch. */
+function sgrWheel(down: boolean, col = 1, row = 1): string {
+  return `\x1b[<${down ? 65 : 64};${col};${row}M`;
+}
+
 export function createTerminal(container: HTMLElement, socket: TerminalSocket,
                                 initialPrefs: DisplayPrefs = loadDisplayPrefs(),
                                 sessionName?: string) {
@@ -736,7 +746,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // scrollToBottom does nothing — nudge the app back to its live tail with a
     // burst of wheel-down (extra events are no-ops once it's at the bottom).
     if (term.modes.mouseTrackingMode !== "none") {
-      socket.send({ type: "input", data: "\x1b[<65;1;1M".repeat(40) });
+      socket.send({ type: "input", data: sgrWheel(true).repeat(40) });
     } else {
       term.scrollToBottom();
     }
@@ -844,11 +854,14 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
         const ch = Math.max(8, viewport.clientHeight / Math.max(1, term.rows));
         const notches = Math.trunc(wheelAccum / ch);
         if (notches !== 0) {
-          wheelAccum -= notches * ch;
-          const btn = notches < 0 ? 64 : 65;          // <0 finger-down = wheel up
+          // Drain only what we actually emit (carry the remainder) so a fast
+          // flick or a frame-batched delta isn't silently clipped to the cap;
+          // the cap just stops a pathological delta flooding the PTY. <0 =
+          // finger-down = wheel-up.
+          const sent = Math.min(Math.abs(notches), 24);
+          wheelAccum -= Math.sign(notches) * sent * ch;
           const { col, row } = cellAt(e);
-          const count = Math.min(Math.abs(notches), 6);
-          socket.send({ type: "input", data: `\x1b[<${btn};${col};${row}M`.repeat(count) });
+          socket.send({ type: "input", data: sgrWheel(notches > 0, col, row).repeat(sent) });
         }
       } else {
         viewport.scrollTop += dy;

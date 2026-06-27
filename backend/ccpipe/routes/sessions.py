@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import shlex
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -261,41 +263,18 @@ def _projects_subdir_for_cwd(cwd: str) -> Path:
 
 
 def _read_first_real_user_message(path: Path) -> str | None:
-    """Scan up to 200 lines for the first user message that isn't a
-    framework caveat / command stdout (those wrap their content in
-    XML-ish tags). Returns up to 120 chars trimmed; ``None`` if no
-    plain user prompt is found in the first 200 records."""
-    try:
-        with path.open("rb") as f:
-            for _ in range(200):
-                line = f.readline()
-                if not line:
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("type") != "user":
-                    continue
-                msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-                content = msg.get("content")
-                if isinstance(content, str):
-                    if content.lstrip().startswith("<"):
-                        continue
-                    text = content.strip()
-                    return text[:120] or None
-                if isinstance(content, list):
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get("type") != "text":
-                            continue
-                        text = (block.get("text") or "").strip()
-                        if not text or text.startswith("<"):
-                            continue
-                        return text[:120]
-    except OSError:
-        return None
+    """First genuine user prompt (skipping framework caveats / command
+    stdout), trimmed to 120 chars, for the picker preview. Shares the single
+    transcript parser + caveat predicate so "what counts as a real prompt"
+    can't drift from the export / history readers. Bounded scan."""
+    for n, (rtype, content, _ts, _off) in enumerate(_iter_transcript_records(path)):
+        if n >= 400:
+            break
+        if rtype != "user":
+            continue
+        text = _stringify_content(content).strip()
+        if text and not _is_framework_caveat(text):
+            return text[:120]
     return None
 
 
@@ -353,52 +332,73 @@ def _stringify_content(content: Any) -> str:
     return ""
 
 
-def _iter_jsonl_as_markdown(path: Path):
-    """Yield UTF-8 markdown chunks for a claude-code JSONL transcript
-    without materialising the full document in memory. Skips framework
-    caveats, tool-use / tool-result records, and any non-text content
-    blocks. Used by the export endpoint as a true streaming response
-    body."""
+def _is_framework_caveat(text: str) -> bool:
+    """A user 'message' that is actually framework plumbing (command-output
+    caveats, local-command wrappers) rather than a typed prompt — these wrap
+    their content in XML-ish tags. Shared by every transcript reader so the
+    'what counts as a real prompt' rule can't drift between them."""
+    return not text or text.lstrip().startswith("<")
+
+
+def _iter_transcript_records(path: Path, start_offset: int = 0):
+    """Single parse scaffold shared by the export renderer, the picker
+    preview, and the /history block builder. Yields
+    ``(rtype, content, ts, resume_offset)`` for each user/assistant record,
+    starting at byte ``start_offset``.
+
+    ``resume_offset`` is the byte position after the last fully
+    newline-terminated line consumed — a safe point to resume an incremental
+    re-parse from, so a partially-written trailing line is re-read next time
+    rather than skipped. Opened ``O_NOFOLLOW`` because a same-UID actor could
+    race the leaf into a symlink between path resolution and open (matches the
+    fs_read / fs_download hardening)."""
     try:
-        # O_NOFOLLOW: caller already resolved the path and confirmed
-        # it sits inside the projects dir, but between that check and
-        # this open() a same-UID actor could race the leaf into a
-        # symlink. Refuse to follow at open time. Matches the
-        # hardening on fs_read / fs_download in routes/fs.py.
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
-        f = os.fdopen(fd, "rb")
     except OSError:
         return
-    try:
-        first = True
-        for line in f:
-            if not line.strip():
+    with os.fdopen(fd, "rb") as f:
+        if start_offset:
+            f.seek(start_offset)
+        resume = start_offset
+        while True:
+            line = f.readline()        # readline (not `for line in f`) so
+            if not line:               # f.tell() stays accurate per line
+                break
+            if line.endswith(b"\n"):
+                resume = f.tell()
+            stripped = line.strip()
+            if not stripped:
                 continue
             try:
-                obj = json.loads(line)
+                obj = json.loads(stripped)
             except json.JSONDecodeError:
                 continue
             rtype = obj.get("type")
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            content = msg.get("content")
-            if rtype == "user":
-                text = _stringify_content(content)
-                if not text or text.lstrip().startswith("<"):
-                    continue
-                header = "## User"
-            elif rtype == "assistant":
-                text = _stringify_content(content)
-                if not text:
-                    continue
-                header = "## Claude"
-            else:
+            if rtype not in ("user", "assistant"):
                 continue
-            sep = "" if first else "\n"
-            first = False
-            yield f"{sep}{header}\n\n{text.strip()}\n".encode("utf-8")
-    finally:
-        try: f.close()
-        except OSError: pass
+            msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else None
+            yield rtype, msg.get("content"), ts, resume
+
+
+def _iter_jsonl_as_markdown(path: Path):
+    """Yield UTF-8 markdown chunks for a transcript, streaming (no full
+    materialisation). Skips framework caveats + non-text content. Used by the
+    export endpoint's response body."""
+    first = True
+    for rtype, content, _ts, _off in _iter_transcript_records(path):
+        text = _stringify_content(content)
+        if rtype == "user":
+            if _is_framework_caveat(text):
+                continue
+            header = "## User"
+        else:
+            if not text:
+                continue
+            header = "## Claude"
+        sep = "" if first else "\n"
+        first = False
+        yield f"{sep}{header}\n\n{text.strip()}\n".encode("utf-8")
 
 
 def _tool_summary(block: dict[str, Any]) -> str:
@@ -433,58 +433,88 @@ def _tool_summary(block: dict[str, Any]) -> str:
     return f"▸ {name}" + (f" {parts}" if parts else "")
 
 
-def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
-    """Parse a claude JSONL transcript into ordered render blocks
-    ``{i, role, text, ts}`` where role is ``user`` | ``assistant`` | ``tool``.
-
-    One assistant record can yield several blocks (its text plus one per
-    tool_use) so the view shows the commands run and files changed inline.
-    ``i`` is the block's position in this list — stable across appends (the
-    file only grows at the end), so the client uses it as a paging / live-tail
-    cursor."""
-    try:
-        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return []
-    blocks: list[dict[str, Any]] = []
-
-    def emit(role: str, text: str, ts: str | None) -> None:
+def _record_to_blocks(blocks: list[dict[str, Any]], rtype: str,
+                      content: Any, ts: str | None) -> None:
+    """Append the render block(s) for one transcript record to ``blocks`` in
+    place, each with a stable index: user prose, assistant prose, and one
+    block per assistant tool_use (so commands/edits show inline)."""
+    def emit(role: str, text: str) -> None:
         text = (text or "").strip()
         if text:
             blocks.append({"i": len(blocks), "role": role, "text": text, "ts": ts})
 
-    with os.fdopen(fd, "rb") as f:
-        for line in f:
-            if not line.strip():
+    if rtype == "user":
+        text = _stringify_content(content)
+        if not _is_framework_caveat(text):
+            emit("user", text)
+        return
+    if isinstance(content, str):
+        emit("assistant", content)
+    elif isinstance(content, list):
+        for b in content:
+            if not isinstance(b, dict):
                 continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            rtype = obj.get("type")
-            if rtype not in ("user", "assistant"):
-                continue
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            content = msg.get("content")
-            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else None
-            if rtype == "user":
-                text = _stringify_content(content)
-                if text and not text.lstrip().startswith("<"):
-                    emit("user", text, ts)
-                continue
-            # assistant: split into text + tool_use blocks in order.
-            if isinstance(content, str):
-                emit("assistant", content, ts)
-            elif isinstance(content, list):
-                for b in content:
-                    if not isinstance(b, dict):
-                        continue
-                    t = b.get("type")
-                    if t == "text" and isinstance(b.get("text"), str):
-                        emit("assistant", b["text"], ts)
-                    elif t == "tool_use":
-                        emit("tool", _tool_summary(b), ts)
-    return blocks
+            t = b.get("type")
+            if t == "text" and isinstance(b.get("text"), str):
+                emit("assistant", b["text"])
+            elif t == "tool_use":
+                emit("tool", _tool_summary(b))
+
+
+# ── parsed-block cache (H1) ───────────────────────────────────────────────
+# Re-parsing a large transcript on every 3.5 s /history poll burned ~1.5 s of
+# CPU each time, almost always to find nothing new, and concurrent parses
+# contend in the thread pool. Cache parsed blocks keyed on (st_mtime_ns,
+# st_size): an unchanged poll becomes a single stat(); a grown file is parsed
+# incrementally from the last complete-line offset (the stable-index invariant
+# makes appending sound); anything else (shrink / mtime regression / rotation)
+# falls back to a full re-parse. Bounded to a few sessions so the held block
+# lists can't balloon memory on this host.
+class _CachedBlocks:
+    __slots__ = ("mtime", "size", "offset", "blocks")
+
+    def __init__(self, mtime: int, size: int, offset: int,
+                 blocks: list[dict[str, Any]]):
+        self.mtime, self.size, self.offset, self.blocks = mtime, size, offset, blocks
+
+
+_BLOCKS_CACHE: "OrderedDict[str, _CachedBlocks]" = OrderedDict()
+_BLOCKS_CACHE_MAX = 6
+_BLOCKS_LOCK = threading.Lock()
+
+
+def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
+    """Parsed render blocks for a transcript ``{i, role, text, ts}`` (role
+    ``user`` | ``assistant`` | ``tool``), newest last, with ``i`` a stable
+    paging/live-tail cursor. Cached + incrementally updated (see above).
+
+    Returns the cached list instance — callers MUST treat it read-only (slice,
+    never mutate)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    key = str(path)
+    with _BLOCKS_LOCK:
+        cached = _BLOCKS_CACHE.get(key)
+        if cached and cached.mtime == st.st_mtime_ns and cached.size == st.st_size:
+            _BLOCKS_CACHE.move_to_end(key)
+            return cached.blocks
+        # Incremental only when the file strictly grew with a newer mtime
+        # (an append); otherwise re-parse from scratch.
+        if cached and st.st_size > cached.size and st.st_mtime_ns >= cached.mtime:
+            blocks, offset = cached.blocks, cached.offset
+        else:
+            blocks, offset = [], 0
+        resume = offset
+        for rtype, content, ts, off in _iter_transcript_records(path, offset):
+            resume = off
+            _record_to_blocks(blocks, rtype, content, ts)
+        _BLOCKS_CACHE[key] = _CachedBlocks(st.st_mtime_ns, st.st_size, resume, blocks)
+        _BLOCKS_CACHE.move_to_end(key)
+        while len(_BLOCKS_CACHE) > _BLOCKS_CACHE_MAX:
+            _BLOCKS_CACHE.popitem(last=False)
+        return blocks
 
 
 @router.get("/api/sessions/{name}/history", dependencies=[AuthDep])
@@ -501,18 +531,31 @@ async def session_history(name: str, before: int | None = None,
 
     ``oldestCursor`` is what to pass as ``before`` for the next older page;
     ``newestCursor`` (the last block's index, or the request's ``after`` when
-    nothing new) is what to poll back as ``after``. This is the conversation
+    nothing new) is what to poll back as ``after``. ``gen`` is a generation
+    token (the claude sessionId) — when it changes (claude restarted into a
+    new transcript) the client re-loads from the tail. This is the conversation
     REVIEW surface; tmux console scrollback is separate and unaffected."""
     try:
         safe = tmux.safe_name(name)
     except ValueError:
         raise HTTPException(status_code=400, detail="bad session")
     limit = max(1, min(limit, 500))
-    sid = await tmux.claude_session_id(safe)
-    cwd = await tmux.session_cwd(safe)
+    sid, cwd = await tmux.claude_sid_and_cwd(safe)   # one pid resolution (L4)
     if not sid or not cwd:
         raise HTTPException(status_code=404, detail="no claude session bound to this tmux session")
-    path = _projects_subdir_for_cwd(cwd) / f"{sid}.jsonl"
+    # Containment parity with the export endpoint: sid must be the UUID it
+    # claims to be, and the resolved path must stay inside the projects dir
+    # (O_NOFOLLOW alone doesn't stop `..` or an intermediate symlinked dir).
+    if not _UUID_RE.match(sid):
+        raise HTTPException(status_code=404, detail="session not found")
+    projects_dir = _projects_subdir_for_cwd(cwd)
+    path = projects_dir / f"{sid}.jsonl"
+    try:
+        if path.exists():
+            path.resolve(strict=True).relative_to(projects_dir.resolve())
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="session not found")
+
     blocks = await asyncio.to_thread(_transcript_blocks, path)
     total = len(blocks)
 
@@ -522,6 +565,7 @@ async def session_history(name: str, before: int | None = None,
         page = blocks[start:start + limit]
         newest = page[-1]["i"] if page else after
         return {
+            "gen": sid,
             "total": total,
             "blocks": page,
             "newestCursor": newest,
@@ -534,11 +578,13 @@ async def session_history(name: str, before: int | None = None,
     start = max(0, end - limit)
     page = blocks[start:end]
     return {
+        "gen": sid,
         "total": total,
         "blocks": page,
         "newestCursor": page[-1]["i"] if page else -1,
         "oldestCursor": start,
         "hasOlder": start > 0,
+        "hasNewer": end < total,
     }
 
 

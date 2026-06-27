@@ -257,6 +257,31 @@ async def claude_session_id(name: str) -> str | None:
     return sid if isinstance(sid, str) and sid else None
 
 
+async def claude_sid_and_cwd(name: str) -> tuple[str | None, str | None]:
+    """Resolve the claude (sessionId, cwd) for a tmux session with a SINGLE
+    pid lookup. ``claude_session_id`` and ``session_cwd`` each resolve the pid
+    independently (a tmux subprocess + /proc walk); the /history poll hits this
+    on its hot path, so do the work once."""
+    pid = await claude_pid(name)
+    if pid is None:
+        return None, None
+    try:
+        cwd: str | None = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        cwd = None
+    sid: str | None = None
+    spath = Path.home() / ".claude" / "sessions" / f"{pid}.json"
+    try:
+        data = json.loads(await asyncio.to_thread(spath.read_text))
+        if isinstance(data, dict) and data.get("pid") == pid:
+            v = data.get("sessionId")
+            if isinstance(v, str) and v:
+                sid = v
+    except (OSError, ValueError):
+        pass
+    return sid, cwd
+
+
 async def _find_claude_descendant(root_pid: int) -> int | None:
     """Walk descendants of root_pid, return the first that is the running
     claude process.

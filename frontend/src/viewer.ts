@@ -18,38 +18,19 @@ import texmath from "markdown-it-texmath";
 import katex from "katex";
 import hljs from "highlight.js/lib/common";
 import DOMPurify from "dompurify";
+import { makeHighlight } from "./md-highlight";
 
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
 import "./viewer.css";
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 const md = new MarkdownIt({
   html: true,        // raw HTML is allowed through, then DOMPurify-sanitised
   linkify: true,
   typographer: true,
-  highlight: (str, lang): string => {
-    // Mermaid fenced blocks are left as a tagged <pre> for post-render
-    // diagram rendering (see renderMermaid). Everything else goes through
-    // highlight.js when the language is known, else escaped verbatim.
-    if (lang === "mermaid") {
-      return `<pre class="mermaid">${escapeHtml(str)}</pre>`;
-    }
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        const out = hljs.highlight(str, { language: lang }).value;
-        return `<pre class="hljs"><code class="language-${lang}">${out}</code></pre>`;
-      } catch { /* fall through to escaped */ }
-    }
-    return `<pre class="hljs"><code>${escapeHtml(str)}</code></pre>`;
-  },
+  // Mermaid fences stay tagged for post-render; everything else → highlight.js
+  // (shared with the /history renderer).
+  highlight: makeHighlight(hljs, { mermaid: true }),
 });
 
 md.use(anchor, {
