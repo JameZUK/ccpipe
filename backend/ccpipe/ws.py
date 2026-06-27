@@ -287,9 +287,19 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     global _mic_owner
     await websocket.accept()
 
-    # Auto-create the session if it doesn't exist yet.
+    # Auto-create the session if it doesn't exist yet. If it's a KNOWN STICKY
+    # session (killed, or vanished some time after the startup restore ran),
+    # respawn it in its stored cwd with the restore command — otherwise we'd
+    # silently recreate it in $HOME, which is the "after a reboot ccpipe lands
+    # in /home" bug. Non-sticky names have no stored cwd and keep the default.
     if not await tmux.session_exists(session):
-        await tmux.create_session(session)
+        from . import sticky as _sticky
+        _entry = _sticky.load().get(session)
+        if _entry and _entry.get("cwd"):
+            await tmux.create_session(
+                session, command=_sticky.build_restore_command(), cwd=_entry["cwd"])
+        else:
+            await tmux.create_session(session)
 
     # Wait briefly for the client's initial 'resize' message so we spawn the
     # PTY (and thus the tmux client) at the correct dimensions. With

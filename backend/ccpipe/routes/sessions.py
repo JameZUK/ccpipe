@@ -212,9 +212,12 @@ async def delete_session_endpoint(name: str) -> dict[str, bool]:
         raise HTTPException(status_code=404, detail="session not found")
     if not await tmux.kill_session(name):
         raise HTTPException(status_code=500, detail="kill failed")
-    # Auto-unflip sticky: kill implies the user no longer wants this
-    # session, so don't quietly resurrect it on the next backend start.
-    sticky.clear(name)
+    # Stickiness is a user-controlled flag: killing the session does NOT clear
+    # it. The sticky entry (with its cwd) is kept so the session is recreated
+    # in the RIGHT directory on the next reboot / reconnect — killing a sticky
+    # session effectively restarts it in place. To forget one, toggle it
+    # ephemeral first. (Previously kill auto-cleared stickiness, which lost the
+    # stored cwd → the session respawned in $HOME after a reboot.)
     # A new session reusing this name must not inherit the dead one's
     # cached scrollback.
     ws.invalidate_history_cache(name)
