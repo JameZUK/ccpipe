@@ -29,12 +29,19 @@ body {
 .hist-block { margin: 0 0 1rem; padding-left: .6rem; border-left: 2px solid transparent; }
 .hist-block--user { border-left-color: #66cc99; }
 .hist-block--claude { border-left-color: #3b6ea5; }
+.hist-block--tool { border-left-color: #f5a524; }
 .hist-block__head {
   font-size: .7rem; text-transform: uppercase; letter-spacing: .05em;
   color: #8a8470; display: flex; gap: .5rem; align-items: baseline; margin-bottom: .25rem;
 }
 .hist-block--user .hist-block__head { color: #66cc99; }
 .hist-block--claude .hist-block__head { color: #6f9fd8; }
+.hist-block--tool .hist-block__head { color: #d8902a; }
+/* tool calls (commands run + files changed) get a command-line feel */
+.hist-block--tool .hist-block__body {
+  color: #cdbf99; font-size: .78rem;
+  background: #14120c; padding: .35rem .55rem; border-radius: 3px; overflow-x: auto;
+}
 .hist-block__ts { color: #5a564a; font-size: .65rem; font-weight: 400; }
 .hist-block__body {
   margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;

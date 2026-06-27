@@ -401,19 +401,58 @@ def _iter_jsonl_as_markdown(path: Path):
         except OSError: pass
 
 
-def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
-    """Parse a claude JSONL transcript into ordered conversation blocks
-    ``{i, role, text, ts}`` (one per user/assistant turn that carries text).
+def _tool_summary(block: dict[str, Any]) -> str:
+    """Render a tool_use block to a console-style one-liner (plus key detail)
+    so the /history view shows the commands run and edits made, not just
+    prose. Bounded so a giant Write/diff can't blow up a single block."""
+    name = block.get("name") or "tool"
+    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
 
-    ``i`` is the block's position in this filtered list — stable across
-    appends because the file only ever grows at the end, so a client can use
-    it as a paging cursor. Framework caveats / tool-only records are skipped,
-    matching the export renderer."""
+    def cap(s: object, n: int) -> str:
+        t = str(s)
+        return t if len(t) <= n else t[:n] + " …"
+
+    if name == "Bash":
+        cmd = cap(inp.get("command", ""), 2000)
+        desc = inp.get("description")
+        return f"$ {cmd}" + (f"\n  ({desc})" if isinstance(desc, str) and desc else "")
+    if name in ("Edit", "MultiEdit"):
+        fp = inp.get("file_path", "")
+        old, new = cap(inp.get("old_string", ""), 600), cap(inp.get("new_string", ""), 600)
+        diff = "\n".join(["- " + ln for ln in old.splitlines()]
+                         + ["+ " + ln for ln in new.splitlines()])
+        return f"✎ Edit {fp}\n{diff}" if diff else f"✎ Edit {fp}"
+    if name == "Write":
+        fp = inp.get("file_path", "")
+        return f"✎ Write {fp}\n{cap(inp.get('content', ''), 1500)}"
+    if name in ("Read", "Grep", "Glob"):
+        target = inp.get("file_path") or inp.get("pattern") or inp.get("path") or ""
+        return f"▸ {name} {target}".rstrip()
+    # Generic fallback: tool name + its first couple of inputs.
+    parts = ", ".join(f"{k}={cap(v, 80)}" for k, v in list(inp.items())[:3])
+    return f"▸ {name}" + (f" {parts}" if parts else "")
+
+
+def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
+    """Parse a claude JSONL transcript into ordered render blocks
+    ``{i, role, text, ts}`` where role is ``user`` | ``assistant`` | ``tool``.
+
+    One assistant record can yield several blocks (its text plus one per
+    tool_use) so the view shows the commands run and files changed inline.
+    ``i`` is the block's position in this list — stable across appends (the
+    file only grows at the end), so the client uses it as a paging / live-tail
+    cursor."""
     try:
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return []
     blocks: list[dict[str, Any]] = []
+
+    def emit(role: str, text: str, ts: str | None) -> None:
+        text = (text or "").strip()
+        if text:
+            blocks.append({"i": len(blocks), "role": role, "text": text, "ts": ts})
+
     with os.fdopen(fd, "rb") as f:
         for line in f:
             if not line.strip():
@@ -426,35 +465,49 @@ def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
             if rtype not in ("user", "assistant"):
                 continue
             msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            text = _stringify_content(msg.get("content"))
-            if not text or (rtype == "user" and text.lstrip().startswith("<")):
+            content = msg.get("content")
+            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else None
+            if rtype == "user":
+                text = _stringify_content(content)
+                if text and not text.lstrip().startswith("<"):
+                    emit("user", text, ts)
                 continue
-            blocks.append({
-                "i": len(blocks),
-                "role": rtype,
-                "text": text.strip(),
-                "ts": obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else None,
-            })
+            # assistant: split into text + tool_use blocks in order.
+            if isinstance(content, str):
+                emit("assistant", content, ts)
+            elif isinstance(content, list):
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    t = b.get("type")
+                    if t == "text" and isinstance(b.get("text"), str):
+                        emit("assistant", b["text"], ts)
+                    elif t == "tool_use":
+                        emit("tool", _tool_summary(b), ts)
     return blocks
 
 
 @router.get("/api/sessions/{name}/history", dependencies=[AuthDep])
 async def session_history(name: str, before: int | None = None,
+                          after: int | None = None,
                           limit: int = 40) -> dict[str, Any]:
     """Paged conversation history for the session's bound claude transcript,
     newest last. The /history view renders these as console-style text.
 
-    - no ``before``      → the most recent ``limit`` blocks (the tail).
+    - no cursor          → the most recent ``limit`` blocks (the tail).
     - ``before=<cursor>`` → the ``limit`` blocks immediately older than it.
+    - ``after=<cursor>``  → blocks NEWER than it (live tail; the view polls
+      this to stream in newly-run commands and replies without a refresh).
 
     ``oldestCursor`` is what to pass as ``before`` for the next older page;
-    ``hasOlder`` is false once the top is reached. This is the conversation
+    ``newestCursor`` (the last block's index, or the request's ``after`` when
+    nothing new) is what to poll back as ``after``. This is the conversation
     REVIEW surface; tmux console scrollback is separate and unaffected."""
     try:
         safe = tmux.safe_name(name)
     except ValueError:
         raise HTTPException(status_code=400, detail="bad session")
-    limit = max(1, min(limit, 200))
+    limit = max(1, min(limit, 500))
     sid = await tmux.claude_session_id(safe)
     cwd = await tmux.session_cwd(safe)
     if not sid or not cwd:
@@ -462,11 +515,28 @@ async def session_history(name: str, before: int | None = None,
     path = _projects_subdir_for_cwd(cwd) / f"{sid}.jsonl"
     blocks = await asyncio.to_thread(_transcript_blocks, path)
     total = len(blocks)
+
+    if after is not None:
+        # Live tail: everything newer than `after` (capped). Nothing older.
+        start = max(0, min(after + 1, total))
+        page = blocks[start:start + limit]
+        newest = page[-1]["i"] if page else after
+        return {
+            "total": total,
+            "blocks": page,
+            "newestCursor": newest,
+            "oldestCursor": start,
+            "hasOlder": start > 0,
+            "hasNewer": (start + len(page)) < total,
+        }
+
     end = total if before is None else max(0, min(before, total))
     start = max(0, end - limit)
+    page = blocks[start:end]
     return {
         "total": total,
-        "blocks": blocks[start:end],
+        "blocks": page,
+        "newestCursor": page[-1]["i"] if page else -1,
         "oldestCursor": start,
         "hasOlder": start > 0,
     }
