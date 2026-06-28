@@ -1173,6 +1173,7 @@ a:hover { color: var(--fg); }
               transform var(--dur-fast) var(--ease-out);
 }
 .copy-toast--show { opacity: 1; transform: translate(-50%, 0); }
+.copy-toast--err { color: #ee6e60; border-color: #ee6e60; }
 .copy-toast[hidden] { display: none; }
 @keyframes live-pill-in {
   from { opacity: 0; transform: translateY(6px); }

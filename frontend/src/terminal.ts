@@ -60,6 +60,50 @@ function sgrWheel(down: boolean, col = 1, row = 1): string {
   return `\x1b[<${down ? 65 : 64};${col};${row}M`;
 }
 
+/** Write text to the OS clipboard. Tries the async Clipboard API first (needs a
+ *  secure context + user gesture), then falls back to a hidden-textarea
+ *  execCommand("copy") — which works in more places (older / Firefox-Android /
+ *  http-origin contexts where navigator.clipboard is absent or rejects).
+ *  Returns whether SOMETHING copied so the caller can tell the user. */
+async function writeClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;";
+    document.body.appendChild(ta);
+    const sel = document.getSelection();
+    const prev = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (prev && sel) { sel.removeAllRanges(); sel.addRange(prev); }  // restore selection
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Decode an OSC 52 payload ("<clipboard>;<base64>" or just "<base64>") to text. */
+function decodeOsc52(data: string): string | null {
+  const b64 = data.includes(";") ? data.slice(data.indexOf(";") + 1) : data;
+  if (!b64 || b64 === "?") return null;     // "?" is a clipboard *read* request
+  try {
+    const bin = atob(b64.trim());
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 export function createTerminal(container: HTMLElement, socket: TerminalSocket,
                                 initialPrefs: DisplayPrefs = loadDisplayPrefs(),
                                 sessionName?: string) {
@@ -764,8 +808,9 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   copyToast.hidden = true;
   container.appendChild(copyToast);
   let copyToastTimer: number | null = null;
-  const flashCopied = (n: number): void => {
-    copyToast.textContent = `copied ${n} char${n === 1 ? "" : "s"}`;
+  const flashToast = (text: string, ok = true): void => {
+    copyToast.textContent = text;
+    copyToast.classList.toggle("copy-toast--err", !ok);
     copyToast.hidden = false;
     void copyToast.offsetWidth;        // reflow so re-copies re-animate
     copyToast.classList.add("copy-toast--show");
@@ -773,27 +818,37 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     copyToastTimer = window.setTimeout(() => {
       copyToast.classList.remove("copy-toast--show");
       copyToastTimer = window.setTimeout(() => { copyToast.hidden = true; }, 200);
-    }, 1100);
+    }, ok ? 1100 : 1800);
   };
   let lastCopied = "";
-  const copySelection = (): void => {
-    const sel = term.getSelection();
-    if (!sel || !sel.trim() || sel === lastCopied) return;
-    if (!navigator.clipboard?.writeText) return;   // needs a secure context
-    navigator.clipboard.writeText(sel).then(() => {
-      lastCopied = sel;
-      flashCopied(sel.length);
-    }).catch(() => { /* clipboard blocked (permission / insecure) — ignore */ });
+  const doCopy = async (text: string, dedupe: boolean): Promise<void> => {
+    if (!text || !text.trim() || (dedupe && text === lastCopied)) return;
+    const wasFocused = document.activeElement === document.querySelector(".xterm-helper-textarea");
+    const ok = await writeClipboard(text);
+    if (ok) { lastCopied = text; flashToast(`copied ${text.length} char${text.length === 1 ? "" : "s"}`); }
+    else { flashToast("copy blocked by browser", false); }
+    if (wasFocused) try { term.focus(); } catch {}   // execCommand fallback steals focus
   };
+  // 1. Copy-on-select: copy xterm's selection on pointer release.
+  const copySelection = (): void => { void doCopy(term.getSelection(), true); };
   document.addEventListener("mouseup", copySelection);
   container.addEventListener("touchend", copySelection, { passive: true });
   const selDisposable = term.onSelectionChange(() => {
     if (!term.getSelection()) lastCopied = "";
   });
+  // 2. OSC 52: when the app or tmux (set-clipboard) emits a clipboard-write
+  //    sequence, mirror it to the local clipboard. Covers selections made via
+  //    tmux copy-mode, which never touch xterm's own selection.
+  const oscDisposable = term.parser.registerOscHandler(52, (data) => {
+    const text = decodeOsc52(data);
+    if (text) void doCopy(text, false);
+    return true;   // handled (don't pass through)
+  });
   const copyCleanup = (): void => {
     document.removeEventListener("mouseup", copySelection);
     container.removeEventListener("touchend", copySelection);
     selDisposable.dispose();
+    oscDisposable.dispose();
     if (copyToastTimer !== null) clearTimeout(copyToastTimer);
   };
 
