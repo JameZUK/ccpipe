@@ -1150,6 +1150,30 @@ a:hover { color: var(--fg); }
 .live-pill:hover { background: var(--fg); transform: translateY(-1px); }
 .live-pill svg { width: 0.85rem; height: 0.85rem; }
 .live-pill[hidden] { display: none; }
+
+/* Copy-on-select confirmation toast — bottom-centre so it clears the live pill. */
+.copy-toast {
+  position: absolute;
+  left: 50%;
+  bottom: var(--s-3);
+  transform: translate(-50%, 6px);
+  padding: 0.28rem 0.75rem;
+  background: rgba(13, 12, 8, 0.96);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 11;
+  box-shadow: var(--shadow-1);
+  transition: opacity var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+.copy-toast--show { opacity: 1; transform: translate(-50%, 0); }
+.copy-toast[hidden] { display: none; }
 @keyframes live-pill-in {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }

@@ -752,6 +752,51 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     }
   });
 
+  // ── Copy-on-select ───────────────────────────────────────────────────────
+  // The WebGL canvas exposes no browser-selectable text, and a selection
+  // otherwise only reaches tmux's server-side buffer — so put it on the LOCAL
+  // clipboard when a selection finishes. Copy on pointer release (a user
+  // gesture, so the async Clipboard API is permitted) and flash a small toast.
+  // `lastCopied` dedupes the repeated onSelectionChange churn during a drag and
+  // re-copying the same text; it's reset when the selection is cleared.
+  const copyToast = document.createElement("div");
+  copyToast.className = "copy-toast";
+  copyToast.hidden = true;
+  container.appendChild(copyToast);
+  let copyToastTimer: number | null = null;
+  const flashCopied = (n: number): void => {
+    copyToast.textContent = `copied ${n} char${n === 1 ? "" : "s"}`;
+    copyToast.hidden = false;
+    void copyToast.offsetWidth;        // reflow so re-copies re-animate
+    copyToast.classList.add("copy-toast--show");
+    if (copyToastTimer !== null) clearTimeout(copyToastTimer);
+    copyToastTimer = window.setTimeout(() => {
+      copyToast.classList.remove("copy-toast--show");
+      copyToastTimer = window.setTimeout(() => { copyToast.hidden = true; }, 200);
+    }, 1100);
+  };
+  let lastCopied = "";
+  const copySelection = (): void => {
+    const sel = term.getSelection();
+    if (!sel || !sel.trim() || sel === lastCopied) return;
+    if (!navigator.clipboard?.writeText) return;   // needs a secure context
+    navigator.clipboard.writeText(sel).then(() => {
+      lastCopied = sel;
+      flashCopied(sel.length);
+    }).catch(() => { /* clipboard blocked (permission / insecure) — ignore */ });
+  };
+  document.addEventListener("mouseup", copySelection);
+  container.addEventListener("touchend", copySelection, { passive: true });
+  const selDisposable = term.onSelectionChange(() => {
+    if (!term.getSelection()) lastCopied = "";
+  });
+  const copyCleanup = (): void => {
+    document.removeEventListener("mouseup", copySelection);
+    container.removeEventListener("touchend", copySelection);
+    selDisposable.dispose();
+    if (copyToastTimer !== null) clearTimeout(copyToastTimer);
+  };
+
   // Hook the xterm viewport for live-pill state, and bind touch-to-scroll
   // via PointerEvents on the outer container in capture phase.
   //
@@ -1144,6 +1189,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       for (const dispose of [...pendingRenderDisposers]) dispose();
       pillCleanup?.();
       scrollCleanup?.();
+      copyCleanup();
       if (pending !== null) { clearTimeout(pending); pending = null; }
       try { ro.disconnect(); } catch {}
       window.removeEventListener("resize", scheduleResize);
