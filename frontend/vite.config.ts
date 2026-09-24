@@ -33,6 +33,11 @@ export default defineConfig({
   build: {
     outDir: "dist",
     target: "es2022",
+    // Never inline fonts as data: URIs — the CSPs are `font-src 'self'`,
+    // so an inlined font is silently blocked (KaTeX_Size3, under the 4 KB
+    // default limit, was; big delimiters fell back to a system font).
+    // Other small assets keep Vite's default inlining.
+    assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf|eot)$/i.test(file) ? false : undefined),
     rollupOptions: {
       // HTML entry points: the terminal app (index.html), the standalone
       // rendered-Markdown viewer (viewer.html, whose heavy markdown/mermaid/
