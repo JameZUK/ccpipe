@@ -172,3 +172,80 @@ async def test_pty_slow_consumer_loses_no_bytes():
     assert p.bytes_dropped() == 0
     assert total == n, f"got {total} of {n} bytes"
     assert tail.endswith(b"END")
+
+
+# ── #7: saves keep the file's mode, write through symlinks, unique temps ─
+
+H = {"X-Requested-By": "ccpipe"}
+
+
+@pytest.fixture
+def fs_client(app_env, tmp_path, monkeypatch):
+    root = tmp_path / "jail"
+    root.mkdir()
+    monkeypatch.setenv("CCPIPE_FS_ROOT", str(root))
+    return _login(app_env.app), root
+
+
+def _mode(p) -> int:
+    return os.stat(p).st_mode & 0o777
+
+
+def test_write_and_upload_keep_existing_mode(fs_client):
+    c, root = fs_client
+    env_file, script = root / ".env", root / "run.sh"
+    env_file.write_text("A=1\n"); os.chmod(env_file, 0o600)
+    script.write_text("#!/bin/sh\n"); os.chmod(script, 0o755)
+    assert c.post("/api/fs/write", headers=H, json={"path": str(env_file), "content": "A=2\n"}).status_code == 200
+    assert c.post(f"/api/fs/upload?path={script}", headers=H, content=b"#!/bin/sh\necho hi\n").status_code == 200
+    assert env_file.read_text() == "A=2\n" and _mode(env_file) == 0o600
+    assert script.read_text().endswith("echo hi\n") and _mode(script) == 0o755
+    assert not [p for p in root.iterdir() if p.name.endswith(".tmp")], "temp file left behind"
+
+
+def test_write_through_symlink_keeps_the_link(fs_client):
+    c, root = fs_client
+    (root / "dotfiles").mkdir()
+    real = root / "dotfiles" / "bashrc"
+    real.write_text("old\n"); os.chmod(real, 0o600)
+    link = root / ".bashrc"
+    link.symlink_to(real)
+    r = c.post("/api/fs/write", headers=H, json={"path": str(link), "content": "new\n"})
+    assert r.status_code == 200
+    assert link.is_symlink() and os.readlink(link) == str(real)
+    assert real.read_text() == "new\n" and _mode(real) == 0o600
+
+
+def test_symlink_out_of_jail_or_into_denied_path_is_refused(fs_client, tmp_path):
+    c, root = fs_client
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n")
+    (root / "escape").symlink_to(outside)
+    (root / ".claude").mkdir()
+    denied = root / ".claude" / "settings.json"
+    denied.write_text("{}")
+    (root / "sneaky").symlink_to(denied)
+    for link in ("escape", "sneaky"):
+        r = c.post("/api/fs/write", headers=H, json={"path": str(root / link), "content": "pwned"})
+        assert r.status_code == 403, (link, r.status_code)
+    assert outside.read_text() == "keep\n" and denied.read_text() == "{}"
+
+
+def test_new_file_gets_default_mode(fs_client):
+    c, root = fs_client
+    new = root / "notes.md"
+    assert c.post("/api/fs/write", headers=H, json={"path": str(new), "content": "x"}).status_code == 200
+    umask = os.umask(0); os.umask(umask)
+    assert _mode(new) == 0o644 & ~umask
+
+
+def test_atomic_write_text_keeps_mode_and_symlink(tmp_path):
+    from ccpipe.safe_write import atomic_write_text
+    real = tmp_path / "repo" / "settings.json"
+    real.parent.mkdir()
+    real.write_text("{}"); os.chmod(real, 0o600)
+    link = tmp_path / "settings.json"
+    link.symlink_to(real)
+    atomic_write_text(link, '{"a": 1}\n')
+    assert link.is_symlink() and real.read_text() == '{"a": 1}\n' and _mode(real) == 0o600
+    assert not list(real.parent.glob("*.tmp"))

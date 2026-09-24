@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import config as app_config
+from ..safe_write import existing_mode, open_temp, temp_name
 from ..auth import AuthDep, CsrfDep
 
 log = logging.getLogger(__name__)
@@ -519,6 +520,25 @@ async def fs_stat(path: str) -> dict[str, Any]:
     return {"path": str(resolved), "size": st.st_size, "mtime": st.st_mtime}
 
 
+def _resolve_write_target(path: str) -> Path:
+    """Where a save to *path* should land. A symlink is written THROUGH —
+    the file it points at is replaced and the link survives, as in a normal
+    editor — after the resolved target passes the same jail / deny-list /
+    no-symlink-parent validation as any other path. Otherwise *path*."""
+    _, final = _resolve_fs_parent_for_new(path)
+    try:
+        if not stat_mod.S_ISLNK(os.lstat(final).st_mode):
+            return final
+    except FileNotFoundError:
+        return final
+    try:
+        target = final.resolve()
+    except (OSError, RuntimeError):     # symlink loop
+        raise HTTPException(status_code=400, detail="symlink loop at target")
+    _, resolved = _resolve_fs_parent_for_new(str(target))
+    return resolved
+
+
 @router.post("/api/fs/write", dependencies=[AuthDep, CsrfDep])
 async def fs_write(body: FsWriteBody) -> dict[str, Any]:
     """Atomic write: temp file in the target dir, fsync, rename. The
@@ -526,8 +546,8 @@ async def fs_write(body: FsWriteBody) -> dict[str, Any]:
     can't dump arbitrary data through this endpoint."""
     if len(body.content.encode("utf-8")) > _FS_EDITOR_LIMIT:
         raise HTTPException(status_code=413, detail="content too large")
-    _, final = _resolve_fs_parent_for_new(body.path)
-    tmp_name = final.name + ".ccpipe.tmp"
+    final = _resolve_write_target(body.path)
+    tmp_name = temp_name()
     # Walk the parent with per-component O_NOFOLLOW (M1 fix) so an
     # intermediate-directory swap to a symlink between resolve and
     # open is caught. The tmp + replace dance then runs entirely
@@ -536,17 +556,12 @@ async def fs_write(body: FsWriteBody) -> dict[str, Any]:
     parent_fd, _leaf = _walk_parent_nofollow(str(final))
     try:
         try:
-            # O_NOFOLLOW at the leaf: refuse to follow a symlink at *tmp*.
-            # Without this, an attacker who can place a file in the parent
-            # dir could pre-create `<basename>.ccpipe.tmp` as a symlink to
-            # ~/.bashrc and have our O_CREAT|O_TRUNC follow it and clobber
-            # the target.
-            fd = os.open(
-                tmp_name,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o644,
-                dir_fd=parent_fd,
-            )
+            # Unique name + O_EXCL|O_NOFOLLOW (safe_write.open_temp): a
+            # pre-placed file or symlink at the temp path can't be followed
+            # or clobbered. Replacing an existing file keeps its mode, so a
+            # private .env stays private and a script stays executable.
+            fd = open_temp(tmp_name, existing_mode(final.name, dir_fd=parent_fd),
+                           dir_fd=parent_fd)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise HTTPException(status_code=403, detail="symlink at target")
@@ -584,9 +599,9 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
     """Stream a single uploaded file into *path*. We use the raw
     request body (not FastAPI's UploadFile) so the bytes pass through
     a temp file without ever sitting fully in memory."""
-    _, final = _resolve_fs_parent_for_new(path)
+    final = _resolve_write_target(path)
     cap_bytes = app_config.load().fs.upload_limit_mb * 1024 * 1024
-    tmp_name = final.name + ".ccpipe.tmp"
+    tmp_name = temp_name()
     received = 0
     success = False
     # NB: keep the fd open across the chunk loop and close it in finally
@@ -598,14 +613,9 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
     parent_fd, _leaf = _walk_parent_nofollow(str(final))
     try:
         try:
-            # O_NOFOLLOW at the leaf: see fs_write — refuse to follow a
-            # pre-placed symlink at the tmp path.
-            fd = os.open(
-                tmp_name,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o644,
-                dir_fd=parent_fd,
-            )
+            # See fs_write: unique O_EXCL|O_NOFOLLOW temp, original mode kept.
+            fd = open_temp(tmp_name, existing_mode(final.name, dir_fd=parent_fd),
+                           dir_fd=parent_fd)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise HTTPException(status_code=403, detail="symlink at target")

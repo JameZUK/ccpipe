@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .safe_write import atomic_write_text
+
 # Re-exports for tests / external callers.
 __all__ = [
     "default_settings_path",
@@ -91,10 +93,10 @@ def patch_settings(path: Path | None = None) -> tuple[bool, str]:
             return False, "voice keys already set"
         action = f"added voice keys: {', '.join(changes)}"
 
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp_path.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp_path, path)
+        # Keeps the file's mode and writes through a symlinked settings.json
+        # (dotfiles repos) instead of replacing the link.
+        atomic_write_text(path, json.dumps(data, indent=2) + "\n")
     except OSError as exc:
         return False, f"failed to write settings.json: {exc}"
     return True, action
@@ -176,10 +178,8 @@ def patch_keybindings(path: Path | None = None) -> tuple[bool, str]:
     if not changes:
         return False, "keybindings already set"
 
-    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(data, indent=2) + "\n")
     except OSError as exc:
         return False, f"failed to write keybindings.json: {exc}"
     return True, ", ".join(changes)
