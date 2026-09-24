@@ -12,9 +12,11 @@
 //                    directory hits; matches are highlighted.
 //
 // Wide screens (≥960px) dock the drawer beside the document and remember
-// whether it was left open (picking a doc reloads the page); narrow screens
+// whether it was left open (picking a doc replaces the page); narrow screens
 // get a full-height overlay sheet. "/" opens it and focuses the search;
 // arrows / Enter / ←→ drive the list.
+
+import { MODIFIED_SHOW, RECENT_SHOW, fmtAge, readRecents, recentlyModified, recordRecent } from "./doc-recents";
 
 interface DocEntry { path: string; rel: string; mtime: number }
 
@@ -34,15 +36,11 @@ export interface DocsDrawerOptions {
 }
 
 const WIDE_QUERY = "(min-width: 960px)";
-const RECENT_KEEP = 10;
-const RECENT_SHOW = 5;
-const MODIFIED_SHOW = 5;
 // Re-fetch the index when the drawer reopens after this long, so
 // "Recently modified" keeps up with files being edited in the background.
 const INDEX_STALE_MS = 30_000;
 const RESULT_MAX = 200;
 const LS_OPEN = "ccpipe.viewer.drawerOpen";
-const lsRecentKey = (root: string) => `ccpipe.viewer.recent:${root}`;
 const lsExpandedKey = (root: string) => `ccpipe.viewer.expanded:${root}`;
 
 // localStorage can be absent or throw (private windows, blocked storage);
@@ -59,16 +57,6 @@ function lsSet(key: string, val: unknown): void {
 
 const baseName = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
 const dirName = (rel: string) => { const i = rel.lastIndexOf("/"); return i < 0 ? "" : rel.slice(0, i); };
-/** Compact age for a unix timestamp: "now", "4m", "2h", "3d", "12 Mar". */
-function fmtAge(unix: number): string {
-  const s = Math.max(0, Date.now() / 1000 - unix);
-  if (s < 60) return "now";
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  if (s < 30 * 86400) return `${Math.floor(s / 86400)}d`;
-  return new Date(unix * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
-}
-
 const cmpText = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 
 function buildTree(entries: DocEntry[]): DirNode {
@@ -156,9 +144,7 @@ export function setupDocsDrawer(opts: DocsDrawerOptions): void {
 
   // Record this visit before anything renders, so "Recent" is up to date
   // on the very page that opened it.
-  const recents = lsGet<string[]>(lsRecentKey(rootDir), []).filter((p) => typeof p === "string" && p !== filePath);
-  recents.unshift(filePath);
-  lsSet(lsRecentKey(rootDir), recents.slice(0, RECENT_KEEP));
+  recordRecent(rootDir, filePath);
 
   const expanded = new Set(lsGet<string[]>(lsExpandedKey(rootDir), []));
 
@@ -356,16 +342,14 @@ export function setupDocsDrawer(opts: DocsDrawerOptions): void {
     }
 
     const known = new Map(entries.map((e) => [e.path, e]));
-    const recent = lsGet<string[]>(lsRecentKey(rootDir), [])
+    const recent = readRecents(rootDir)
       .filter((p) => p !== filePath && known.has(p))
       .slice(0, RECENT_SHOW);
     if (recent.length) {
       list.append(section("Recent"));
       for (const p of recent) list.append(flatRow(known.get(p)!, []));
     }
-    const modified = entries.filter((e) => e.mtime)
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, MODIFIED_SHOW);
+    const modified = recentlyModified(entries, MODIFIED_SHOW);
     if (modified.length) {
       list.append(section("Recently modified"));
       for (const e of modified) list.append(flatRow(e, [], true));
@@ -405,7 +389,10 @@ export function setupDocsDrawer(opts: DocsDrawerOptions): void {
     }
     const path = row.dataset.path!;
     if (path === filePath) { if (!wideMq.matches) close(); return; }
-    location.assign(viewUrl(path));
+    // replace, not assign: keeping the viewer's history to one page lets
+    // the close button's window.close() work (browsers only allow a
+    // script close of a window whose history is a single document).
+    location.replace(viewUrl(path));
   };
 
   list.addEventListener("click", (e) => {

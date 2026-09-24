@@ -16,7 +16,7 @@ import { TerminalSocket } from "./ws";
 //   - settings / file-panel / session-picker are large (758 + 752 + 629
 //     LOC) and gated behind a button or a no-last-session bootstrap.
 //   - xterm, mic, tts, waveform are loaded when a terminal view attaches.
-import { getMicConfig, type MicConfig } from "./api";
+import { getMicConfig, type MarkdownIndexEntry, type MicConfig } from "./api";
 import type { MicStreamer as MicStreamerType } from "./mic";
 import type { TtsPlayer as TtsPlayerType } from "./tts";
 import * as wakeLock from "./wake-lock";
@@ -318,7 +318,9 @@ async function attachTerminal(session: string): Promise<void> {
         clampMenu();
         return;
       }
-      for (const ent of data.entries) {
+      const { MODIFIED_SHOW, RECENT_SHOW, fmtAge, readRecents, recentlyModified } =
+        await import("./doc-recents");
+      const makeItem = (ent: MarkdownIndexEntry, showAge = false): HTMLElement => {
         // A div (not a <button>): Firefox collapses block children inside
         // a button onto one line (the two-line item rendered overlapping).
         const item = document.createElement("div");
@@ -328,12 +330,24 @@ async function attachTerminal(session: string): Promise<void> {
         item.title = ent.rel;
         // Two-line item: filename on its own full-width line (always
         // readable, can't be squeezed by a sibling in any browser) with
-        // the directory dimmed underneath.
+        // the directory dimmed underneath. Recently-modified items carry
+        // an age badge on the filename line.
         const slash = ent.rel.lastIndexOf("/");
         const n = document.createElement("span");
         n.className = "docs-menu__name";
         n.textContent = slash >= 0 ? ent.rel.slice(slash + 1) : ent.rel;
-        item.append(n);
+        if (showAge && ent.mtime) {
+          const line = document.createElement("span");
+          line.className = "docs-menu__line";
+          const age = document.createElement("span");
+          age.className = "docs-menu__age";
+          age.textContent = fmtAge(ent.mtime);
+          age.title = new Date(ent.mtime * 1000).toLocaleString();
+          line.append(n, age);
+          item.append(line);
+        } else {
+          item.append(n);
+        }
         if (slash >= 0) {
           const d = document.createElement("span");
           d.className = "docs-menu__dir";
@@ -349,8 +363,36 @@ async function attachTerminal(session: string): Promise<void> {
         item.addEventListener("keydown", (ev) => {
           if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); item.click(); }
         });
-        menu.append(item);
+        return item;
+      };
+      const section = (label: string, divider: boolean): void => {
+        if (divider) {
+          const hr = document.createElement("div");
+          hr.className = "docs-menu__divider";
+          hr.setAttribute("role", "separator");
+          menu.append(hr);
+        }
+        const h = document.createElement("div");
+        h.className = "docs-menu__section";
+        h.textContent = label;
+        menu.append(h);
+      };
+
+      // Recents are written by the /view page (same origin) under the
+      // same root; drop any that no longer exist in the index.
+      const known = new Map(data.entries.map((e) => [e.path, e]));
+      const recent = readRecents(root).filter((p) => known.has(p)).slice(0, RECENT_SHOW);
+      const modified = recentlyModified(data.entries, MODIFIED_SHOW);
+      if (recent.length) {
+        section("Recent", false);
+        for (const p of recent) menu.append(makeItem(known.get(p)!));
       }
+      if (modified.length) {
+        section("Recently modified", recent.length > 0);
+        for (const ent of modified) menu.append(makeItem(ent, true));
+      }
+      if (recent.length || modified.length) section("All documents", true);
+      for (const ent of data.entries) menu.append(makeItem(ent));
       if (data.truncated) {
         const note = document.createElement("div");
         note.className = "docs-menu__note";

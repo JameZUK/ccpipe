@@ -105,6 +105,7 @@ export interface MarkdownIndexEntry {
   name: string;
   path: string;   // absolute, for /view?path=
   rel: string;    // relative to root, for display
+  mtime: number;  // unix seconds, for "Recently modified"
 }
 export interface MarkdownIndex {
   root: string;

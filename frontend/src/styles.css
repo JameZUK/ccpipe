@@ -2938,6 +2938,36 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   color: var(--fg-muted);
 }
 .docs-menu__item:hover { background: var(--bg-input); }
+/* Name + age badge on one line (the "Recently modified" items). */
+.docs-menu__line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  min-width: 0;
+}
+.docs-menu__line .docs-menu__name { flex: 1; min-width: 0; }
+.docs-menu__age {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  color: var(--fg-muted);
+}
+/* Section label ("Recent", "Recently modified", "All documents"). */
+.docs-menu__section {
+  flex-shrink: 0;
+  padding: var(--s-2) var(--s-3) 2px;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  opacity: 0.85;
+}
+/* Divider between sections: a hairline that fades out at both ends. */
+.docs-menu__divider {
+  flex-shrink: 0;
+  height: 1px;
+  margin: var(--s-2) var(--s-3);
+  background: linear-gradient(90deg, transparent, var(--border-strong) 12%, var(--border-strong) 88%, transparent);
+}
 .docs-menu__note {
   padding: var(--s-2) var(--s-3);
   color: var(--fg-muted);

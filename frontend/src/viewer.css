@@ -83,6 +83,21 @@ html, body {
   .md-bar__live--pulse { animation: none; }
 }
 
+.md-bar__close {
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 2rem;
+  margin-left: -0.35rem;
+  border: 1px solid var(--md-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--md-muted);
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.md-bar__close:hover { background: var(--md-surface); color: var(--md-fg); }
 .md-bar__spacer { flex: 1; }
 .md-bar__btn {
   color: var(--md-link);
@@ -93,7 +108,15 @@ html, body {
   border-radius: 6px;
 }
 .md-bar__btn:hover { background: var(--md-surface); }
-button.md-bar__btn { cursor: pointer; font: inherit; }
+/* Reset the UA button look: without an explicit background the dark
+   color-scheme paints ButtonFace grey, and `font: inherit` would override
+   the 0.82rem size so "docs" rendered larger than the "download" link. */
+button.md-bar__btn {
+  cursor: pointer;
+  font-family: inherit;
+  background: transparent;
+}
+button.md-bar__btn:hover { background: var(--md-surface); }
 
 /* ── document drawer ─────────────────────────────────────────────────── */
 /* Docked beside the doc on wide screens (body.md-drawer-docked pushes the
