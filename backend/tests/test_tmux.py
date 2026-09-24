@@ -44,24 +44,45 @@ async def test_apply_server_defaults_anchors_server_before_options(monkeypatch):
 
     async def fake_run_tmux(*args: str, capture: bool = True) -> tuple[int, str]:
         calls.append(args)
-        return 0, ""
+        # Cold boot: no anchor session yet (has-session fails).
+        return (1, "") if args[0] == "has-session" else (0, "")
 
     monkeypatch.setattr(tmux_setup, "_run_tmux", fake_run_tmux)
     await tmux_setup.apply_server_defaults()
 
     assert calls, "expected tmux commands to be issued"
-    # First command creates the long-lived anchor session.
-    assert calls[0][0] == "new-session", (
-        f"a persistent anchor new-session must be first, got {calls[0]}"
+    # The existence probe is read-only (has-session never spawns a server);
+    # the first command that CHANGES anything creates the anchor session.
+    assert calls[0][0] == "has-session"
+    mutating = [c for c in calls if c[0] != "has-session"]
+    assert mutating[0][0] == "new-session", (
+        f"a persistent anchor new-session must come first, got {mutating[0]}"
     )
-    assert CONTROL_SESSION_NAME in calls[0]
-    assert "sleep" in calls[0] and "infinity" in calls[0]
+    assert CONTROL_SESSION_NAME in mutating[0]
+    assert "sleep" in mutating[0] and "infinity" in mutating[0]
     # Every set-option / set-window-option must come AFTER the anchor.
     first_set = next(
         i for i, c in enumerate(calls)
         if c and c[0] in ("set-option", "set-window-option")
     )
-    assert first_set > 0
+    assert first_set > calls.index(mutating[0])
     # The scrollback-critical defaults are actually issued.
     flat = {c[2] for c in calls if c[0] in ("set-option", "set-window-option") and len(c) >= 3}
     assert {"history-limit", "alternate-screen", "window-size"} <= flat
+
+
+
+@pytest.mark.asyncio
+async def test_apply_server_defaults_warm_restart_skips_anchor_create(monkeypatch, caplog):
+    # Warm path: the anchor already exists → no create, and no warning
+    # (this used to log "anchor session create (rc=1)" on every restart).
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_tmux(*args: str, capture: bool = True) -> tuple[int, str]:
+        calls.append(args)
+        return 0, ""
+
+    monkeypatch.setattr(tmux_setup, "_run_tmux", fake_run_tmux)
+    await tmux_setup.apply_server_defaults()
+    assert not any(c[0] == "new-session" for c in calls)
+    assert "anchor session create" not in caplog.text

@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import config as app_config
-from ..auth import AuthDep, CsrfDep
+from ..auth import AuthDep, CsrfDep, SameOriginDep
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -60,7 +60,7 @@ class SpeakBody(BaseModel):
     voice: str | None = None
 
 
-@router.get("/api/tts/voices", dependencies=[AuthDep])
+@router.get("/api/tts/voices", dependencies=[AuthDep, SameOriginDep])
 async def tts_voices() -> dict[str, list[str]]:
     """List Kokoro voice names. Returns an empty list if Kokoro is
     unreachable so the UI can render a graceful 'no voices available'."""
@@ -78,7 +78,7 @@ async def tts_voices() -> dict[str, list[str]]:
     return {"voices": [str(v) for v in voices if isinstance(v, str)]}
 
 
-@router.get("/api/tts/config", dependencies=[AuthDep])
+@router.get("/api/tts/config", dependencies=[AuthDep, SameOriginDep])
 async def tts_config_get() -> dict[str, object]:
     return dict(app_config.load().to_dict()["tts"])
 
@@ -165,8 +165,8 @@ async def tts_speak(body: SpeakBody) -> StreamingResponse:
     return _stream_then_close(stream_cm, resp)
 
 
-@router.get("/api/tts/preview", dependencies=[AuthDep])
-async def tts_preview(request: Request, voice: str,
+@router.get("/api/tts/preview", dependencies=[AuthDep, SameOriginDep])
+async def tts_preview(voice: str,
                        text: str = "Voice test, one two three.",
                        ) -> StreamingResponse:
     """Synthesize a short sample with the given voice and stream MP3
@@ -176,11 +176,7 @@ async def tts_preview(request: Request, voice: str,
     <audio>, etc., which would let a malicious page meter Kokoro work
     against the authenticated session. CsrfDep can't help (browsers
     don't send custom headers for such loads), so we rely on Fetch
-    Metadata: Sec-Fetch-Site must be same-origin. We deliberately
-    reject when it's absent to keep the gate strict."""
-    sfs = request.headers.get("sec-fetch-site", "").lower()
-    if sfs != "same-origin":
-        raise HTTPException(status_code=403, detail="cross-origin preview blocked")
+    Metadata — the shared SameOriginDep on the route."""
     if not voice or len(voice) > 64:
         raise HTTPException(status_code=400, detail="invalid voice")
     if len(text) > 200:

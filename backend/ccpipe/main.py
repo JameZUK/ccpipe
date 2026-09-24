@@ -75,12 +75,15 @@ def _warn_if_tls_with_public_bind() -> None:
     bar = "─" * 64
     log.warning(bar)
     log.warning("  CCPIPE_BEHIND_TLS=1 — TLS is terminating at the reverse proxy.")
-    log.warning("  If uvicorn is bound to 0.0.0.0, ensure the backend HTTP")
-    log.warning("  listener is firewalled to the nginx host only. Otherwise a")
-    log.warning("  LAN attacker can hit ccpipe directly over plaintext HTTP")
-    log.warning("  and bypass TLS entirely.")
-    log.warning("  Suggested rule (ufw): ufw deny in on <iface> to any port 8080")
-    log.warning("                        ufw allow from <nginx-host> to any port 8080")
+    log.warning("  If uvicorn is bound to 0.0.0.0 or :: (which includes public")
+    log.warning("  IPv6), ensure the backend HTTP listener is firewalled to the")
+    log.warning("  proxy host only. Otherwise anyone who can route to it hits")
+    log.warning("  ccpipe directly over plaintext HTTP and bypasses TLS.")
+    log.warning("  ufw (first match wins — the allow must come first; IPV6=yes):")
+    log.warning("    ufw allow from <proxy-ipv4> to any port 8080 proto tcp")
+    log.warning("    ufw allow from <proxy-ipv6> to any port 8080 proto tcp")
+    log.warning("    ufw deny 8080/tcp")
+    log.warning("  See docs/deployment.md for an nftables equivalent.")
     log.warning(bar)
 
 

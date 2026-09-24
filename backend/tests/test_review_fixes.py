@@ -2,7 +2,7 @@
 
 Each test pins one of the fixes so the bug can't slip back in:
   - #12 deque-based mic rate limiter total stays accurate over evictions
-  - #20 /api/tts/preview rejects requests without Sec-Fetch-Site=same-origin
+  - #20 /api/tts/preview rejects requests whose Sec-Fetch-Site isn't same-origin
   - #23 tmux.create_session is idempotent under duplicate-session errors
   - #19 CSP no longer contains the bare `ws:`/`wss:` wildcard tokens
 """
@@ -107,12 +107,17 @@ def authed_client(tmp_path, monkeypatch):
     return c
 
 
-def test_preview_rejects_missing_sec_fetch_site(authed_client):
-    """No Sec-Fetch-Site header → reject. Older browsers that wouldn't
-    set it are a non-target for ccpipe; the gate intentionally fails closed."""
-    r = authed_client.get("/api/tts/preview?voice=af_bella")
-    assert r.status_code == 403
-    assert "cross-origin" in r.json()["detail"]
+def test_preview_rejects_non_same_origin_fetch_site(authed_client):
+    """Preview now uses the shared SameOriginDep (auth.require_same_origin),
+    the one gate on every authenticated GET: any Sec-Fetch-Site other than
+    same-origin — a typed URL ("none"), same-site, cross-site — is refused.
+    (An absent header is allowed there: a cross-site browser load can't
+    strip it, and a non-browser client has no ambient cookie to abuse.)"""
+    for sfs in ("none", "same-site"):
+        r = authed_client.get("/api/tts/preview?voice=af_bella",
+                              headers={"sec-fetch-site": sfs})
+        assert r.status_code == 403
+        assert "cross-origin" in r.json()["detail"]
 
 
 def test_preview_rejects_cross_site(authed_client):

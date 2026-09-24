@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import tmux
-from ..auth import AuthDep, CsrfDep
+from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..tmux_control import CONTROL_SESSION_NAME
 from ..ws import _active_counters
 
@@ -167,7 +167,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/debug/sessions", dependencies=[AuthDep])
+@router.get("/api/debug/sessions", dependencies=[AuthDep, SameOriginDep])
 async def list_active_ws_sessions() -> dict[str, object]:
     """Live snapshot of every open WS handler's byte-flow counters.
 

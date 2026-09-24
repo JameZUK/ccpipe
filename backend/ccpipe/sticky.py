@@ -32,6 +32,8 @@ import shlex
 import threading
 from pathlib import Path
 
+from .paths import state_dir
+
 log = logging.getLogger(__name__)
 
 STICKY_FILE_ENV = "CCPIPE_STICKY_FILE"
@@ -44,9 +46,7 @@ STICKY_FILE_ENV = "CCPIPE_STICKY_FILE"
 _state_lock = threading.Lock()
 
 
-def _state_dir() -> Path:
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "ccpipe"
+_state_dir = state_dir
 
 
 def _default_path() -> Path:

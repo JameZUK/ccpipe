@@ -54,8 +54,8 @@ def _resolve_shell() -> str:
 
 
 async def apply_server_defaults() -> None:
-    # Lazy import to avoid the tmux <-> tmux_control import cycle.
-    from .tmux_control import CONTROL_SESSION_NAME
+    from . import tmux as _tmux_mod
+    from .tmux import CONTROL_SESSION_NAME
     shell = _resolve_shell()
     # On a cold boot ccpipe's lifespan calls apply_server_defaults() BEFORE
     # anything else spawns the tmux server (sticky restore + control client
@@ -74,15 +74,21 @@ async def apply_server_defaults() -> None:
     # idempotent and reuses this session, so creating it here is safe.
     # capture=False so the spawned server daemon can't hold our stdout pipe
     # open and hang startup (see _run_tmux).
-    code, out = await _run_tmux(
-        "new-session", "-d", "-s", CONTROL_SESSION_NAME, "sleep", "infinity",
-        capture=False,
-    )
-    if code != 0 and "duplicate session" not in out.lower():
-        # Non-zero is expected only when the anchor already exists (warm
-        # path). Anything else means the server may not be up — log it; the
-        # set-option calls below will then also warn and the cause is clear.
-        log.warning("tmux anchor session create (rc=%s): %s", code, out)
+    # Check first: has-session never spawns a server, and the create below
+    # can't report WHY it failed (capture=False discards its output), so
+    # without this every warm restart logged a bogus "create failed" for
+    # the anchor that already existed.
+    exists, _ = await _run_tmux("has-session", "-t",
+                                _tmux_mod.session_target(CONTROL_SESSION_NAME))
+    if exists != 0:
+        code, _ = await _run_tmux(
+            "new-session", "-d", "-s", CONTROL_SESSION_NAME, "sleep", "infinity",
+            capture=False,
+        )
+        if code != 0:
+            # The server may not be up — the set-option calls below will
+            # then also warn, so the cause is clear.
+            log.warning("tmux anchor session create failed (rc=%s)", code)
     options = [
         ("default-shell", shell),
         ("default-command", shell),       # so login-shell quirks don't bite

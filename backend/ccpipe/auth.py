@@ -33,6 +33,7 @@ The session secret used to sign cookies is handled separately in
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import json
@@ -53,6 +54,8 @@ from argon2.exceptions import VerifyMismatchError, InvalidHashError, Verificatio
 from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from starlette.websockets import WebSocket
+
+from .paths import state_dir
 
 log = logging.getLogger(__name__)
 
@@ -80,9 +83,7 @@ def behind_tls() -> bool:
 
 # ─── State dir / paths ─────────────────────────────────────────────────────
 
-def _state_dir() -> Path:
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "ccpipe"
+_state_dir = state_dir
 
 
 def _default_secret_path() -> Path:
@@ -574,6 +575,22 @@ def totp_provisioning_uri(secret: str, username: str) -> str:
     return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=TOTP_ISSUER)
 
 
+# Credential writers read the current credential, then write a modified
+# copy. Two of them racing (a password change and a TOTP confirm, say —
+# they run on worker threads) would each start from the same snapshot and
+# the second write would silently undo the first. One lock serialises them.
+_CRED_WRITE_LOCK = threading.RLock()
+
+
+def _cred_write_serialised(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _CRED_WRITE_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+@_cred_write_serialised
 def set_totp_secret(secret: str | None) -> tuple[bool, str]:
     """Persist a TOTP secret (or clear it). Bumps the credential
     version so any existing session is invalidated — we want a
@@ -600,6 +617,7 @@ def set_totp_secret(secret: str | None) -> tuple[bool, str]:
     return True, "updated"
 
 
+@_cred_write_serialised
 def update_credential(*, current_password: str,
                        new_username: str | None,
                        new_password: str | None) -> tuple[bool, str]:
@@ -697,10 +715,8 @@ async def update_credential_async(*, current_password: str,
 class LoginBody(BaseModel):
     username: str
     password: str
-    # Optional second-factor code. When the user has TOTP enrolled, a
-    # password-only login returns AuthStatus(otp_required=True) without
-    # setting the session, and the client resubmits with the same body
-    # plus a six-digit code in this field.
+    # Second-factor code, required (and verified together with the
+    # password) when TOTP is enrolled; ignored otherwise.
     code: str | None = None
 
 
@@ -708,10 +724,6 @@ class AuthStatus(BaseModel):
     required: bool
     authenticated: bool
     username: str | None = None
-    # `True` when the server expects an additional TOTP code before
-    # granting the session. Clients render the code-entry step in
-    # response. Always False on a fully-authenticated response.
-    otp_required: bool = False
     # Whether the account has TOTP enrolled. Surfaced so the Settings
     # UI can show "two-factor: enrolled / disabled" without exposing
     # the secret itself.
@@ -811,6 +823,7 @@ def touch_session(session: dict) -> None:
         session["seen"] = now
 
 
+@_cred_write_serialised
 def bump_credential_version() -> tuple[bool, str]:
     """"Sign out everywhere": invalidate every existing session (and, via
     close_stale_ws_sockets, every live socket) without changing the
@@ -965,5 +978,23 @@ def require_csrf(request: Request) -> None:
         )
 
 
+def require_same_origin(request: Request) -> None:
+    """Fetch-Metadata gate for every authenticated GET — the one standard
+    check (CSRF covers state-changing methods; GETs can't carry our custom
+    header when a cross-site page loads them via <img>, <audio>, <a>, a
+    top-level navigation, …).
+
+    Browsers attach ``Sec-Fetch-Site`` to every request, so anything other
+    than ``same-origin`` means another site (or a typed URL) is riding the
+    session cookie: e.g. a link that silently drops a file into Downloads,
+    or an <audio> tag metering Kokoro work. An ABSENT header is allowed:
+    a cross-site browser request can't strip it, and a non-browser client
+    has no ambient cookie to abuse."""
+    sfs = request.headers.get("sec-fetch-site", "").lower()
+    if sfs and sfs != "same-origin":
+        raise HTTPException(status_code=403, detail="cross-origin blocked")
+
+
 AuthDep = Depends(require_auth)
 CsrfDep = Depends(require_csrf)
+SameOriginDep = Depends(require_same_origin)

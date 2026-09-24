@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .paths import state_dir
+
 log = logging.getLogger(__name__)
 
 CONFIG_FILE_ENV = "CCPIPE_CONFIG_FILE"
@@ -134,9 +136,7 @@ class AppConfig:
         return cls(tts=tts, fs=fs, mic=mic)
 
 
-def _state_dir() -> Path:
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "ccpipe"
+_state_dir = state_dir
 
 
 def _default_config_path() -> Path:

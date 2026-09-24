@@ -20,9 +20,8 @@ from . import tmux as _tmux  # for TMUX_BIN
 
 log = logging.getLogger(__name__)
 
-# Hidden tmux session ccpipe keeps alive for its control-mode client.
-# Filtered from /api/sessions so users don't see it in the picker.
-CONTROL_SESSION_NAME = "__ccpipe_ctrl"
+# Defined in tmux.py (see there); re-exported for existing importers.
+CONTROL_SESSION_NAME = _tmux.CONTROL_SESSION_NAME
 
 EventCallback = Callable[["TmuxEvent"], Awaitable[None]]
 
@@ -261,6 +260,12 @@ class TmuxControlClient:
         subs = list(self._subscribers)
         if not subs:
             return
+        if event.name == "sessions-changed":
+            # Subscribers re-check session existence via the (briefly
+            # cached) list_sessions(); a list cached just before this change
+            # would hide a kill. Invalidate once here — the first subscriber
+            # refetches, and the cache lock makes the rest share that result.
+            _tmux.invalidate_list_sessions_cache()
         async def _bounded(sub: "_Subscription"):
             return await asyncio.wait_for(sub.callback(event), timeout=2.0)
         results = await asyncio.gather(

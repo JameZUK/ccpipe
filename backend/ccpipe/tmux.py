@@ -12,16 +12,24 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import libtmux
 from libtmux.exc import LibTmuxException
 
-from .tmux_control import CONTROL_SESSION_NAME
-
 log = logging.getLogger(__name__)
+
+# Hidden tmux session ccpipe keeps alive for its control-mode client (and
+# as the anchor that keeps the server's -g options alive). Filtered from
+# /api/sessions so users don't see it in the picker. Defined HERE, the
+# lower-level module, and re-exported by tmux_control: tmux_control imports
+# tmux at load time, so importing it back from tmux was an import cycle
+# (importing tmux_control first found tmux half-initialised).
+CONTROL_SESSION_NAME = "__ccpipe_ctrl"
 
 # Resolve once so subsequent invocations don't depend on $PATH ordering
 # changing under the process. Falls back to "tmux" if not on PATH yet —
@@ -268,12 +276,51 @@ async def claude_session_id(name: str) -> str | None:
     return sid if isinstance(sid, str) and sid else None
 
 
+# The /history view polls every 3.5 s per open viewer, and resolving the
+# claude pid costs a tmux subprocess plus a /proc walk each time. Cache the
+# pid per session; a hit is revalidated with one /proc read (the process
+# start time guards against pid reuse) and expires after a short TTL so a
+# claude relaunched in the pane is picked up. create/kill/rename drop the
+# entry immediately. The sessionId is still re-read every time (claude can
+# switch transcripts without a new process).
+_CLAUDE_PID_CACHE: dict[str, tuple[int, str, float]] = {}   # name → (pid, start, at)
+_CLAUDE_PID_TTL_S = 15.0
+
+
+def _proc_start_time(pid: int) -> str | None:
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    # Field 22 (starttime); split after the ")" that closes comm, which may
+    # itself contain spaces or parentheses.
+    fields = stat.rsplit(")", 1)[-1].split()
+    return fields[19] if len(fields) > 19 else None
+
+
+async def _cached_claude_pid(name: str) -> int | None:
+    hit = _CLAUDE_PID_CACHE.get(name)
+    now = time.monotonic()
+    if hit and now - hit[2] < _CLAUDE_PID_TTL_S and _proc_start_time(hit[0]) == hit[1]:
+        return hit[0]
+    pid = await claude_pid(name)
+    start = _proc_start_time(pid) if pid is not None else None
+    if pid is not None and start is not None:
+        _CLAUDE_PID_CACHE[name] = (pid, start, now)
+        if len(_CLAUDE_PID_CACHE) > 128:        # stale names from renames/kills
+            _CLAUDE_PID_CACHE.pop(next(iter(_CLAUDE_PID_CACHE)))
+    else:
+        _CLAUDE_PID_CACHE.pop(name, None)
+    return pid
+
+
 async def claude_sid_and_cwd(name: str) -> tuple[str | None, str | None]:
     """Resolve the claude (sessionId, cwd) for a tmux session with a SINGLE
     pid lookup. ``claude_session_id`` and ``session_cwd`` each resolve the pid
     independently (a tmux subprocess + /proc walk); the /history poll hits this
-    on its hot path, so do the work once."""
-    pid = await claude_pid(name)
+    on its hot path, so do the work once — and reuse it across polls."""
+    pid = await _cached_claude_pid(name)
     if pid is None:
         return None, None
     try:
@@ -386,21 +433,61 @@ async def session_exists(name: str) -> bool:
     return await asyncio.to_thread(_sync_session_exists, name)
 
 
+def wrap_in_shell(claude_cmd: str) -> str:
+    """Wrap a claude invocation so the tmux session survives claude
+    exiting. When claude exits, ``exec $SHELL -i`` replaces the shell
+    process with an interactive shell in the same working directory,
+    so the pane lands at a prompt instead of dying. Without this the
+    only-pane closes → only-window closes → session is destroyed.
+    """
+    shell = os.environ.get("SHELL") or "/bin/bash"
+    return f"{claude_cmd}; exec {shlex.quote(shell)} -i"
+
+
+# Upper bound on user sessions (the control session doesn't count). Each is
+# a live claude — hundreds of MB — so a runaway client (a reconnect loop
+# with a fresh name each time, a script) could otherwise spawn them until
+# this memory-tight host OOMs. Sticky restore at startup isn't capped: those
+# sessions are ones the operator already had.
+MAX_SESSIONS = 32
+
+
+async def at_session_cap() -> bool:
+    user = [s for s in await list_sessions() if s.name != CONTROL_SESSION_NAME]
+    return len(user) >= MAX_SESSIONS
+
+
 async def create_session(name: str, command: str = "claude",
                           cwd: str | None = None) -> None:
     """Create a tmux session and run *command* as its window. *cwd*
     becomes the session's starting working directory (falls back to
     $HOME, which is the legacy ws.py auto-create behaviour). For Claude
     Code we either pass plain ``claude`` or ``claude --resume <uuid>``."""
-    await asyncio.to_thread(_sync_create_session, name, command, cwd)
+    _CLAUDE_PID_CACHE.pop(name, None)
+    try:
+        await asyncio.to_thread(_sync_create_session, name, command, cwd)
+    finally:
+        # Our own mutation must be visible to the very next list_sessions()
+        # — e.g. POST /api/sessions looks the new session up right after
+        # creating it, and the cap check just before primed the cache.
+        invalidate_list_sessions_cache()
 
 
 async def kill_session(name: str) -> bool:
-    return await asyncio.to_thread(_sync_kill_session, name)
+    _CLAUDE_PID_CACHE.pop(name, None)
+    try:
+        return await asyncio.to_thread(_sync_kill_session, name)
+    finally:
+        invalidate_list_sessions_cache()
 
 
 async def rename_session(old: str, new: str) -> bool:
-    return await asyncio.to_thread(_sync_rename_session, old, new)
+    _CLAUDE_PID_CACHE.pop(old, None)
+    _CLAUDE_PID_CACHE.pop(new, None)
+    try:
+        return await asyncio.to_thread(_sync_rename_session, old, new)
+    finally:
+        invalidate_list_sessions_cache()
 
 
 def attach_argv(name: str) -> list[str]:

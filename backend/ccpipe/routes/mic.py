@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import config as app_config
-from ..auth import AuthDep, CsrfDep
+from ..auth import AuthDep, CsrfDep, SameOriginDep
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -29,7 +29,7 @@ class MicConfigBody(BaseModel):
     max_recording_seconds: int | None = Field(default=None, ge=5, le=600)
 
 
-@router.get("/api/mic/config", dependencies=[AuthDep])
+@router.get("/api/mic/config", dependencies=[AuthDep, SameOriginDep])
 async def mic_config_get() -> dict[str, object]:
     return dict(app_config.load().to_dict()["mic"])
 

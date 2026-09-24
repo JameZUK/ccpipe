@@ -249,3 +249,244 @@ def test_atomic_write_text_keeps_mode_and_symlink(tmp_path):
     atomic_write_text(link, '{"a": 1}\n')
     assert link.is_symlink() and real.read_text() == '{"a": 1}\n' and _mode(real) == 0o600
     assert not list(real.parent.glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_pty_large_paste_arrives_intact(tmp_path):
+    import asyncio, hashlib
+    from ccpipe.pty_relay import PtyProcess
+    out = tmp_path / "out.bin"
+    n = 2_000_000
+    payload = bytes((i * 7) % 251 + 1 for i in range(n)).replace(b"\x03", b"A").replace(b"\x04", b"B")
+    p = PtyProcess(["sh", "-c", f"stty raw -echo; head -c {n} > {out}; printf DONE"],
+                   cols=80, rows=24)
+    await p.start()
+    try:
+        await asyncio.sleep(0.3)          # let stty take effect before writing
+        p.write(payload)
+        seen = b""
+        while b"DONE" not in seen:
+            seen += await asyncio.wait_for(p.read(), timeout=30)
+    finally:
+        await p.terminate()
+    assert hashlib.sha256(out.read_bytes()).digest() == hashlib.sha256(payload).digest()
+
+
+@pytest.mark.asyncio
+async def test_history_capture_keeps_newest_tail_and_whole_lines(monkeypatch):
+    from unittest.mock import patch
+    from ccpipe import ws
+    lines = [f"line{i:06d} \x1b[31mred\x1b[0m".encode() for i in range(200_000)]
+    blob = b"\n".join(lines) + b"\n"
+
+    class _Stream:
+        def __init__(self, d): self.d = d
+        async def read(self, n=-1):
+            c, self.d = self.d[:n], self.d[n:]
+            return c
+
+    class _Proc:
+        returncode = 0
+        stdout = _Stream(blob)
+        async def wait(self): return 0
+        def kill(self): pass
+
+    ws._clear_history_cache()
+    monkeypatch.setattr(ws, "_HISTORY_MAX_BYTES", 100_000)
+    monkeypatch.setattr(ws, "_HISTORY_READ_SLACK", 10_000)
+    with patch("ccpipe.ws.asyncio.create_subprocess_exec", return_value=_Proc()):
+        out = await ws._capture_session_history("work", viewport_rows=30)
+    assert len(out) <= 100_000
+    assert out.endswith(lines[-1])                     # newest line kept
+    assert out.startswith(b"line")                     # no partial first line
+    assert all(l.startswith(b"line") for l in out.split(b"\r\n"))
+
+
+# ── efficiency: cached claude pid, shared session list per event ──────
+
+@pytest.mark.asyncio
+async def test_claude_pid_is_cached_and_revalidated(monkeypatch):
+    calls = []
+
+    async def fake_claude_pid(name):
+        calls.append(name)
+        return os.getpid()                       # a live pid with a real start time
+
+    monkeypatch.setattr(tmux, "claude_pid", fake_claude_pid)
+    tmux._CLAUDE_PID_CACHE.clear()
+    for _ in range(5):
+        assert await tmux._cached_claude_pid("work") == os.getpid()
+    assert calls == ["work"], "hits must not re-resolve"
+    # A different start time (pid reused) forces a fresh resolve.
+    pid, start, at = tmux._CLAUDE_PID_CACHE["work"]
+    tmux._CLAUDE_PID_CACHE["work"] = (pid, "0", at)
+    await tmux._cached_claude_pid("work")
+    assert calls == ["work", "work"]
+    # kill/rename/create drop the entry.
+    tmux._CLAUDE_PID_CACHE["gone"] = (pid, start, at)
+    monkeypatch.setattr(tmux, "_sync_kill_session", lambda n: True)
+    await tmux.kill_session("gone")
+    assert "gone" not in tmux._CLAUDE_PID_CACHE
+
+
+@pytest.mark.asyncio
+async def test_sessions_changed_invalidates_list_cache(monkeypatch):
+    from ccpipe import tmux_control
+    seen = []
+    monkeypatch.setattr(tmux, "invalidate_list_sessions_cache", lambda: seen.append(1))
+    client = tmux_control.TmuxControlClient()
+
+    async def cb(event):
+        pass
+
+    sub = client.subscribe(cb)
+    try:
+        await client._dispatch(tmux_control.TmuxEvent(name="sessions-changed", args=[], raw="%sessions-changed"))
+        await client._dispatch(tmux_control.TmuxEvent(name="window-add", args=[], raw="%window-add"))
+    finally:
+        sub.cancel()
+    assert seen == [1]
+
+
+# ── #8: malformed frames are dropped, not fatal; warnings rate-limited ─
+
+def test_malformed_frames_are_ignored(caplog):
+    from ccpipe import ws
+
+    class _Pty:
+        def __init__(self): self.writes, self.sizes = [], []
+        def write(self, b): self.writes.append(b)
+        def resize(self, c, r): self.sizes.append((c, r))
+
+    p = _Pty()
+    ws._warn_state.clear()
+    for frame in ["5", "[]", '"str"', "null", '{"type":"resize","cols":1e999,"rows":40}',
+                  '{"type":"resize","cols":"x"}', "not json", "not json either"]:
+        ws._handle_client_text(frame, p)          # must not raise
+    assert p.writes == [] and p.sizes == []
+    ws._handle_client_text('{"type":"input","data":"ok"}', p)
+    assert p.writes == [b"ok"]
+    # Two non-JSON frames back to back → only one warning logged.
+    assert sum("non-JSON" in r.message for r in caplog.records) == 1
+
+
+# ── #9: concurrent credential writes don't lose each other ────────────
+
+def test_concurrent_credential_writes_are_serialised(app_env):
+    import threading
+    auth.get_credential()                                  # seed the file
+    start = auth.get_credential().version
+    barrier = threading.Barrier(8)
+
+    def bump():
+        barrier.wait()
+        assert auth.bump_credential_version()[0]
+
+    threads = [threading.Thread(target=bump) for _ in range(8)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    auth.reset_cached_credential()
+    assert auth.get_credential().version == start + 8, "a concurrent write was lost"
+
+
+# ── #7: session cap ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_session_cap_counts_user_sessions_only(monkeypatch):
+    from ccpipe.tmux_control import CONTROL_SESSION_NAME
+
+    def fake(names):
+        async def _ls():
+            return [tmux.TmuxSession(name=n, windows=1, attached=False, created=0) for n in names]
+        return _ls
+
+    monkeypatch.setattr(tmux, "MAX_SESSIONS", 2)
+    monkeypatch.setattr(tmux, "list_sessions", fake([CONTROL_SESSION_NAME, "a"]))
+    assert not await tmux.at_session_cap()          # control session doesn't count
+    monkeypatch.setattr(tmux, "list_sessions", fake([CONTROL_SESSION_NAME, "a", "b"]))
+    assert await tmux.at_session_cap()
+
+
+def test_create_session_refused_at_cap(app_env, monkeypatch):
+    c = _login(app_env.app)
+
+    async def no(name): return False
+    async def yes(): return True
+    monkeypatch.setattr(tmux, "session_exists", no)
+    monkeypatch.setattr(tmux, "at_session_cap", yes)
+    r = c.post("/api/sessions", headers=H, json={"name": "overflow"})
+    assert r.status_code == 429
+
+
+# ── #12: delete/rename act on the entry; mkdir safe; rename never clobbers ─
+
+def test_delete_and_rename_act_on_symlink_not_target(fs_client, tmp_path):
+    c, root = fs_client
+    target = root / "real.txt"
+    target.write_text("keep")
+    link = root / "link"
+    link.symlink_to(target)
+    r = c.post("/api/fs/rename", headers=H, json={"src": str(link), "dst": str(root / "link2")})
+    assert r.status_code == 200
+    assert (root / "link2").is_symlink() and target.read_text() == "keep"
+    assert c.post("/api/fs/delete", headers=H, json={"path": str(root / "link2")}).status_code == 200
+    assert not (root / "link2").exists() and target.read_text() == "keep"
+    # A dangling link — and one pointing outside the jail — can be removed.
+    (root / "dangling").symlink_to(root / "nowhere")
+    (root / "out").symlink_to(tmp_path / "outside-file")
+    for name in ("dangling", "out"):
+        assert c.post("/api/fs/delete", headers=H, json={"path": str(root / name)}).status_code == 200
+        assert not os.path.lexists(root / name)
+
+
+def test_rename_never_replaces_existing(fs_client):
+    c, root = fs_client
+    (root / "a").write_text("A"); (root / "b").write_text("B")
+    r = c.post("/api/fs/rename", headers=H, json={"src": str(root / "a"), "dst": str(root / "b")})
+    assert r.status_code == 409
+    assert (root / "a").read_text() == "A" and (root / "b").read_text() == "B"
+
+
+def test_mkdir(fs_client):
+    c, root = fs_client
+    assert c.post("/api/fs/mkdir", headers=H, json={"path": str(root / "d")}).status_code == 200
+    assert (root / "d").is_dir()
+    assert c.post("/api/fs/mkdir", headers=H, json={"path": str(root / "d")}).status_code == 409
+
+
+# ── #13: one same-origin gate on every authenticated GET ───────────────
+
+def test_every_authed_get_has_the_same_origin_gate(app_env):
+    from ccpipe.auth import require_auth, require_same_origin
+    missing = []
+    for route in app_env.app.routes:
+        if "GET" not in getattr(route, "methods", set()):
+            continue
+        deps = {d.call for d in getattr(route, "dependant", None).dependencies} if hasattr(route, "dependant") else set()
+        if require_auth in deps and require_same_origin not in deps:
+            missing.append(route.path)
+    assert not missing, missing
+
+
+def test_same_origin_gate_blocks_cross_site(app_env):
+    c = _login(app_env.app)
+    assert c.get("/api/sessions/x/history", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert c.get("/api/tts/voices", headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    assert c.get("/api/mic/config", headers={"Sec-Fetch-Site": "same-origin"}).status_code == 200
+    assert c.get("/api/mic/config").status_code == 200          # non-browser: no header
+
+
+@pytest.mark.asyncio
+async def test_session_mutations_invalidate_list_cache(monkeypatch):
+    # Regression (found in E2E): the cap check primed list_sessions()'s
+    # cache, so POST /api/sessions couldn't find the session it had just
+    # created and returned 500.
+    seen = []
+    monkeypatch.setattr(tmux, "invalidate_list_sessions_cache", lambda: seen.append(1))
+    monkeypatch.setattr(tmux, "_sync_create_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "_sync_kill_session", lambda n: True)
+    monkeypatch.setattr(tmux, "_sync_rename_session", lambda a, b: True)
+    await tmux.create_session("x", command="true")
+    await tmux.kill_session("x")
+    await tmux.rename_session("x", "y")
+    assert len(seen) == 3

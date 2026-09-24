@@ -72,10 +72,13 @@ async def index() -> FileResponse: return _serve_file("index.html")
 # markdown/mermaid/KaTeX libraries never load into the terminal app. It
 # gets a PAGE-SCOPED CSP that adds 'unsafe-eval' to script-src: Mermaid
 # builds diagrams via the Function constructor, which the app-wide CSP
-# (script-src 'self') forbids. Scoping the relaxation to /view only is a
-# contained trade-off — this page has no session/terminal control and
-# only renders a file the authenticated operator already has FS access
-# to. The _security_headers middleware in main.py uses
+# (script-src 'self') forbids. Scoping the relaxation to /view keeps it
+# off the terminal app, but NOTE it is not a sandbox: /view is same-origin,
+# so script running here could open the terminal WebSocket. What keeps
+# 'unsafe-eval' safe is that no attacker-controlled script runs at all —
+# document HTML goes through DOMPurify, Mermaid runs with
+# securityLevel "strict", and connect-src/img-src/form-action are locked
+# down. Keep Mermaid patched. The _security_headers middleware in main.py uses
 # response.headers.setdefault(...), so this explicit header is preserved.
 _VIEWER_CSP = (
     "default-src 'self'; "

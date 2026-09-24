@@ -34,13 +34,25 @@ def _reset_capture_cache():
     _clear_history_cache()
 
 
+class _FakeStream:
+    """Minimal asyncio.StreamReader: serves *data* then EOF."""
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def read(self, n: int = -1) -> bytes:
+        chunk, self._data = (self._data, b"") if n < 0 else (self._data[:n], self._data[n:])
+        return chunk
+
+
 class _FakeProc:
+    # The capture reads proc.stdout directly (bounded tail read) and then
+    # awaits wait(), rather than using communicate().
     def __init__(self, stdout: bytes, returncode: int = 0):
-        self._stdout = stdout
+        self.stdout = _FakeStream(stdout)
         self.returncode = returncode
 
-    async def communicate(self):
-        return (self._stdout, b"")
+    async def wait(self):
+        return self.returncode
 
     def kill(self):
         pass
@@ -106,11 +118,14 @@ async def test_capture_returns_empty_on_nonzero_exit():
 
 
 async def test_capture_returns_empty_on_timeout():
+    class _HangingStream:
+        async def read(self, n: int = -1) -> bytes:
+            await asyncio.sleep(10)
+            return b"never"
+
     class _Hanging:
         returncode = None
-        async def communicate(self):
-            await asyncio.sleep(10)
-            return (b"never", b"")
+        stdout = _HangingStream()
         def kill(self): pass
         async def wait(self): return 0
     with patch("ccpipe.ws.asyncio.create_subprocess_exec",

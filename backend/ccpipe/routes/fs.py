@@ -8,12 +8,16 @@ Every path that crosses the network is funnelled through:
     (write target, upload target, rename destination, mkdir target)
 
 Both helpers enforce the **root jail** (``CCPIPE_FS_ROOT`` env, default
-``$HOME``) and a fixed deny-list (``.ssh``, ``.aws``, ``.gnupg``,
-``.local/state/ccpipe``, …) so a logged-in session can't reach the
-operator's credentials, SSH keys, or ccpipe's own state directory.
+``$HOME``) and a narrow deny-list (``_FS_DENY_SUBPATHS``: ccpipe's own
+state + config dirs, ``~/.claude`` and ``~/.claude.json``) so a logged-in
+session can't read or rewrite ccpipe's credentials or Claude Code's
+config through the file API. ``.ssh`` / ``.aws`` / ``.gnupg`` are
+deliberately NOT denied — this is a personal admin tool and they're
+legitimately reachable (the terminal can reach them anyway).
 """
 from __future__ import annotations
 
+import asyncio
 import errno
 import logging
 import mimetypes
@@ -29,32 +33,12 @@ from pydantic import BaseModel
 
 from .. import config as app_config
 from ..safe_write import existing_mode, open_temp, temp_name
-from ..auth import AuthDep, CsrfDep
+from ..auth import AuthDep, CsrfDep, SameOriginDep
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
 FS_ROOT_ENV = "CCPIPE_FS_ROOT"
-
-
-def _require_same_origin(request: Request) -> None:
-    """Belt-and-braces gate against cross-origin credentialed GETs.
-
-    CORS already blocks cross-origin reads of JSON / octet-stream
-    responses and SameSite=Lax keeps the session cookie off cross-site
-    subresource fetches, so today's main risk is a top-level
-    navigation (``<a target=_top href='…/api/fs/download?path=…'>``)
-    silently dropping a file into the operator's Downloads folder.
-    Sec-Fetch-Site is set by every modern browser; rejecting anything
-    that isn't ``same-origin`` closes that vector without affecting
-    legitimate in-app calls (which always carry the header value
-    ``same-origin``). Matches the gate on ``/api/tts/preview``."""
-    sfs = request.headers.get("sec-fetch-site", "").lower()
-    if sfs and sfs != "same-origin":
-        raise HTTPException(status_code=403, detail="cross-origin blocked")
-
-
-SameOriginDep = Depends(_require_same_origin)
 
 # Paths underneath the root that we refuse to expose. Deliberately
 # narrow: ccpipe is a personal admin tool, so .ssh / .aws / .gnupg /
@@ -130,6 +114,10 @@ _FS_BINARY_SNIFF = 1024
 # the whole index must arrive in one response (no lazy per-dir loading).
 _FS_MD_INDEX_MAX_ENTRIES = 2000
 _FS_MD_INDEX_MAX_DEPTH = 8
+# The entry cap only counts .md hits, so a huge tree with few Markdown files
+# (e.g. a root at $HOME) would still be walked end to end. Cap directories
+# visited too.
+_FS_MD_INDEX_MAX_DIRS = 20000
 # Cap on inline-served images (/api/fs/raw). Unlike /api/fs/download (which
 # is operator-initiated and uncapped), raw is auto-fetched by the viewer for
 # every ![](img) reference in a document, so an oversized image in a crafted
@@ -221,6 +209,60 @@ def _resolve_fs_parent_for_new(path: str) -> tuple[Path, Path]:
     # created/written, not only where it lives.
     _enforce_fs_jail(final)
     return parent, final
+
+
+def _resolve_fs_entry(path: str) -> Path:
+    """Validate *path* for operations on the directory ENTRY itself (delete,
+    rename source). Like _resolve_fs_parent_for_new the parent is resolved
+    and jailed but the leaf is kept as given, so a symlink is acted on as
+    the link — deleting or renaming it never touches (or 403s on) whatever
+    it points at, and a dangling link can still be removed."""
+    _, final = _resolve_fs_parent_for_new(path)
+    try:
+        os.lstat(final)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="not found")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"stat failed: {exc}")
+    return final
+
+
+_RENAME_NOREPLACE = 1
+_renameat2: Any = None
+
+
+def _rename_noreplace(src: str, src_dir_fd: int, dst: str, dst_dir_fd: int) -> None:
+    """Atomic rename that fails with EEXIST instead of replacing *dst*
+    (renameat2 + RENAME_NOREPLACE, via libc — Python has no binding). A
+    separate "does dst exist" check followed by rename() could still clobber
+    a file created in between. Falls back to check-then-rename where
+    renameat2 isn't available (non-Linux, very old glibc, or filesystems
+    that reject the flag)."""
+    global _renameat2
+    if _renameat2 is None:
+        try:
+            import ctypes
+            import ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            _renameat2 = libc.renameat2
+            _renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                                   ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        except (OSError, AttributeError, TypeError):
+            _renameat2 = False
+    if _renameat2:
+        import ctypes
+        if _renameat2(src_dir_fd, os.fsencode(src), dst_dir_fd, os.fsencode(dst),
+                      _RENAME_NOREPLACE) == 0:
+            return
+        err = ctypes.get_errno()
+        if err not in (errno.ENOSYS, errno.EINVAL):
+            raise OSError(err, os.strerror(err))
+    try:
+        os.stat(dst, dir_fd=dst_dir_fd, follow_symlinks=False)
+        raise OSError(errno.EEXIST, os.strerror(errno.EEXIST))
+    except FileNotFoundError:
+        pass
+    os.rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
 
 def _walk_parent_nofollow(absolute_path: str) -> tuple[int, str]:
@@ -358,7 +400,7 @@ class FsPathBody(BaseModel):
 # ─── Routes ────────────────────────────────────────────────────────────────
 
 @router.get("/api/fs/list", dependencies=[AuthDep, SameOriginDep])
-async def fs_list(path: str, show_hidden: int = 0,
+def fs_list(path: str, show_hidden: int = 0,
                    files: int = 0) -> dict[str, Any]:
     """List entries under *path*. ``files=0`` (default) returns only
     sub-directories — the directory-picker call site. ``files=1``
@@ -378,7 +420,7 @@ async def fs_list(path: str, show_hidden: int = 0,
 
 
 @router.get("/api/fs/markdown-index", dependencies=[AuthDep, SameOriginDep])
-async def fs_markdown_index(root: str) -> dict[str, Any]:
+def fs_markdown_index(root: str) -> dict[str, Any]:
     """Return every Markdown file under *root* (the session's project
     directory) as ``{name, path, rel, mtime}`` sorted by relative path — the
     data source for the viewer's "docs" drawer. The walk is bounded in
@@ -393,7 +435,12 @@ async def fs_markdown_index(root: str) -> dict[str, Any]:
     root_str = str(resolved)
     out: list[dict[str, Any]] = []
     truncated = False
+    dirs_visited = 0
     for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
+        dirs_visited += 1
+        if dirs_visited > _FS_MD_INDEX_MAX_DIRS:
+            truncated = True
+            break
         depth = dirpath[len(root_str):].count(os.sep)
         if depth >= _FS_MD_INDEX_MAX_DEPTH:
             dirnames[:] = []
@@ -436,7 +483,7 @@ async def fs_markdown_index(root: str) -> dict[str, Any]:
 
 
 @router.get("/api/fs/read", dependencies=[AuthDep, SameOriginDep])
-async def fs_read(path: str) -> dict[str, Any]:
+def fs_read(path: str) -> dict[str, Any]:
     """Return the file content as UTF-8 text. Rejects binary files and
     anything larger than the editor cap so we don't have to stream
     multi-MB blobs into the browser only for the editor to choke on
@@ -504,7 +551,7 @@ async def fs_read(path: str) -> dict[str, Any]:
 
 
 @router.get("/api/fs/stat", dependencies=[AuthDep, SameOriginDep])
-async def fs_stat(path: str) -> dict[str, Any]:
+def fs_stat(path: str) -> dict[str, Any]:
     """Cheap metadata probe (size + float mtime) for one file. The
     Markdown viewer polls this to detect on-disk edits (from the editor,
     from ``claude``, from anything) without re-fetching the whole file
@@ -540,7 +587,7 @@ def _resolve_write_target(path: str) -> Path:
 
 
 @router.post("/api/fs/write", dependencies=[AuthDep, CsrfDep])
-async def fs_write(body: FsWriteBody) -> dict[str, Any]:
+def fs_write(body: FsWriteBody) -> dict[str, Any]:
     """Atomic write: temp file in the target dir, fsync, rename. The
     text payload is capped at the editor limit so a misbehaving client
     can't dump arbitrary data through this endpoint."""
@@ -632,7 +679,9 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
                         status_code=413,
                         detail=f"upload exceeds limit ({cap_bytes} bytes)")
                 os.write(fd, chunk)
-            os.fsync(fd)
+            # fsync can take a while on a big upload; keep it off the loop
+            # that serves every terminal WebSocket.
+            await asyncio.to_thread(os.fsync, fd)
             os.close(fd)
             fd = None
             os.replace(tmp_name, final.name,
@@ -652,7 +701,7 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
 
 
 @router.get("/api/fs/download", dependencies=[AuthDep, SameOriginDep])
-async def fs_download(path: str) -> StreamingResponse:
+def fs_download(path: str) -> StreamingResponse:
     """Stream a file back to the browser as
     ``Content-Disposition: attachment``. No size cap — downloads are
     operator-initiated, and capping them would block legitimate
@@ -710,7 +759,7 @@ async def fs_download(path: str) -> StreamingResponse:
 
 
 @router.get("/api/fs/raw", dependencies=[AuthDep, SameOriginDep])
-async def fs_raw(path: str) -> StreamingResponse:
+def fs_raw(path: str) -> StreamingResponse:
     """Serve a file **inline** with its sniffed Content-Type, restricted
     to ``image/*``. This backs relative ``![](./img.png)`` references in
     the Markdown viewer. Capping to images means this can never serve an
@@ -782,8 +831,8 @@ async def fs_raw(path: str) -> StreamingResponse:
 
 
 @router.post("/api/fs/rename", dependencies=[AuthDep, CsrfDep])
-async def fs_rename(body: FsRenameBody) -> dict[str, Any]:
-    src = _resolve_fs_path(body.src)
+def fs_rename(body: FsRenameBody) -> dict[str, Any]:
+    src = _resolve_fs_entry(body.src)
     _, final = _resolve_fs_parent_for_new(body.dst)
     # Close the intermediate-symlink TOCTOU the same way read/write/
     # upload/download do (M1 fix): walk both parents with per-component
@@ -796,17 +845,10 @@ async def fs_rename(body: FsRenameBody) -> dict[str, Any]:
     try:
         dst_parent_fd, dst_leaf = _walk_parent_nofollow(str(final))
         try:
-            # lstat (follow_symlinks=False) so we don't follow a symlink
-            # whose target happens to be missing — we'd otherwise quietly
-            # overwrite the symlink target on rename, not the link itself.
             try:
-                os.stat(dst_leaf, dir_fd=dst_parent_fd, follow_symlinks=False)
+                _rename_noreplace(src_leaf, src_parent_fd, dst_leaf, dst_parent_fd)
+            except FileExistsError:
                 raise HTTPException(status_code=409, detail="dst already exists")
-            except FileNotFoundError:
-                pass
-            try:
-                os.rename(src_leaf, dst_leaf,
-                          src_dir_fd=src_parent_fd, dst_dir_fd=dst_parent_fd)
             except PermissionError:
                 raise HTTPException(status_code=403, detail="permission denied")
             except OSError as exc:
@@ -819,11 +861,11 @@ async def fs_rename(body: FsRenameBody) -> dict[str, Any]:
 
 
 @router.post("/api/fs/delete", dependencies=[AuthDep, CsrfDep])
-async def fs_delete(body: FsPathBody) -> dict[str, bool]:
+def fs_delete(body: FsPathBody) -> dict[str, bool]:
     """Delete one path. Refuses non-empty directories (the panel
     walks a confirm UX for those; we don't recursively rm to keep
     a missed click from nuking a tree)."""
-    target = _resolve_fs_path(body.path)
+    target = _resolve_fs_entry(body.path)
     # Same M1 nofollow walk + dir_fd-relative syscall as rename/write so
     # an intermediate-directory symlink swap between resolve() and the
     # unlink/rmdir can't redirect the delete outside the jail.
@@ -844,21 +886,27 @@ async def fs_delete(body: FsPathBody) -> dict[str, bool]:
 
 
 @router.post("/api/fs/mkdir", dependencies=[AuthDep, CsrfDep])
-async def fs_mkdir(body: FsPathBody) -> dict[str, str]:
+def fs_mkdir(body: FsPathBody) -> dict[str, str]:
     _, final = _resolve_fs_parent_for_new(body.path)
+    # Same nofollow walk as every other mutation, so an intermediate dir
+    # swapped for a symlink after validation can't land the new directory
+    # outside the jail.
+    parent_fd, leaf = _walk_parent_nofollow(str(final))
     try:
-        final.mkdir(parents=False, exist_ok=False)
+        os.mkdir(leaf, dir_fd=parent_fd)
     except FileExistsError:
         raise HTTPException(status_code=409, detail="already exists")
     except PermissionError:
         raise HTTPException(status_code=403, detail="permission denied")
     except OSError as exc:
         raise HTTPException(status_code=400, detail=f"mkdir failed: {exc}")
-    return {"path": str(final.resolve())}
+    finally:
+        os.close(parent_fd)
+    return {"path": str(final)}
 
 
 @router.get("/api/fs/config", dependencies=[AuthDep, SameOriginDep])
-async def fs_config_get() -> dict[str, Any]:
+def fs_config_get() -> dict[str, Any]:
     """Surfacing the upload cap + resolved fs root to the UI.
 
     The root lets the file panel default to a path inside the jail

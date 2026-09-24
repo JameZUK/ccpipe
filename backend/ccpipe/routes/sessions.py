@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import sticky, tmux, ws
-from ..auth import AuthDep, CsrfDep
+from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..tmux_control import CONTROL_SESSION_NAME
 from .fs import _enforce_fs_jail, content_disposition_attachment
 
@@ -85,17 +85,6 @@ class StickyBody(BaseModel):
     sticky: bool
 
 
-def _wrap_in_shell(claude_cmd: str) -> str:
-    """Wrap a claude invocation so the tmux session survives claude
-    exiting. When claude exits, ``exec $SHELL -i`` replaces the shell
-    process with an interactive shell in the same working directory,
-    so the pane lands at a prompt instead of dying. Without this the
-    only-pane closes → only-window closes → session is destroyed.
-    """
-    shell = os.environ.get("SHELL") or "/bin/bash"
-    return f"{claude_cmd}; exec {shlex.quote(shell)} -i"
-
-
 def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str]) -> SessionInfo:
     return SessionInfo(
         name=s.name,
@@ -109,7 +98,7 @@ def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str]) -> SessionInfo
 
 # ─── tmux session CRUD ────────────────────────────────────────────────────
 
-@router.get("/api/sessions", response_model=list[SessionInfo], dependencies=[AuthDep])
+@router.get("/api/sessions", response_model=list[SessionInfo], dependencies=[AuthDep, SameOriginDep])
 async def list_sessions() -> list[SessionInfo]:
     sessions = await tmux.list_sessions()
     sticky_names = sticky.sticky_names()
@@ -126,6 +115,9 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
     _reject_control_session(name)
     if await tmux.session_exists(name):
         raise HTTPException(status_code=409, detail="session already exists")
+    if await tmux.at_session_cap():
+        raise HTTPException(status_code=429,
+                            detail=f"session limit reached ({tmux.MAX_SESSIONS})")
 
     cwd: str | None = None
     if body.cwd:
@@ -160,7 +152,7 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
     # drops to a prompt in the original cwd. Without this the only-pane
     # closes when claude exits → session is destroyed → reconnect path
     # auto-creates a fresh session in $HOME, losing the cwd.
-    command = _wrap_in_shell(claude_cmd)
+    command = tmux.wrap_in_shell(claude_cmd)
 
     await tmux.create_session(name, command=command, cwd=cwd)
     sticky_names = sticky.sticky_names()
@@ -487,7 +479,14 @@ class _CachedBlocks:
 
 _BLOCKS_CACHE: "OrderedDict[str, _CachedBlocks]" = OrderedDict()
 _BLOCKS_CACHE_MAX = 6
+# _BLOCKS_LOCK guards only the cache dict; the parse itself runs under a
+# per-transcript lock so one big (re)parse doesn't stall every other
+# session's cheap "unchanged" poll.
 _BLOCKS_LOCK = threading.Lock()
+# (Key locks are never evicted: dropping one while a parse holds it would let
+# a second parser start on the same transcript. One small Lock per transcript
+# path seen is negligible.)
+_BLOCKS_KEY_LOCKS: dict[str, threading.Lock] = {}
 
 
 def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
@@ -503,10 +502,13 @@ def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
         return []
     key = str(path)
     with _BLOCKS_LOCK:
-        cached = _BLOCKS_CACHE.get(key)
-        if cached and cached.mtime == st.st_mtime_ns and cached.size == st.st_size:
-            _BLOCKS_CACHE.move_to_end(key)
-            return cached.blocks
+        key_lock = _BLOCKS_KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        with _BLOCKS_LOCK:
+            cached = _BLOCKS_CACHE.get(key)
+            if cached and cached.mtime == st.st_mtime_ns and cached.size == st.st_size:
+                _BLOCKS_CACHE.move_to_end(key)
+                return cached.blocks
         # Incremental only when the file strictly grew with a newer mtime
         # (an append); otherwise re-parse from scratch.
         if cached and st.st_size > cached.size and st.st_mtime_ns >= cached.mtime:
@@ -526,14 +528,15 @@ def _transcript_blocks(path: Path) -> list[dict[str, Any]]:
         except Exception:
             del blocks[base:]
             raise
-        _BLOCKS_CACHE[key] = _CachedBlocks(st.st_mtime_ns, st.st_size, resume, blocks)
-        _BLOCKS_CACHE.move_to_end(key)
-        while len(_BLOCKS_CACHE) > _BLOCKS_CACHE_MAX:
-            _BLOCKS_CACHE.popitem(last=False)
+        with _BLOCKS_LOCK:
+            _BLOCKS_CACHE[key] = _CachedBlocks(st.st_mtime_ns, st.st_size, resume, blocks)
+            _BLOCKS_CACHE.move_to_end(key)
+            while len(_BLOCKS_CACHE) > _BLOCKS_CACHE_MAX:
+                _BLOCKS_CACHE.popitem(last=False)
         return blocks
 
 
-@router.get("/api/sessions/{name}/history", dependencies=[AuthDep])
+@router.get("/api/sessions/{name}/history", dependencies=[AuthDep, SameOriginDep])
 async def session_history(name: str, before: int | None = None,
                           after: int | None = None,
                           limit: int = 40) -> dict[str, Any]:
@@ -604,17 +607,13 @@ async def session_history(name: str, before: int | None = None,
     }
 
 
-@router.get("/api/claude-sessions/{session_id}/export", dependencies=[AuthDep])
-async def claude_session_export(session_id: str, cwd: str,
-                                  request: Request) -> StreamingResponse:
+@router.get("/api/claude-sessions/{session_id}/export", dependencies=[AuthDep, SameOriginDep])
+async def claude_session_export(session_id: str, cwd: str) -> StreamingResponse:
     """Stream a markdown rendering of a claude session's JSONL transcript.
 
     Same-origin gate matches the fs GETs: an authenticated browser
     session would otherwise let a top-level navigation drop the
     transcript into the operator's Downloads via a malicious link."""
-    sfs = request.headers.get("sec-fetch-site", "").lower()
-    if sfs and sfs != "same-origin":
-        raise HTTPException(status_code=403, detail="cross-origin blocked")
     if not _UUID_RE.match(session_id):
         raise HTTPException(status_code=400, detail="invalid session id")
     if not cwd.startswith("/"):
@@ -658,7 +657,7 @@ async def claude_session_export(session_id: str, cwd: str,
     )
 
 
-@router.get("/api/claude-sessions", dependencies=[AuthDep])
+@router.get("/api/claude-sessions", dependencies=[AuthDep, SameOriginDep])
 async def claude_sessions(cwd: str) -> dict[str, Any]:
     """List Claude Code sessions persisted under the project dir
     corresponding to *cwd*, with their first user message preview so

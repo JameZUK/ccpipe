@@ -95,6 +95,11 @@ _GRACEFUL_TERMINATE_S = 1.5
 _WRITE_BUFFER_LIMIT = 4 * 1024 * 1024
 
 
+# Largest slice handed to one os.write() by the drain task. The kernel PTY
+# buffer takes ~4 KiB per write anyway; this just bounds each attempt.
+_DRAIN_CHUNK = 65536
+
+
 class PtyProcess:
     """Async wrapper around a child process running on a PTY."""
 
@@ -365,7 +370,12 @@ class PtyProcess:
                 # After waking, the fd may have been swapped/cleared.
                 continue
             try:
-                n = os.write(fd, bytes(self._write_buffer))
+                # Write a bounded window through a memoryview: copying the
+                # whole buffer (up to 4 MiB) on every partial write made a big
+                # paste O(n²). The views are released before the buffer is
+                # trimmed below (a bytearray can't resize while exported).
+                with memoryview(self._write_buffer) as mv, mv[:_DRAIN_CHUNK] as head:
+                    n = os.write(fd, head)
             except BlockingIOError:
                 n = 0
             except OSError as exc:

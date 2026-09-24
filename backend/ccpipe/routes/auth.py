@@ -1,12 +1,13 @@
 """Authentication routes.
 
-Two login paths supported:
+Login is a single request carrying ``{username, password, code?}``: the
+password and (when TOTP is enrolled) the code are verified together and
+any failure returns the same uniform 401, so a response never reveals
+that the password alone was right. The UI shows a separate code step but
+still sends one request; accounts without TOTP leave the code blank.
 
-  - **password-only** when no TOTP enrolled → one round-trip, session
-    set immediately.
-  - **two-factor** when TOTP enrolled → first round-trip returns
-    ``otp_required=true`` and *no* session; client resubmits with
-    ``code`` populated; we then verify and grant the session.
+Sessions: see auth.start_session / touch_session / revoke_session (30-day
+idle timeout, server-side revocation on logout, "sign out everywhere").
 
 A per-IP + global sliding-window rate limit fronts the login endpoint
 so a brute-force across the LAN gets one budget per source AND a
@@ -200,26 +201,17 @@ async def auth_login(request: Request) -> AuthStatus:
     # the real client; without those flags it's the immediate TCP peer
     # (usually nginx itself), which collapses the per-IP throttle into
     # a global one. See README §"Reverse proxy" for the recommended unit.
-    client_ip = (request.client.host if request.client else "") or "unknown"
     # ── Rate-limit BEFORE body parsing.
     # Pass-3 review finding #18: the previous code put the throttle
     # check after FastAPI's automatic ``body: LoginBody`` parsing, so
     # any payload that crashed the parser (NaN / Infinity / overflow /
     # lone surrogates per #17, the deep-nest class per pass-2 #9)
     # returned a 5xx without ever counting toward the attacker's
-    # attempt budget. Moving the throttle here means every login POST
-    # — successful, 401'd, or 400'd as malformed — costs the source
-    # exactly one bucket slot.
-    if not _login_throttle_ok(client_ip):
-        log.warning("login throttle tripped for ip=%s (per-IP %d/%ds + global %d/%ds)",
-                     client_ip, _LOGIN_BUCKET_MAX, int(_LOGIN_BUCKET_WINDOW_S),
-                     _GLOBAL_LOGIN_MAX, int(_GLOBAL_LOGIN_WINDOW_S))
-        # 429 with Retry-After hint. Slight async delay so even a
-        # successful 429 costs time on the attacker side.
-        await asyncio.sleep(1.0)
-        raise HTTPException(status_code=429,
-                            detail="too many attempts; try again in a minute",
-                            headers={"Retry-After": str(int(_LOGIN_BUCKET_WINDOW_S))})
+    # attempt budget. Throttling first means every login POST —
+    # successful, 401'd, or 400'd as malformed — costs the source
+    # exactly one bucket slot (the same shared bucket as the re-verify
+    # endpoints; see _enforce_throttle).
+    await _enforce_throttle(request, "login")
 
     # ── Parse + validate body manually.
     # Pass-3 review finding #17: FastAPI's automatic ``body: LoginBody``

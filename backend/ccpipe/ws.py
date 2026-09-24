@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -109,7 +110,32 @@ def _safe_json_loads(text: str):
     """
     if text.count("{") + text.count("[") > _JSON_BRACKET_CAP:
         raise ValueError("json too deeply nested")
-    return json.loads(text)
+    msg = json.loads(text)
+    # Every client frame is a JSON object; anything else (a bare number,
+    # a list, a string) is rejected here rather than crashing the caller's
+    # msg.get() and tearing down the socket.
+    if not isinstance(msg, dict):
+        raise ValueError("frame is not a JSON object")
+    return msg
+
+
+# Warnings about malformed client frames are rate-limited: a buggy or
+# hostile client can send thousands a second, and each used to log a line.
+_WARN_INTERVAL_S = 10.0
+_warn_state: dict[str, tuple[float, int]] = {}   # key → (last logged, suppressed)
+
+
+def _warn_limited(key: str, fmt: str, *args: object) -> None:
+    now = time.monotonic()
+    last, suppressed = _warn_state.get(key, (0.0, 0))
+    if now - last < _WARN_INTERVAL_S:
+        _warn_state[key] = (last, suppressed + 1)
+        return
+    if suppressed:
+        fmt += " (+%d similar suppressed)"
+        args = (*args, suppressed)
+    log.warning(fmt, *args)
+    _warn_state[key] = (now, 0)
 
 
 @dataclass
@@ -278,503 +304,260 @@ async def _release_ptt_after(
 
 
 async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
-    # Two scopes in this function (mic_stop dispatch + finally cleanup)
-    # both assign to _mic_owner. Python requires `global` to come before
-    # any read of the name in the same function, so hoist it here once
-    # rather than scattering per-block declarations.
-    global _mic_owner
-    await websocket.accept()
+    await _TerminalConnection(websocket, session).run()
 
-    # Auto-create the session if it doesn't exist yet. If it's a KNOWN STICKY
-    # session (killed, or vanished some time after the startup restore ran),
-    # respawn it in its stored cwd with the restore command — otherwise we'd
-    # silently recreate it in $HOME, which is the "after a reboot ccpipe lands
-    # in /home" bug. Non-sticky names have no stored cwd and keep the default.
-    if not await tmux.session_exists(session):
-        from . import sticky as _sticky
-        _entry = _sticky.load().get(session)
-        if _entry and _entry.get("cwd"):
-            await tmux.create_session(
-                session, command=_sticky.build_restore_command(), cwd=_entry["cwd"])
-        else:
-            await tmux.create_session(session)
 
-    # Wait briefly for the client's initial 'resize' message so we spawn the
-    # PTY (and thus the tmux client) at the correct dimensions. With
-    # window-size=latest this means the attached window resizes correctly on
-    # first attach instead of briefly rendering at the fallback 120x40.
-    initial_cols, initial_rows, leftover = await _wait_for_initial_resize(websocket, session)
+class _TerminalConnection:
+    """One browser terminal connection to a tmux session.
 
-    # Capture tmux's full pane (history + visible) on EVERY connect, not
-    # just the first one. The frontend `term.reset()`s on `hello` so the
-    # bytes we send below replace the xterm buffer rather than appending
-    # to it. This is what closes the "new output isn't in scrollback after
-    # a reconnect" hole — during a network blip, lines that scrolled into
-    # tmux's history were previously never delivered to xterm because we
-    # skipped this capture on reconnects.
-    history_bytes = await _capture_session_history(session, initial_rows)
+    ``run()`` walks the lifecycle in order: handshake (auto-create, initial
+    resize, history capture, hello) → registrations → commit zone (spawn the
+    tmux-attach relay) → receive loop → teardown. The per-connection state
+    that used to live in one 570-line function's closures lives here, and
+    each phase is its own method."""
 
-    # NOTE: the tmux-attach relay (PtyProcess) is spawned LATER, in the
-    # no-await "commit zone" just before the receive loop's try/finally —
-    # NOT here. Spawning it before the fallible handshake below (hello /
-    # history / stream_ready sends, every one of which raises if the
-    # client has already vanished) used to leak the `tmux attach-session`
-    # child: the guaranteeing finally hadn't been entered yet, so a
-    # mid-handshake disconnect left the relay attached forever. Under
-    # tmux window-size=latest those orphans pinned the shared pane to
-    # their fallback width (120x40), so a later mobile client saw wide
-    # content wrapped into blank-gap scrollback — the "scrambled output /
-    # massive spaces and gaps on mobile" report. Deferring start() past
-    # the last fallible await closes the leak.
+    def __init__(self, websocket: WebSocket, session: str) -> None:
+        self.ws = websocket
+        self.session = session
+        # Track WS-send so we can serialize sends from multiple tasks safely.
+        self.send_lock = asyncio.Lock()
+        # Per-WS byte accounting. Registered in the global active list for
+        # live diagnostics; a summary is logged in teardown so every WS close
+        # leaves a "ws closed: …" line in the journal that tells us how much
+        # PTY data flowed and whether any was lost.
+        self.counters = WsCounters(session=session, started_at=time.monotonic())
+        # Captured from the client's disconnect frame so the close reason
+        # shows in the "ws closed" line — diagnoses periodic reconnects (1000
+        # client close / 1001 going-away-backgrounded / 1006 abnormal-drop).
+        self.disconnect_code: int | None = None
+        # The first failed TTS send proves the WS is no longer reachable; we
+        # set this flag so subsequent callbacks short-circuit instead of
+        # forcing asyncio + httpx to keep streaming Kokoro chunks into a dead
+        # socket. tts_sub.cancel() is also called, which removes this fan-out
+        # target from the next utterance entirely.
+        self.alive = True
+        self.tmux_sub: Any = None
+        self.tts_sub: Any = None
+        self.pty_proc: PtyProcess | None = None
+        self.pty_task: asyncio.Task[None] | None = None
+        self.mic_limiter = _MicRateLimiter()
+        # Per-WS opaque token used to claim the mic singleton on first use.
+        self.mic_token: object = object()
+        # In-flight PTT-release tasks scheduled by mic_stop. Tracked so we
+        # can cancel them in teardown: without this, a fast disconnect right
+        # after mic_stop leaves the sleeping release task as the last
+        # reference to its closure; when it fires (~drain_pad_ms later) it
+        # writes Esc k into pty_proc, which on a re-attached session is a
+        # different mic-token's pty (same name, same pty because tmux
+        # sessions persist) and aborts the new voice interaction.
+        self.pending_releases: set[asyncio.Task[None]] = set()
 
-    # Best-effort: try to open the mic pipe now so the hello message can
-    # advertise voice capability accurately.
-    voice_available = _mic_writer.write(b"")  # zero-length write probes the FD
-    # Resolve the tmux session's working directory so the client can
-    # default file/directory-browse dialogs to the project root the
-    # user is actually working in, rather than the fs jail root
-    # (typically $HOME). Best-effort: session_cwd may return None if
-    # tmux's pane query failed; client falls back to the fs config
-    # root in that case.
-    session_cwd_value = await tmux.session_cwd(session)
-    await websocket.send_json({
-        "type": "hello",
-        "session": session,
-        "cwd": session_cwd_value,
-        "tts": tts_service.enabled,
-        "voice": voice_available,
-    })
+    # ── lifecycle ──────────────────────────────────────────────────────
+    async def run(self) -> None:
+        await self.ws.accept()
+        if not await self._ensure_session():
+            return
 
-    # Fallible (spawns a tmux query) — so it runs BEFORE anything below is
-    # registered in module-level state; a raise here leaks nothing.
-    tts_filter = await _build_tts_filter(session)
+        # Wait briefly for the client's initial 'resize' message so we spawn
+        # the PTY (and thus the tmux client) at the correct dimensions. With
+        # window-size=latest this means the attached window resizes correctly
+        # on first attach instead of briefly rendering at the fallback 120x40.
+        cols, rows, leftover = await _wait_for_initial_resize(self.ws, self.session)
 
-    # Track WS-send so we can serialize sends from multiple tasks safely.
-    send_lock = asyncio.Lock()
+        # Capture tmux's full pane (history + visible) on EVERY connect, not
+        # just the first one. The frontend `term.reset()`s on `hello` so the
+        # bytes we send below replace the xterm buffer rather than appending
+        # to it. This is what closes the "new output isn't in scrollback
+        # after a reconnect" hole — during a network blip, lines that
+        # scrolled into tmux's history were previously never delivered to
+        # xterm because we skipped this capture on reconnects.
+        history_bytes = await _capture_session_history(self.session, rows)
 
-    # Per-WS byte accounting. Registered in the global active list for
-    # live diagnostics; a summary is logged in the `finally` block so
-    # every WS close leaves a "ws closed: …" line in the journal that
-    # tells us how much PTY data flowed and whether any was lost.
-    counters = WsCounters(session=session, started_at=time.monotonic())
-    _active_counters.append(counters)
-    # Captured from the client's disconnect frame so the close reason shows
-    # in the "ws closed" line — diagnoses periodic reconnects (1000 client
-    # close / 1001 going-away-backgrounded / 1006 abnormal-drop).
-    disconnect_code: int | None = None
-    # Register for credential-rotation kicks (M2). Deregistration is in
-    # the WS handler's finally block alongside _active_counters.remove.
-    _live_ws.add(websocket)
+        # NOTE: the tmux-attach relay (PtyProcess) is spawned LATER, in the
+        # no-await "commit zone" (_start_pty) just before the receive loop's
+        # try/finally — NOT here. Spawning it before the fallible handshake
+        # below (hello / history / stream_ready sends, every one of which
+        # raises if the client has already vanished) used to leak the `tmux
+        # attach-session` child: the guaranteeing finally hadn't been entered
+        # yet, so a mid-handshake disconnect left the relay attached forever.
+        # Under tmux window-size=latest those orphans pinned the shared pane
+        # to their fallback width (120x40), so a later mobile client saw wide
+        # content wrapped into blank-gap scrollback — the "scrambled output /
+        # massive spaces and gaps on mobile" report. Deferring start() past
+        # the last fallible await closes the leak.
+        await self._send_hello()
 
-    async def send_json(msg: dict) -> bool:
-        async with send_lock:
-            try:
-                await websocket.send_json(msg)
-                return True
-            except Exception as exc:
-                log.debug("send_json failed: %s", exc)
-                return False
+        # Fallible (spawns a tmux query) — so it runs BEFORE anything below
+        # is registered in module-level state; a raise here leaks nothing.
+        tts_filter = await _build_tts_filter(self.session)
+        self._register(tts_filter)
 
-    async def send_pong_unlocked() -> bool:
-        """Send a pong WITHOUT acquiring send_lock.
+        # Send any captured history before the live pump starts. xterm.js
+        # writes these bytes into its scrollback; tmux attach's incoming
+        # redraw will then paint the current visible pane on top. Prefixed
+        # with FRAME_PTY_OUTPUT so the client dispatches it through the same
+        # PTY pipeline as live output.
+        if history_bytes:
+            async with self.send_lock:
+                try:
+                    await self.ws.send_bytes(bytes([FRAME_PTY_OUTPUT]) + history_bytes)
+                except Exception as exc:
+                    log.debug("history send failed: %s", exc)
 
-        Pongs are 14 bytes and the WS frame is atomic at the protocol
-        layer (no fragmentation), so they don't need to serialise
-        against PTY / TTS sends. Without this bypass a slow chunk send
-        holding send_lock can hold the pong past the client's 45s
-        stale-check, forcing a spurious reconnect of an otherwise-
-        healthy socket.
-        """
+        # Tell the client we're past the slow part of setup. Used as the
+        # signal to fire the first latency-measuring ping — pinging any
+        # earlier (e.g. at hello, which is sent BEFORE the history-bytes
+        # blob) means the ping queues server-side behind the history send
+        # and the round-trip reflects setup time, not network RTT. By the
+        # time stream_ready lands the server is one statement away from the
+        # main receive() loop and a ping pongs back at network speed.
+        await self.send_json({"type": "stream_ready"})
+
+        await self._start_pty(cols, rows)
+        self.pty_task = asyncio.create_task(self._pty_lifecycle())
         try:
-            await websocket.send_json({"type": "pong"})
+            # Any non-resize messages we drained while waiting for the
+            # initial resize are applied now that the relay exists (inside
+            # the try so a malformed one can't skip the teardown in finally).
+            for msg in leftover:
+                _handle_client_text(msg, self.pty_proc, self.session)
+            await self._receive_loop()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            log.exception("ws handler error")
+        finally:
+            await self._teardown()
+
+    async def _ensure_session(self) -> bool:
+        """Auto-create the session if it doesn't exist yet. If it's a KNOWN
+        STICKY session (killed, or vanished some time after the startup
+        restore ran), respawn it in its stored cwd with the restore command —
+        otherwise we'd silently recreate it in $HOME, which is the "after a
+        reboot ccpipe lands in /home" bug. Non-sticky names have no stored
+        cwd and keep the default. Returns False if the socket was refused."""
+        if await tmux.session_exists(self.session):
             return True
-        except Exception as exc:
-            log.debug("send_pong failed: %s", exc)
+        from . import sticky as _sticky
+        entry = _sticky.load().get(self.session)
+        if entry and entry.get("cwd"):
+            await tmux.create_session(
+                self.session, command=_sticky.build_restore_command(), cwd=entry["cwd"])
+        elif await tmux.at_session_cap():
+            await self.ws.close(code=1013, reason="session limit reached")
             return False
+        else:
+            # Same $SHELL -i wrapper as POST /api/sessions, so the session
+            # survives claude exiting instead of vanishing with it.
+            await tmux.create_session(self.session, command=tmux.wrap_in_shell("claude"))
+        return True
 
-    async def send_text(text: str) -> bool:
-        async with send_lock:
-            try:
-                await websocket.send_text(text)
-                return True
-            except Exception as exc:
-                log.debug("send_text failed: %s", exc)
-                return False
-
-    async def forward_pty_to_ws(data: bytes) -> None:
-        # Send PTY bytes as a WS binary frame so xterm receives raw UTF-8
-        # without a decode/encode roundtrip. Crucially this also avoids
-        # corrupting multi-byte codepoints split across 64 KiB read
-        # boundaries (which `bytes.decode(errors="replace")` would mangle).
-        # Prefixed with FRAME_PTY_OUTPUT so a PTY chunk that happens to
-        # start with FRAME_TTS_AUDIO (0x02 = Ctrl-B in normal terminal
-        # output) doesn't get misclassified as an audio chunk on the
-        # client side.
-        #
-        # If send_bytes raises (WS disconnected, transport stall, etc.)
-        # we re-raise so pump() exits and _pty_lifecycle cleanly closes
-        # the WS. Without re-raising, the previous DEBUG-level swallow
-        # silently leaked PTY bytes from xterm whenever the WS hiccupped
-        # — they'd never make it to the client's buffer but would still
-        # be in tmux's pane, producing the "gap until I refresh and
-        # capture-pane recovers them" symptom. Re-raising trades a
-        # warning + a reconnect for guaranteed eventual consistency.
-        counters.bytes_read_pty += len(data)
-        async with send_lock:
-            try:
-                await websocket.send_bytes(bytes([FRAME_PTY_OUTPUT]) + data)
-                counters.bytes_sent_ws += len(data)
-                counters.frames_forwarded += 1
-            except Exception as exc:
-                counters.send_failures += 1
-                counters.bytes_lost += len(data)
-                log.warning("send_bytes(pty) failed (%d bytes lost from this "
-                            "ws; client should reconnect and re-capture pane): %s",
-                            len(data), exc)
-                raise
-
-    # Subscribe to control-mode events; forward to this WS as JSON.
-    async def on_tmux_event(event: TmuxEvent) -> None:
-        if event.name == "sessions-changed":
-            if not await tmux.session_exists(session):
-                await send_json({"type": "session_gone", "session": session})
-                return
-        await send_json({
-            "type": "session_event",
-            "event": event.name,
-            "args": event.args,
+    async def _send_hello(self) -> None:
+        # Best-effort: try to open the mic pipe now so the hello message can
+        # advertise voice capability accurately.
+        voice_available = _mic_writer.write(b"")  # zero-length write probes the FD
+        # Resolve the tmux session's working directory so the client can
+        # default file/directory-browse dialogs to the project root the user
+        # is actually working in, rather than the fs jail root (typically
+        # $HOME). Best-effort: session_cwd may return None if tmux's pane
+        # query failed; client falls back to the fs config root in that case.
+        session_cwd_value = await tmux.session_cwd(self.session)
+        await self.ws.send_json({
+            "type": "hello",
+            "session": self.session,
+            "cwd": session_cwd_value,
+            "tts": tts_service.enabled,
+            "voice": voice_available,
         })
 
-    async def send_binary(prefix: int, payload: bytes) -> bool:
-        async with send_lock:
-            try:
-                await websocket.send_bytes(bytes([prefix]) + payload)
-                return True
-            except Exception as exc:
-                log.debug("send_bytes failed: %s", exc)
-                return False
+    def _register(self, tts_filter: Any) -> None:
+        """Hook this connection into module-level state. No awaits: nothing
+        between here and _start_pty's failure branch / the teardown in run()
+        can leave these registered."""
+        _active_counters.append(self.counters)
+        # Register for credential-rotation / logout kicks (M2).
+        _live_ws.add(self.ws)
+        # Subscribe to control-mode events; forward to this WS as JSON.
+        self.tmux_sub = control_client.subscribe(self._on_tmux_event)
+        self.tts_sub = tts_service.subscribe(
+            on_start=self._on_tts_start, on_chunk=self._on_tts_chunk,
+            on_end=self._on_tts_end, content_filter=tts_filter,
+        )
 
-    # The first failed send proves the WS is no longer reachable; we set
-    # this flag so subsequent callbacks short-circuit instead of forcing
-    # asyncio + httpx to keep streaming Kokoro chunks into a dead socket.
-    # tts_sub.cancel() (below) is also called, which removes this fan-out
-    # target from the next utterance entirely.
-    ws_alive = True
+    def _unregister(self) -> None:
+        with contextlib.suppress(ValueError):
+            _active_counters.remove(self.counters)
+        _live_ws.discard(self.ws)
+        self.tmux_sub.cancel()
+        self.tts_sub.cancel()
 
-    async def on_tts_start(text: str) -> None:
-        nonlocal ws_alive
-        if not ws_alive:
-            return
-        # Send up to 4000 chars so the frontend has enough text to send
-        # to /api/tts/speak for the "replay last response" pill. Longer
-        # utterances get truncated, replay won't capture the full thing
-        # in that case — Kokoro's own input limit is around the same.
-        if not await send_json({"type": "tts_start", "text": text[:4000]}):
-            ws_alive = False
-            tts_sub.cancel()
+    async def _start_pty(self, cols: int, rows: int) -> None:
+        # ── Commit zone ──────────────────────────────────────────────────
+        # Spawn the relay HERE, after every fallible handshake await. From
+        # this point to the receive loop's `try` in run() there is no await
+        # that can raise-and-escape, so once the `tmux attach-session` child
+        # exists it is guaranteed to be reaped by run()'s finally
+        # (pty_proc.terminate()). See the NOTE in run().
+        self.pty_proc = PtyProcess(tmux.attach_argv(self.session), env=tmux.tmux_env(),
+                                   cols=cols, rows=rows)
+        try:
+            await self.pty_proc.start()
+        except BaseException:
+            # start() itself failed (fork/exec — likely under memory
+            # pressure) — reap any half-spawned child and undo the
+            # registrations before propagating, since the teardown in run()
+            # is not yet active. Without this each failure leaked its
+            # counters, its _live_ws entry and a tmux subscription that keeps
+            # re-checking session existence on every sessions-changed event.
+            with contextlib.suppress(Exception):
+                await self.pty_proc.terminate()
+            self._unregister()
+            raise
 
-    async def on_tts_chunk(chunk: bytes) -> None:
-        nonlocal ws_alive
-        if not ws_alive:
-            return
-        if not await send_binary(FRAME_TTS_AUDIO, chunk):
-            ws_alive = False
-            tts_sub.cancel()
-
-    async def on_tts_end() -> None:
-        nonlocal ws_alive
-        if not ws_alive:
-            return
-        if not await send_json({"type": "tts_end"}):
-            ws_alive = False
-            tts_sub.cancel()
-
-    tmux_sub = control_client.subscribe(on_tmux_event)
-    tts_sub = tts_service.subscribe(
-        on_start=on_tts_start, on_chunk=on_tts_chunk, on_end=on_tts_end,
-        content_filter=tts_filter,
-    )
-
-    # Send any captured history before the live pump starts. xterm.js
-    # writes these bytes into its scrollback; tmux attach's incoming
-    # redraw will then paint the current visible pane on top. Prefixed
-    # with FRAME_PTY_OUTPUT so the client dispatches it through the
-    # same PTY pipeline as live output.
-    if history_bytes:
-        async with send_lock:
-            try:
-                await websocket.send_bytes(bytes([FRAME_PTY_OUTPUT]) + history_bytes)
-            except Exception as exc:
-                log.debug("history send failed: %s", exc)
-
-    # Tell the client we're past the slow part of setup. Used as the
-    # signal to fire the first latency-measuring ping — pinging any
-    # earlier (e.g. at hello, which is sent BEFORE the history-bytes
-    # blob) means the ping queues server-side behind the history send
-    # and the round-trip reflects setup time, not network RTT. By the
-    # time stream_ready lands the server is one statement away from
-    # the main receive() loop and a ping pongs back at network speed.
-    await send_json({"type": "stream_ready"})
-
-    async def _pty_lifecycle() -> None:
-        """Run the PTY pump; on EOF, surface the exit to the client and
-        close the WS so the receive loop below unblocks.
+    async def _pty_lifecycle(self) -> None:
+        """Run the PTY pump; on EOF, surface the exit to the client and close
+        the WS so the receive loop unblocks.
 
         Without this the receive loop would keep awaiting messages and
-        pty_proc.write() would silently no-op, leaving the WS as a
-        zombie until the client disconnects.
+        pty_proc.write() would silently no-op, leaving the WS as a zombie
+        until the client disconnects.
 
         Post-pump sends are guarded with suppress(CancelledError) so the
-        client still learns the PTY exited even if the outer handler's
-        finally is cancelling us concurrently (e.g. server shutdown
-        racing PTY EOF). Without that, the client would see a silent WS
-        close and have to infer the exit from reconnect failure.
+        client still learns the PTY exited even if teardown is cancelling us
+        concurrently (e.g. server shutdown racing PTY EOF). Without that, the
+        client would see a silent WS close and have to infer the exit from
+        reconnect failure.
         """
         try:
-            await pump(pty_proc, forward_pty_to_ws)
+            await pump(self.pty_proc, self.forward_pty_to_ws)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("pty pump failed")
         with contextlib.suppress(asyncio.CancelledError):
             try:
-                await send_json({"type": "pty_exited"})
+                await self.send_json({"type": "pty_exited"})
             except Exception:
                 pass
             try:
-                await websocket.close(code=1000, reason="pty exited")
+                await self.ws.close(code=1000, reason="pty exited")
             except Exception:
                 pass
 
-    # ── Commit zone ──────────────────────────────────────────────────
-    # Spawn the relay HERE, after every fallible handshake await above.
-    # From this point to the receive loop's `try` below there is no await
-    # that can raise-and-escape, so once the `tmux attach-session` child
-    # exists it is guaranteed to be reaped by that loop's finally
-    # (pty_proc.terminate()). See the NOTE near _capture_session_history.
-    pty_proc = PtyProcess(tmux.attach_argv(session), env=tmux.tmux_env(),
-                          cols=initial_cols, rows=initial_rows)
-    try:
-        await pty_proc.start()
-    except BaseException:
-        # start() itself failed (fork/exec — likely under memory pressure)
-        # — reap any half-spawned child and undo the registrations made
-        # above before propagating, since the finally below is not yet
-        # active. Without this each failure leaked its counters, its
-        # _live_ws entry and a tmux subscription that keeps spawning a
-        # has-session probe on every sessions-changed event.
-        with contextlib.suppress(Exception):
-            await pty_proc.terminate()
-        with contextlib.suppress(ValueError):
-            _active_counters.remove(counters)
-        _live_ws.discard(websocket)
-        tmux_sub.cancel()
-        tts_sub.cancel()
-        raise
-
-    pty_task = asyncio.create_task(_pty_lifecycle())
-    mic_limiter = _MicRateLimiter()
-    # Per-WS opaque token used to claim the mic singleton on first use.
-    mic_token: object = object()
-    # In-flight PTT-release tasks scheduled by mic_stop. Tracked so we
-    # can cancel them in `finally`: without this, a fast disconnect
-    # right after mic_stop leaves the sleeping release task as the
-    # last reference to its closure; when it fires (~drain_pad_ms
-    # later) it writes Esc k into pty_proc, which on a re-attached
-    # session is a different mic-token's pty (same name, same pty
-    # because tmux sessions persist) and aborts the new voice
-    # interaction.
-    pending_releases: set[asyncio.Task[None]] = set()
-
-    try:
-        # Any non-resize messages we drained while waiting for the initial
-        # resize are applied now that the relay exists (inside the try so a
-        # malformed one can't skip the teardown in finally).
-        for msg in leftover:
-            _handle_client_text(msg, pty_proc, session)
-        while True:
-            msg = await websocket.receive()
-            if msg.get("type") == "websocket.disconnect":
-                disconnect_code = msg.get("code")
-                break
-            if (text := msg.get("text")) is not None:
-                # Per-frame size cap. Frontend chunks input at 4 KiB
-                # and control messages are tiny, so 64 KiB is well
-                # above legitimate traffic. A hijacked page streaming
-                # unbounded JSON would otherwise hit the substring
-                # sniffs + full json.loads on every keystroke-sized
-                # frame. The downstream pty_relay write buffer is
-                # the real backpressure for sustained streaming —
-                # we don't also impose a sliding-window byte budget
-                # because that silently truncates large pastes.
-                tlen = len(text.encode("utf-8"))
-                if tlen > _TEXT_FRAME_MAX_BYTES:
-                    log.warning("oversized text frame (%d > %d bytes); dropping",
-                                tlen, _TEXT_FRAME_MAX_BYTES)
-                    continue
-                # Intercept "ping" first so we can reply pong from this
-                # scope where send_json is available. The pong lets the
-                # frontend detect dead-but-not-yet-closed sockets after
-                # Android tab-freeze: it expects a pong (or any server
-                # message) within ~45s of its keepalive ping; absence
-                # forces a reconnect.
-                if _is_ping(text):
-                    # Re-check the session on every ping. authorize_websocket
-                    # only fires at connect, so without this an open WS would
-                    # survive a credential bump (password change, TOTP
-                    # disable, "sign out everywhere"). Closing with 1008
-                    # tells the frontend it must re-authenticate.
-                    if not _is_session_still_authed(websocket):
-                        log.info("ws closed mid-stream: session no longer authorized")
-                        await websocket.close(code=1008, reason="session revoked")
-                        break
-                    # DIAG: measure how long the server spends between
-                    # observing the ping and getting the pong onto the
-                    # WS. If this is consistently <1ms but clients report
-                    # 20ms RTT, the delay is on the network / radio side.
-                    # If this matches the client-reported delta, it's
-                    # send_lock contention with the live PTY pump (and
-                    # the fix is to bypass / prioritise pong sends).
-                    _ping_t0 = time.monotonic()
-                    await send_pong_unlocked()
-                    _ping_dt_ms = (time.monotonic() - _ping_t0) * 1000
-                    log.debug("ping→pong: %.1fms (session=%s frames=%d)",
-                              _ping_dt_ms, session, counters.frames_forwarded)
-                    continue
-                # Mute state mirror: the client tells us when the user
-                # toggles TTS, so we can skip the Kokoro round-trip
-                # while nobody's listening. Cheap dispatch — no JSON
-                # parse on the hot input path.
-                if _is_control_frame(text, '"type":"tts_mute"', '"type": "tts_mute"'):
-                    try:
-                        payload = _safe_json_loads(text)
-                        tts_sub.muted = bool(payload.get("value"))
-                    except Exception:
-                        pass
-                    continue
-                # mic_stop: the client has torn down its mic and wants
-                # claude's /voice push-to-talk released. We CAN'T just
-                # forward the release keystroke immediately because
-                # audio captured in the last ~few-hundred-ms is still
-                # in flight through the pipe → Pulse → claude STT, and
-                # claude's STT itself needs another ~1-2s to finalise
-                # transcription. So we estimate the pipeline drain
-                # based on bytes-written stats from _mic_writer, add
-                # the configured pad, and write the release keystroke
-                # to the PTY ourselves after waiting that long. The
-                # client is no longer involved in the release timing.
-                if _is_control_frame(text, '"type":"mic_stop"', '"type": "mic_stop"'):
-                    if _mic_owner is mic_token:
-                        if sys.platform == "darwin":
-                            # macOS: no Pulse pipeline to drain. The
-                            # MicTranscriber holds the entire utterance
-                            # in memory; hand it off to whisper-cpp
-                            # asynchronously and let it type the result
-                            # into the PTY when transcription finishes.
-                            # Fire-and-forget so the WS receive loop
-                            # stays responsive; whisper is ~real-time
-                            # on Apple Silicon (1-2 s for short
-                            # utterances on base.en).
-                            log.info(
-                                "mic_stop: bytes=%d drops=%d → local transcribe",
-                                _mic_writer.bytes_written, _mic_writer.drops,
-                            )
-                            asyncio.create_task(_mic_writer.finalize(pty_proc))  # type: ignore[attr-defined]
-                            _mic_owner = None
-                        else:
-                            # Linux: drain Pulse, wait the configured
-                            # pad for claude's STT to finalise, then
-                            # write the release keystroke. Use a local
-                            # module reference so reload-during-dev
-                            # (importlib.reload) picks up edits.
-                            from . import config as _app_config
-                            cfg = _app_config.load().mic
-                            drain_s = _mic_writer.estimate_drain_seconds()
-                            pad_s = cfg.drain_pad_ms / 1000.0
-                            total = drain_s + pad_s
-                            log.info(
-                                "mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs",
-                                _mic_writer.bytes_written,
-                                _mic_writer.drops, drain_s, pad_s, total,
-                            )
-                            _mic_writer.reset()
-                            _mic_owner = None
-                            # M3: cancel any prior pending release from
-                            # this same handler before scheduling a new
-                            # one. Without this, a rapid mic_start →
-                            # mic_stop → mic_start → mic_stop sequence
-                            # leaves the first release task in flight
-                            # — its Esc k fires mid-second-recording's
-                            # drain and toggles claude /voice at the
-                            # wrong time. At most one release per WS is
-                            # ever meaningful; older ones are stale.
-                            for old in list(pending_releases):
-                                old.cancel()
-                            pending_releases.clear()
-                            # Track the release task so the `finally`
-                            # block can cancel it on disconnect, and
-                            # only write Esc k if no other handler has
-                            # claimed the mic in the meantime. We
-                            # capture mic_token in the lambda's default
-                            # arg so the closure binds it at scheduling
-                            # time — gating on `_mic_owner is None or
-                            # _mic_owner is mt` lets a re-record from
-                            # the SAME handler still get its drain-end
-                            # release fired, while a swap to a different
-                            # owner correctly suppresses the write.
-                            rel_task = asyncio.create_task(
-                                _release_ptt_after(
-                                    pty_proc, total,
-                                    still_authoritative=(
-                                        lambda mt=mic_token: (
-                                            _mic_owner is None or _mic_owner is mt
-                                        )
-                                    ),
-                                )
-                            )
-                            pending_releases.add(rel_task)
-                            rel_task.add_done_callback(pending_releases.discard)
-                    continue
-                # Re-check the session on every non-intercepted text
-                # frame (typically `input`). Without this, a credential
-                # bump (password change, TOTP toggle) only takes effect
-                # on the next 30 s keepalive ping — meaning an attacker
-                # holding an authenticated WS could keep typing into
-                # the PTY for up to one keepalive cycle after the
-                # operator clicked "sign out everywhere". The check is
-                # an in-memory dict lookup + int compare; trivial.
-                if not _is_session_still_authed(websocket):
-                    log.info("ws closed mid-stream: session no longer authorized (input)")
-                    await websocket.close(code=1008, reason="session revoked")
-                    break
-                _handle_client_text(text, pty_proc, session)
-            elif (data := msg.get("bytes")) is not None:
-                # Same revoked-credential gate as for text frames — a
-                # session whose cred_version has bumped should stop
-                # being able to push mic PCM into the FIFO too.
-                if not _is_session_still_authed(websocket):
-                    log.info("ws closed mid-stream: session no longer authorized (binary)")
-                    await websocket.close(code=1008, reason="session revoked")
-                    break
-                _handle_client_binary(data, pty_proc, mic_limiter, mic_token)
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        log.exception("ws handler error")
-    finally:
-        # Always emit byte-flow counters on close — this is the
-        # diagnostic anchor for "did we lose any PTY bytes on this
-        # connection". Lost-byte / send-failure counts being > 0 means
-        # forward_pty_to_ws raised at least once (typically a transient
-        # WS stall) and the client should have reconnected to recover
-        # via capture-pane replay. Search the journal for "ws closed:".
-        # Fold in any chunks that pty_relay's bounded read queue had
-        # to drop (saturated by a stalled WS pump). These bytes WERE
-        # read off the master fd, so they count toward bytes_read_pty
-        # as well as bytes_lost — otherwise the documented invariant
-        # `bytes_read_pty == bytes_sent_ws + bytes_lost` (debug.py +
-        # test_ws_byte_accounting) is false precisely in the loss case
-        # it exists to detect.
+    async def _teardown(self) -> None:
+        global _mic_owner
+        counters, pty_proc = self.counters, self.pty_proc
+        # Always emit byte-flow counters on close — this is the diagnostic
+        # anchor for "did we lose any PTY bytes on this connection".
+        # Lost-byte / send-failure counts being > 0 means forward_pty_to_ws
+        # raised at least once (typically a transient WS stall) and the
+        # client should have reconnected to recover via capture-pane replay.
+        # Search the journal for "ws closed:". Fold in any chunks the relay
+        # had to drop (it now applies backpressure instead, so this should
+        # stay 0): they count toward bytes_read_pty as well as bytes_lost —
+        # otherwise the documented invariant `bytes_read_pty == bytes_sent_ws
+        # + bytes_lost` (debug.py + test_ws_byte_accounting) would be false
+        # precisely in the loss case it exists to detect.
         try:
             dropped = pty_proc.bytes_dropped()
             counters.bytes_lost += dropped
@@ -788,31 +571,24 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
             "close_code=%s",
             counters.session, duration, counters.frames_forwarded,
             counters.bytes_read_pty, counters.bytes_sent_ws,
-            counters.bytes_lost, counters.send_failures, disconnect_code,
+            counters.bytes_lost, counters.send_failures, self.disconnect_code,
         )
-        try:
-            _active_counters.remove(counters)
-        except ValueError:
-            pass
-        _live_ws.discard(websocket)
         # Release the mic if this WS was the owner so the next connection
         # can claim it.
-        if _mic_owner is mic_token:
+        if _mic_owner is self.mic_token:
             _mic_owner = None
-        # Cancel any in-flight PTT-release tasks. Without this they hold
-        # a ref to pty_proc through their closure and fire after the
-        # WS is gone, writing Esc k into the pty — which on a tmux
-        # session that's been re-attached aborts the new client's
-        # /voice interaction (see C2 comment above pending_releases).
-        for rel_task in list(pending_releases):
+        # Cancel any in-flight PTT-release tasks. Without this they hold a
+        # ref to pty_proc and fire after the WS is gone, writing Esc k into
+        # the pty — which on a tmux session that's been re-attached aborts
+        # the new client's /voice interaction (see pending_releases).
+        for rel_task in list(self.pending_releases):
             rel_task.cancel()
-        tmux_sub.cancel()
-        tts_sub.cancel()
-        pty_task.cancel()
-        # Await pump cancellation BEFORE tearing down the PTY so a
-        # pending send_text/send_bytes doesn't race with the socket close.
+        self._unregister()
+        self.pty_task.cancel()
+        # Await pump cancellation BEFORE tearing down the PTY so a pending
+        # send_text/send_bytes doesn't race with the socket close.
         try:
-            await asyncio.wait_for(pty_task, timeout=2.0)
+            await asyncio.wait_for(self.pty_task, timeout=2.0)
         except asyncio.TimeoutError:
             # pump didn't honour cancellation within 2s — likely stuck in a
             # send on a wedged transport. terminate()'s fd-identity guards
@@ -827,9 +603,257 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         except Exception:
             log.exception("pty terminate failed")
         try:
-            await websocket.close()
+            await self.ws.close()
         except Exception:
             pass
+
+    # ── receive side ───────────────────────────────────────────────────
+    async def _receive_loop(self) -> None:
+        while True:
+            msg = await self.ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                self.disconnect_code = msg.get("code")
+                return
+            if (text := msg.get("text")) is not None:
+                if not await self._on_text(text):
+                    return
+            elif (data := msg.get("bytes")) is not None:
+                # Same revoked-credential gate as for text frames — a session
+                # that's been revoked or whose cred_version has bumped should
+                # stop being able to push mic PCM into the FIFO too.
+                if not await self._still_authed("binary"):
+                    return
+                _handle_client_binary(data, self.pty_proc, self.mic_limiter, self.mic_token)
+
+    async def _still_authed(self, what: str) -> bool:
+        """Re-check the session on incoming frames. authorize_websocket only
+        fires at connect, so without this an open WS would survive a logout,
+        a credential bump (password change, TOTP toggle) or "sign out
+        everywhere" — an attacker holding an authenticated WS could keep
+        typing into the PTY. The check is an in-memory lookup; trivial.
+        Closing with 1008 tells the frontend it must re-authenticate."""
+        if _is_session_still_authed(self.ws):
+            return True
+        log.info("ws closed mid-stream: session no longer authorized (%s)", what)
+        await self.ws.close(code=1008, reason="session revoked")
+        return False
+
+    async def _on_text(self, text: str) -> bool:
+        """Handle one text frame. Returns False when the loop must stop."""
+        # Per-frame size cap. Frontend chunks input at 4 KiB and control
+        # messages are tiny, so 64 KiB is well above legitimate traffic. A
+        # hijacked page streaming unbounded JSON would otherwise hit the
+        # substring sniffs + full json.loads on every keystroke-sized frame.
+        # The downstream pty_relay write buffer is the real backpressure for
+        # sustained streaming — we don't also impose a sliding-window byte
+        # budget because that silently truncates large pastes.
+        tlen = len(text.encode("utf-8"))
+        if tlen > _TEXT_FRAME_MAX_BYTES:
+            _warn_limited("oversized", "oversized text frame (%d > %d bytes); dropping",
+                          tlen, _TEXT_FRAME_MAX_BYTES)
+            return True
+        # Intercept "ping" first so we can reply pong from here. The pong
+        # lets the frontend detect dead-but-not-yet-closed sockets after
+        # Android tab-freeze: it expects a pong (or any server message)
+        # within ~45s of its keepalive ping; absence forces a reconnect.
+        if _is_ping(text):
+            if not await self._still_authed("ping"):
+                return False
+            # DIAG: measure how long the server spends between observing the
+            # ping and getting the pong onto the WS. If this is consistently
+            # <1ms but clients report 20ms RTT, the delay is on the network /
+            # radio side. If this matches the client-reported delta, it's
+            # send_lock contention with the live PTY pump (and the fix is to
+            # bypass / prioritise pong sends).
+            t0 = time.monotonic()
+            await self.send_pong_unlocked()
+            log.debug("ping→pong: %.1fms (session=%s frames=%d)",
+                      (time.monotonic() - t0) * 1000, self.session,
+                      self.counters.frames_forwarded)
+            return True
+        # Mute state mirror: the client tells us when the user toggles TTS,
+        # so we can skip the Kokoro round-trip while nobody's listening.
+        # Cheap dispatch — no JSON parse on the hot input path.
+        if _is_control_frame(text, '"type":"tts_mute"', '"type": "tts_mute"'):
+            try:
+                payload = _safe_json_loads(text)
+                self.tts_sub.muted = bool(payload.get("value"))
+            except Exception:
+                pass
+            return True
+        if _is_control_frame(text, '"type":"mic_stop"', '"type": "mic_stop"'):
+            self._on_mic_stop()
+            return True
+        if not await self._still_authed("input"):
+            return False
+        _handle_client_text(text, self.pty_proc, self.session)
+        return True
+
+    def _on_mic_stop(self) -> None:
+        """The client has torn down its mic and wants claude's /voice
+        push-to-talk released. We CAN'T just forward the release keystroke
+        immediately because audio captured in the last ~few-hundred-ms is
+        still in flight through the pipe → Pulse → claude STT, and claude's
+        STT itself needs another ~1-2s to finalise transcription. So we
+        estimate the pipeline drain based on bytes-written stats from
+        _mic_writer, add the configured pad, and write the release keystroke
+        to the PTY ourselves after waiting that long. The client is no
+        longer involved in the release timing."""
+        global _mic_owner
+        if _mic_owner is not self.mic_token:
+            return
+        if sys.platform == "darwin":
+            # macOS: no Pulse pipeline to drain. The MicTranscriber holds the
+            # entire utterance in memory; hand it off to whisper-cpp
+            # asynchronously and let it type the result into the PTY when
+            # transcription finishes. Fire-and-forget so the WS receive loop
+            # stays responsive; whisper is ~real-time on Apple Silicon (1-2 s
+            # for short utterances on base.en).
+            log.info("mic_stop: bytes=%d drops=%d → local transcribe",
+                     _mic_writer.bytes_written, _mic_writer.drops)
+            asyncio.create_task(_mic_writer.finalize(self.pty_proc))  # type: ignore[attr-defined]
+            _mic_owner = None
+            return
+        # Linux: drain Pulse, wait the configured pad for claude's STT to
+        # finalise, then write the release keystroke. Use a local module
+        # reference so reload-during-dev (importlib.reload) picks up edits.
+        from . import config as _app_config
+        cfg = _app_config.load().mic
+        drain_s = _mic_writer.estimate_drain_seconds()
+        pad_s = cfg.drain_pad_ms / 1000.0
+        total = drain_s + pad_s
+        log.info("mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs",
+                 _mic_writer.bytes_written, _mic_writer.drops, drain_s, pad_s, total)
+        _mic_writer.reset()
+        _mic_owner = None
+        # M3: cancel any prior pending release from this same handler before
+        # scheduling a new one. Without this, a rapid mic_start → mic_stop →
+        # mic_start → mic_stop sequence leaves the first release task in
+        # flight — its Esc k fires mid-second-recording's drain and toggles
+        # claude /voice at the wrong time. At most one release per WS is ever
+        # meaningful; older ones are stale.
+        for old in list(self.pending_releases):
+            old.cancel()
+        self.pending_releases.clear()
+        # Track the release task so teardown can cancel it on disconnect,
+        # and only write Esc k if no other handler has claimed the mic in the
+        # meantime. The lambda's default arg binds mic_token at scheduling
+        # time — gating on `_mic_owner is None or _mic_owner is mt` lets a
+        # re-record from the SAME handler still get its drain-end release
+        # fired, while a swap to a different owner correctly suppresses it.
+        rel_task = asyncio.create_task(_release_ptt_after(
+            self.pty_proc, total,
+            still_authoritative=(lambda mt=self.mic_token: _mic_owner is None or _mic_owner is mt),
+        ))
+        self.pending_releases.add(rel_task)
+        rel_task.add_done_callback(self.pending_releases.discard)
+
+    # ── send side ──────────────────────────────────────────────────────
+    async def send_json(self, msg: dict) -> bool:
+        async with self.send_lock:
+            try:
+                await self.ws.send_json(msg)
+                return True
+            except Exception as exc:
+                log.debug("send_json failed: %s", exc)
+                return False
+
+    async def send_pong_unlocked(self) -> bool:
+        """Send a pong WITHOUT acquiring send_lock.
+
+        Pongs are 14 bytes and the WS frame is atomic at the protocol layer
+        (no fragmentation), so they don't need to serialise against PTY /
+        TTS sends. Without this bypass a slow chunk send holding send_lock
+        can hold the pong past the client's 45s stale-check, forcing a
+        spurious reconnect of an otherwise-healthy socket.
+        """
+        try:
+            await self.ws.send_json({"type": "pong"})
+            return True
+        except Exception as exc:
+            log.debug("send_pong failed: %s", exc)
+            return False
+
+    async def send_binary(self, prefix: int, payload: bytes) -> bool:
+        async with self.send_lock:
+            try:
+                await self.ws.send_bytes(bytes([prefix]) + payload)
+                return True
+            except Exception as exc:
+                log.debug("send_bytes failed: %s", exc)
+                return False
+
+    async def forward_pty_to_ws(self, data: bytes) -> None:
+        # Send PTY bytes as a WS binary frame so xterm receives raw UTF-8
+        # without a decode/encode roundtrip. Crucially this also avoids
+        # corrupting multi-byte codepoints split across 64 KiB read
+        # boundaries (which `bytes.decode(errors="replace")` would mangle).
+        # Prefixed with FRAME_PTY_OUTPUT so a PTY chunk that happens to
+        # start with FRAME_TTS_AUDIO (0x02 = Ctrl-B in normal terminal
+        # output) doesn't get misclassified as an audio chunk on the client.
+        #
+        # If send_bytes raises (WS disconnected, transport stall, etc.) we
+        # re-raise so pump() exits and _pty_lifecycle cleanly closes the WS.
+        # Swallowing it silently leaked PTY bytes from xterm whenever the WS
+        # hiccupped — they'd never reach the client's buffer but would still
+        # be in tmux's pane, producing the "gap until I refresh and
+        # capture-pane recovers them" symptom. Re-raising trades a warning +
+        # a reconnect for guaranteed eventual consistency.
+        counters = self.counters
+        counters.bytes_read_pty += len(data)
+        async with self.send_lock:
+            try:
+                await self.ws.send_bytes(bytes([FRAME_PTY_OUTPUT]) + data)
+                counters.bytes_sent_ws += len(data)
+                counters.frames_forwarded += 1
+            except Exception as exc:
+                counters.send_failures += 1
+                counters.bytes_lost += len(data)
+                log.warning("send_bytes(pty) failed (%d bytes lost from this "
+                            "ws; client should reconnect and re-capture pane): %s",
+                            len(data), exc)
+                raise
+
+    # ── fan-in from tmux control mode and TTS ─────────────────────────
+    async def _on_tmux_event(self, event: TmuxEvent) -> None:
+        if event.name == "sessions-changed":
+            # list_sessions() is cached briefly behind a lock, so every
+            # connected tab checking at once shares ONE tmux call instead of
+            # spawning a has-session subprocess each.
+            if self.session not in {s.name for s in await tmux.list_sessions()}:
+                await self.send_json({"type": "session_gone", "session": self.session})
+                return
+        await self.send_json({
+            "type": "session_event",
+            "event": event.name,
+            "args": event.args,
+        })
+
+    async def _on_tts_start(self, text: str) -> None:
+        if not self.alive:
+            return
+        # Send up to 4000 chars so the frontend has enough text to send to
+        # /api/tts/speak for the "replay last response" pill. Longer
+        # utterances get truncated, replay won't capture the full thing in
+        # that case — Kokoro's own input limit is around the same.
+        if not await self.send_json({"type": "tts_start", "text": text[:4000]}):
+            self._tts_dead()
+
+    async def _on_tts_chunk(self, chunk: bytes) -> None:
+        if not self.alive:
+            return
+        if not await self.send_binary(FRAME_TTS_AUDIO, chunk):
+            self._tts_dead()
+
+    async def _on_tts_end(self) -> None:
+        if not self.alive:
+            return
+        if not await self.send_json({"type": "tts_end"}):
+            self._tts_dead()
+
+    def _tts_dead(self) -> None:
+        self.alive = False
+        self.tts_sub.cancel()
 
 
 # Time budget for the client to send its initial 'resize' message before we
@@ -986,9 +1010,12 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
         )
     except FileNotFoundError:
         return b""
+    assert proc.stdout is not None
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(),
-                                         timeout=_HISTORY_CAPTURE_TIMEOUT_S)
+        out, cut = await asyncio.wait_for(
+            _read_tail(proc.stdout, _HISTORY_MAX_BYTES + _HISTORY_READ_SLACK),
+            timeout=_HISTORY_CAPTURE_TIMEOUT_S)
+        await asyncio.wait_for(proc.wait(), timeout=1.0)
     except asyncio.TimeoutError:
         # kill() then BOUNDED wait — bare proc.wait() can block
         # forever if the child is stuck in uninterruptible sleep,
@@ -1001,6 +1028,11 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
         return b""
     if proc.returncode != 0 or not out:
         return b""
+    if cut:
+        # The tail read started mid-line (possibly mid escape sequence);
+        # drop everything up to the first line break.
+        nl = out.find(b"\n")
+        out = out[nl + 1:] if nl != -1 else b""
     # tmux capture-pane joins lines with LF. xterm.js wants CRLF to start
     # a new line at column 0; otherwise lines stack on the right of the
     # previous one. Normalise (idempotent if already CRLF).
@@ -1025,18 +1057,37 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
         cut = len(normalised) - _HISTORY_MAX_BYTES
         nl = normalised.find(b"\r\n", cut)
         normalised = normalised[nl + 2:] if nl != -1 else normalised[cut:]
-    # Cache for the coalesce window. Periodic eviction of stale entries
-    # keeps the dict bounded — a session whose name is renamed/killed
-    # ages out within TTL; until then we just have one stale ~MB entry.
+    # Cache for the coalesce window, sweeping expired entries on every
+    # insert: each can hold up to _HISTORY_MAX_BYTES, and waiting for 64
+    # distinct names before sweeping kept several MB of stale captures
+    # (sessions attached once, then never again) alive indefinitely.
+    for k in [k for k, (t, _) in _history_cache.items() if now - t >= _HISTORY_CACHE_TTL_S]:
+        _history_cache.pop(k, None)
     _history_cache[session] = (now, normalised)
-    # Opportunistic GC: when the dict gets non-trivial, drop entries
-    # older than 10× the TTL. Avoids unbounded growth in long-running
-    # processes with many distinct session names over the lifetime.
-    if len(_history_cache) > 64:
-        cutoff = now - _HISTORY_CACHE_TTL_S * 10
-        for k in [k for k, (t, _) in _history_cache.items() if t < cutoff]:
-            _history_cache.pop(k, None)
     return normalised
+
+
+# Raw capture bytes kept beyond _HISTORY_MAX_BYTES while reading: CRLF
+# normalisation grows the blob, and the front is trimmed to a line boundary
+# afterwards, so keep some headroom rather than exactly the cap.
+_HISTORY_READ_SLACK = 1 << 20
+
+
+async def _read_tail(stream: asyncio.StreamReader, cap: int) -> tuple[bytes, bool]:
+    """Read *stream* to EOF keeping only the last *cap* bytes (the newest
+    lines — what history replay wants), so a huge capture never sits in
+    memory whole. Returns (tail, whether anything was cut from the front)."""
+    buf = bytearray()
+    cut = False
+    while chunk := await stream.read(65536):
+        buf += chunk
+        if len(buf) > 2 * cap:
+            del buf[:len(buf) - cap]
+            cut = True
+    if len(buf) > cap:
+        del buf[:len(buf) - cap]
+        cut = True
+    return bytes(buf), cut
 
 
 async def _wait_for_initial_resize(websocket: WebSocket, session: str
@@ -1086,7 +1137,7 @@ async def _wait_for_initial_resize(websocket: WebSocket, session: str
                 cols = _clamp_dim(int(parsed["cols"]))
                 rows = _clamp_dim(int(parsed["rows"]))
                 _remember_client_size(session, cols, rows)
-            except (KeyError, ValueError, TypeError):
+            except (KeyError, ValueError, TypeError, OverflowError):
                 pass
             return cols, rows, leftover
         if len(leftover) >= _LEFTOVER_MAX_ENTRIES:
@@ -1143,7 +1194,7 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
     try:
         msg = _safe_json_loads(text)
     except (json.JSONDecodeError, ValueError):
-        log.warning("non-JSON text frame: %r", text[:200])
+        _warn_limited("non-json", "non-JSON text frame: %r", text[:200])
         return
     match msg.get("type"):
         case "input":
@@ -1165,8 +1216,8 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
             try:
                 cols = _clamp_dim(int(msg.get("cols", 120)))
                 rows = _clamp_dim(int(msg.get("rows", 40)))
-            except (TypeError, ValueError):
-                return  # malformed resize, ignore
+            except (TypeError, ValueError, OverflowError):
+                return  # malformed resize (incl. 1e999 → inf), ignore
             pty_proc.resize(cols, rows)
             # Keep the per-session size cache fresh so a later reconnect
             # seeds from the current (possibly rotated) width, not a stale
@@ -1186,7 +1237,8 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
             # after connect); ping just won't get a pong this once.
             pass
         case _:
-            log.warning("unknown text message type: %r", msg.get("type"))
+            _warn_limited("unknown-type", "unknown text message type: %r",
+                          str(msg.get("type"))[:40])
 
 
 def _handle_client_binary(data: bytes, pty_proc: PtyProcess,
@@ -1198,7 +1250,7 @@ def _handle_client_binary(data: bytes, pty_proc: PtyProcess,
     if frame_type == FRAME_MIC_PCM:
         payload = data[1:]
         if len(payload) > _MIC_MAX_FRAME_BYTES:
-            log.warning("mic frame too large (%d bytes); dropping", len(payload))
+            _warn_limited("mic-big", "mic frame too large (%d bytes); dropping", len(payload))
             return
         if not limiter.allow(len(payload)):
             return  # over rate budget; silently drop
