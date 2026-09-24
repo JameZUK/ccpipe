@@ -254,25 +254,35 @@ proxy host.
   See https://code.claude.com/docs/en/legal-and-compliance.
 - **Always-on auth.** Passwords are argon2id-hashed on disk; the
   plaintext only ever exists in the read-once `initial_password.txt`
-  sidecar (`0400`). Optional TOTP under Settings → Account.
+  sidecar (`0400`). Optional TOTP under Settings → Account. Login is a
+  single request carrying password + code (the UI asks for them on two
+  screens; leave the code blank if TOTP isn't set up), with one uniform
+  error for any wrong part.
 - **Session hardening.** Signed session cookie with `Secure` +
-  `__Host-` prefix under `CCPIPE_BEHIND_TLS=1`; WebSocket Origin
-  allow-list; CSRF defence via `X-Requested-By: ccpipe`; per-WS pong
-  re-checks auth so credential changes close open sockets.
-- **Login throttling.** Per-IP 5/min + global 30/min sliding window
+  `__Host-` prefix under `CCPIPE_BEHIND_TLS=1`, expiring after 30 days
+  of disuse; logout revokes that login server-side and closes its
+  terminal sockets; Settings → Account → "sign out everywhere" ends
+  every session on every device. WebSocket Origin allow-list; CSRF
+  defence via `X-Requested-By: ccpipe`; open sockets are closed when
+  their session stops being valid (logout, password/TOTP change).
+- **Login throttling.** Per-IP 5/min + global 300/min sliding window
   with a 1 s sleep on failure. No persistent banning — fail2ban reading
   `journalctl --user -u ccpipe` is the conventional add-on.
 - **File panel scope.** `/api/fs/*` is jailed to `CCPIPE_FS_ROOT`
   (default `$HOME`). The jail enforces `Path.is_relative_to(root)`
   after symlink resolution, refuses non-regular files, and uses
-  `O_NOFOLLOW` on temp-file opens. Only ccpipe's own state dirs are
-  denylisted; `.ssh`, `.aws`, `.gnupg`, `.kube`, etc. remain reachable
-  because this is an admin tool.
+  `O_NOFOLLOW` on temp-file opens. Saves keep the file's permission
+  bits and write through symlinks only when the link's target also
+  passes the jail. The denylist covers only ccpipe's own state
+  (`~/.local/state/ccpipe`, `~/.config/ccpipe`) and Claude Code's
+  (`~/.claude`, `~/.claude.json`); `.ssh`, `.aws`, `.gnupg`, `.kube`,
+  etc. remain reachable because this is an admin tool.
 - **TTS reads your Claude transcripts.** Only run ccpipe on a host
   where you trust everyone with access to those files.
 - **0.0.0.0 bind.** Required for an off-host proxy; firewall `:8080`
-  accordingly. The startup banner reminds you when `CCPIPE_BEHIND_TLS=1`
-  is set.
+  to the proxy host (IPv6 too, if you bind `::` — see
+  [`docs/deployment.md`](docs/deployment.md)). The startup banner
+  reminds you when `CCPIPE_BEHIND_TLS=1` is set.
 
 Full design-level threat model in
 [`docs/threat-model.md`](docs/threat-model.md); vulnerability

@@ -9,7 +9,7 @@ All env vars are typically set via a systemd drop-in at
 | ------------------------- | ---------------------------------- | ----- |
 | `CCPIPE_FRONTEND_DIST`    | `/app/frontend`                    | Where to serve the Vite build from. The systemd unit points this at the in-repo `frontend/dist`. |
 | `CCPIPE_AUTH_USERNAME`    | system user                        | Login username. **Bootstrap-only:** consulted only when no credentials file exists yet. Once the file is written, changes happen in Settings → Account or by deleting the file. |
-| `CCPIPE_AUTH_PASSWORD`    | auto-generated                     | Bootstrap password. **Only consulted when no credentials file exists** — first start hashes it and persists it; from then on the file wins and env is ignored (with a one-shot log line). To re-seed, delete the credentials file and restart. Deleting also wipes any enrolled TOTP secret. |
+| `CCPIPE_AUTH_PASSWORD`    | auto-generated                     | Bootstrap password. **Only consulted when no credentials file exists** — first start hashes it and persists it; from then on the file wins and env is ignored (with a one-shot log line). To re-seed, delete the credentials file and restart. Deleting also wipes any enrolled TOTP secret. Once the credentials file exists, ccpipe removes this variable from its own process environment, and no `CCPIPE_*` variable is passed on to tmux panes. |
 | `CCPIPE_CREDENTIALS_FILE` | `~/.local/state/ccpipe/credentials`| JSON credential store (`0600`). |
 | `CCPIPE_SESSION_SECRET_FILE` | `~/.local/state/ccpipe/session_secret` | Random secret used to sign session cookies. Auto-generated on first run. |
 | `CCPIPE_BEHIND_TLS`       | (unset)                            | When `1`/`true`/`on`, cookies get `Secure` + `__Host-` prefix, HSTS is sent, `TrustedHostMiddleware` enables, and a startup banner reminds the operator to firewall `:8080` to the proxy IP. |
@@ -50,8 +50,11 @@ persisting it.
 
 Optional. Open Settings → Account → "Set up two-factor", scan the QR
 code with any TOTP app (Google Authenticator, 1Password, Authy,
-Aegis...), then enter the 6-digit code to confirm. After enrolment, the
-login form gains a second step that asks for the current code.
+Aegis...), then enter the 6-digit code to confirm. After enrolment,
+enter the current code on the login form's second screen (the form
+always shows that screen; without TOTP, leave it blank). Password and
+code are checked together in one request, and any wrong part gets the
+same "invalid credentials" error.
 
 Lost your authenticator? With shell access to the host, delete the
 `totp_secret` field from `~/.local/state/ccpipe/credentials` and restart
@@ -215,7 +218,11 @@ lists transcripts by cwd and lets you pick one.
 - `~/.local/state/ccpipe/credentials` — argon2id hash, TOTP secret,
   `0600`.
 - `~/.local/state/ccpipe/session_secret` — used to sign session
-  cookies. Rotating it invalidates all sessions.
+  cookies. Rotating it invalidates all sessions. (Settings → Account →
+  "sign out everywhere" does the same without touching files.)
+- `~/.local/state/ccpipe/revoked_sessions.json` — ids of logins that
+  were signed out, kept until their cookies would have expired anyway
+  (beside the credentials file if `CCPIPE_CREDENTIALS_FILE` moves it).
 - `~/.local/state/ccpipe/initial_password.txt` — read-once `0400` file
   with the auto-generated password on first run. **Delete after
   reading.**

@@ -43,7 +43,7 @@ Out of scope:
 - Misconfiguration on the operator's side (e.g. running with
   `CCPIPE_BEHIND_TLS=0` over the public internet, putting non-proxy
   IPs in `--forwarded-allow-ips`, exposing `:8080` to the LAN without
-  a firewall rule). The README's "Reverse proxy" section is the
+  a firewall rule). [`docs/deployment.md`](docs/deployment.md) is the
   authoritative guide; deviations are on the operator.
 - The unmodified `claude` CLI itself (report those upstream to
   Anthropic).
@@ -89,23 +89,96 @@ deliverables that landed in this repository as a result:
   tripping the limiter — don't enable that flag against production
   unless you're OK locking your own IP out for a minute.
 
+## Hardening summary
+
+What the current code does, so a report can say which property it
+breaks. Details live in the linked code and docs.
+
+- **Login.** One `POST /api/auth/login` carrying username, password
+  and (when TOTP is enrolled) the code together; any failure is the
+  same `401`, so there is no password-correct-but-code-missing signal.
+  The two screens in the UI (password, then code) are client-side
+  only. Login and the four password re-verify endpoints share a
+  per-IP 5/min bucket plus a global 300/min cap.
+- **Sessions.** A signed Starlette cookie (`__Host-` + `Secure` under
+  `CCPIPE_BEHIND_TLS=1`) with a **30-day idle timeout**: it is
+  re-issued at most hourly while in use, and lapses after 30 days
+  without use. Each login carries a random session id; **logout
+  revokes that id server-side** (persisted in `revoked_sessions.json`
+  beside the credentials file, so it survives a restart and a copied
+  cookie stops working) and closes that login's open terminal
+  sockets. **Settings → Account → "sign out everywhere"** (two taps;
+  `POST /api/auth/logout-all`) invalidates every session on every
+  device without changing the password; changing the password or
+  enrolling/disabling TOTP does the same. Open WebSockets are
+  re-checked and closed when their session is no longer valid.
+- **tmux.** ccpipe addresses sessions and panes with exact-match
+  targets (`=name`), so a name can't prefix-match a different session,
+  and session names are restricted to `[A-Za-z0-9_-]`. Processes ccpipe
+  spawns through tmux get its environment **minus every `CCPIPE_*`
+  variable**, `CCPIPE_*` is unset from the tmux server's global
+  environment at startup, and `CCPIPE_AUTH_PASSWORD` is removed from
+  ccpipe's own environment once it has been hashed to disk — so a
+  bootstrap password set in a drop-in doesn't leak into every pane.
+- **Terminal clipboard (OSC 52).** tmux is pinned to
+  `set-clipboard external` and `allow-passthrough off`, so programs in
+  a pane can't pass clipboard writes through to the browser. As a
+  second layer, the browser only honours an OSC 52 write within 2 s of
+  the operator's own key or pointer input on the page, caps its size,
+  and toasts a preview of what was copied; an unsolicited write is
+  refused with a visible "ignored" toast. Clipboard *reads* are never
+  answered.
+- **File saves.** Saves and uploads over an existing file go through a
+  unique `O_EXCL | O_NOFOLLOW` temp file and keep the original file's
+  permission bits (a `0600` file stays `0600`, scripts keep `+x`). A
+  save to a symlink writes **through** it, keeping the link, but only
+  after the resolved target passes the same jail, deny-list and
+  no-symlinked-parent checks as any other path — a link pointing out
+  of the jail or into a denied directory is still refused (`403`).
+- **Dependencies.** `backend/constraints.txt` pins the Python
+  dependency set and `scripts/install.sh` installs with
+  `pip install -c constraints.txt`; the frontend installs with
+  `npm ci` from the committed `package-lock.json`. Pins reduce drift
+  and surprise upgrades; they don't make the pinned versions
+  vulnerability-free.
+- **Cross-site GETs.** Every authenticated `GET` carries one shared
+  Fetch-Metadata gate (`auth.require_same_origin`): a request whose
+  `Sec-Fetch-Site` is anything other than `same-origin` (another site,
+  a typed URL) is refused, so a link or `<img>`/`<audio>` tag elsewhere
+  can't ride the session cookie to download files or meter Kokoro. An
+  absent header is allowed (non-browser clients have no ambient cookie).
+  State-changing methods are covered by the `X-Requested-By` CSRF check.
+- **Resource caps.** At most 32 user tmux sessions (each a live
+  `claude`) can be created, so a runaway client can't exhaust memory;
+  terminal-relay output is backpressured rather than buffered without
+  bound; malformed WebSocket frames are dropped (and their log warnings
+  rate-limited) instead of tearing down the connection.
+
 ## Known limitations
 
 These are accepted trade-offs, documented here so you don't need to
 report them as findings:
 
 - **0.0.0.0 bind by default.** Required so an off-host reverse proxy
-  can reach the backend. The README emphasises firewalling :8080 to
-  the proxy host; a startup banner reminds the operator when
-  `CCPIPE_BEHIND_TLS=1` is set.
+  can reach the backend. The bind address is not a control — `--host
+  ::` would also listen on public IPv6 addresses — so `:8080` must be
+  firewalled to the proxy host (IPv4 and IPv6; ufw and nftables
+  examples in [`docs/deployment.md`](docs/deployment.md)). A startup
+  banner reminds the operator when `CCPIPE_BEHIND_TLS=1` is set.
+- **Throttle keys on the client IP it is given.** Behind a CDN such as
+  Cloudflare the per-IP login bucket sees edge IPs unless nginx
+  restores the visitor IP (`set_real_ip_from` for the CDN's ranges
+  only — see the optional block in `nginx/ccpipe.conf`).
 - **No persistent login banning.** The login throttle is in-memory
   sliding-window only. fail2ban reading
   `journalctl --user -u ccpipe` is the recommended add-on if you
   need persistent IP banning.
-- **Operator privileges.** The file-panel jail blocks ccpipe's own
-  state dir but does not block `.ssh`, `.aws`, `.gnupg`, `.kube`,
-  etc. — by design, because ccpipe is an admin tool for the operator's
-  own machine. An attacker with a valid session cookie has the same
+- **Operator privileges.** Within the file-panel jail, the deny-list
+  covers only ccpipe's own state (`~/.local/state/ccpipe`,
+  `~/.config/ccpipe`) and Claude Code's (`~/.claude`,
+  `~/.claude.json`). It does **not** block `.ssh`, `.aws`, `.gnupg`,
+  `.kube`, etc. — by design, because ccpipe is an admin tool for the
+  operator's own machine. An attacker with a valid session cookie has the same
   filesystem reach the operator does (within the jail). Defence is
   the auth gate + TOTP, not the file ACL.
 - **TOTP burn-list is in-memory.** Survives the verify window but not
