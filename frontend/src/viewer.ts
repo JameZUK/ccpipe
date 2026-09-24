@@ -19,6 +19,7 @@ import katex from "katex";
 import hljs from "highlight.js/lib/common";
 import DOMPurify from "dompurify";
 import { makeHighlight } from "./md-highlight";
+import { setupDocsDrawer } from "./docs-drawer";
 
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
@@ -259,109 +260,8 @@ async function poll(): Promise<void> {
   }
 }
 
-// ── document switcher (the "docs ▾" dropdown) ────────────────────────────
+// ── document drawer (search + tree over the project's docs) ────────────
 const docsBtn = document.getElementById("md-docs") as HTMLButtonElement | null;
-let docsMenu: HTMLElement | null = null;
-
-function closeDocsMenu(): void {
-  docsMenu?.remove();
-  docsMenu = null;
-  document.removeEventListener("pointerdown", onDocsAway, true);
-}
-function onDocsAway(e: Event): void {
-  const t = e.target as Node;
-  if (docsMenu && !docsMenu.contains(t) && docsBtn && !docsBtn.contains(t)) closeDocsMenu();
-}
-/** Keep a right-anchored dropdown on-screen: once populated it may be
- *  wider than the space left of its anchor button (the bug on narrow
- *  phones), so flip it to left-anchored if its left edge spills off. */
-function clampMenu(menu: HTMLElement): void {
-  const margin = 8;
-  const r = menu.getBoundingClientRect();
-  if (r.left < margin) {
-    menu.style.right = "auto";
-    menu.style.left = `${margin}px`;
-  } else if (r.right > window.innerWidth - margin) {
-    menu.style.right = `${margin}px`;
-  }
-}
-
-function setupDocsMenu(): void {
-  if (!docsBtn) return;
-  docsBtn.hidden = false;
-  docsBtn.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    if (docsMenu) { closeDocsMenu(); return; }
-    const menu = document.createElement("div");
-    menu.className = "md-docs-menu";
-    const r = docsBtn.getBoundingClientRect();
-    menu.style.top = `${Math.round(r.bottom + 6)}px`;
-    menu.style.right = `${Math.round(window.innerWidth - r.right)}px`;
-    const note = document.createElement("div");
-    note.className = "md-docs-menu__note";
-    note.textContent = "Loading…";
-    menu.append(note);
-    document.body.append(menu);
-    docsMenu = menu;
-    document.addEventListener("pointerdown", onDocsAway, true);
-    try {
-      const res = await fetchJson(`/api/fs/markdown-index?root=${encodeURIComponent(rootDir)}`);
-      if (docsMenu !== menu) return;
-      if (!res.ok) { note.textContent = "Couldn't list documents."; return; }
-      const data = await res.json();
-      menu.replaceChildren();
-      if (!data.entries.length) {
-        const empty = document.createElement("div");
-        empty.className = "md-docs-menu__note";
-        empty.textContent = "No Markdown files found.";
-        menu.append(empty);
-        clampMenu(menu);
-        return;
-      }
-      for (const ent of data.entries as { name: string; path: string; rel: string }[]) {
-        // A div (not a <button>): Firefox collapses block children inside
-        // a button onto one line (the two-line item rendered overlapping).
-        const item = document.createElement("div");
-        item.className = "md-docs-menu__item";
-        item.setAttribute("role", "button");
-        item.tabIndex = 0;
-        if (ent.path === filePath) item.classList.add("md-docs-menu__item--active");
-        item.title = ent.rel;
-        // Two-line item: filename on its own full-width line (always
-        // readable, can't be squeezed by a sibling in any browser) with
-        // the directory dimmed underneath.
-        const slash = ent.rel.lastIndexOf("/");
-        const n = document.createElement("span");
-        n.className = "md-docs-menu__name";
-        n.textContent = slash >= 0 ? ent.rel.slice(slash + 1) : ent.rel;
-        item.append(n);
-        if (slash >= 0) {
-          const d = document.createElement("span");
-          d.className = "md-docs-menu__dir";
-          d.textContent = ent.rel.slice(0, slash);
-          item.append(d);
-        }
-        item.addEventListener("click", () => {
-          closeDocsMenu();
-          if (ent.path !== filePath) location.assign(mdViewUrl(ent.path));
-        });
-        item.addEventListener("keydown", (ev) => {
-          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); item.click(); }
-        });
-        menu.append(item);
-      }
-      if (data.truncated) {
-        const trunc = document.createElement("div");
-        trunc.className = "md-docs-menu__note";
-        trunc.textContent = `first ${data.entries.length} shown`;
-        menu.append(trunc);
-      }
-      clampMenu(menu);
-    } catch {
-      if (docsMenu === menu) note.textContent = "Failed to load.";
-    }
-  });
-}
 
 // ── boot ─────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
@@ -394,7 +294,7 @@ async function main(): Promise<void> {
 
   statusEl?.remove();
   renderSource(body.content ?? "");
-  setupDocsMenu();
+  if (docsBtn) setupDocsDrawer({ button: docsBtn, rootDir, filePath, viewUrl: mdViewUrl });
 
   // Seed the change key from a stat call so its representation matches the
   // poll's (read returns an int mtime; stat a float — comparing the two

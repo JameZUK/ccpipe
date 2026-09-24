@@ -13,6 +13,7 @@
   --md-code-bg: #1b1813;
   --md-code-fg: #e7e2d6;
   --md-maxw: 56rem;
+  --md-drawer-w: 20rem;
 }
 
 * { box-sizing: border-box; }
@@ -94,63 +95,168 @@ html, body {
 .md-bar__btn:hover { background: var(--md-surface); }
 button.md-bar__btn { cursor: pointer; font: inherit; }
 
-/* document switcher dropdown */
-.md-docs-menu {
+/* ── document drawer ─────────────────────────────────────────────────── */
+/* Docked beside the doc on wide screens (body.md-drawer-docked pushes the
+   page right); a full-height overlay sheet below 960px. 100dvh + the list's
+   min-height:0 keep the sheet inside the visible area under mobile URL
+   bars — the flex:1 list scrolls instead of overflowing. */
+.md-drawer {
   position: fixed;
-  z-index: 50;
+  top: 0;
+  left: 0;
+  z-index: 40;
+  width: var(--md-drawer-w);
+  height: 100dvh;
   display: flex;
   flex-direction: column;
-  min-width: 14rem;
-  max-width: min(30rem, 92vw);
-  max-height: min(70vh, 32rem);
-  overflow-y: auto;
   background: var(--md-surface);
-  border: 1px solid var(--md-border);
-  border-radius: 8px;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+  border-right: 1px solid var(--md-border);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
-/* Two-line item: filename (own line, full width) + dimmed directory. */
-.md-docs-menu__item {
-  display: block;
-  width: 100%;
-  /* The menu is a flex column with a max-height; without this the items
-     SHRINK to fit (default flex-shrink:1) instead of scrolling, squashing
-     each two-line entry until the text overlaps. flex-shrink:0 keeps each
-     item its natural height and lets the menu scroll. */
-  flex-shrink: 0;
-  background: transparent;
+.md-drawer[hidden], .md-drawer-backdrop[hidden] { display: none; }
+body.md-drawer-docked { padding-left: var(--md-drawer-w); }
+body.md-drawer-overlay { overflow: hidden; }
+body.md-drawer-overlay .md-drawer {
+  width: min(24rem, 88vw);
+  box-shadow: 14px 0 34px rgba(0, 0, 0, 0.55);
+}
+.md-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.md-drawer__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.5rem 0.4rem 0.9rem;
+}
+.md-drawer__title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--md-muted);
+}
+.md-drawer__count {
+  font-size: 0.7rem;
+  color: var(--md-muted);
+  padding: 0 0.4rem;
+  border: 1px solid var(--md-border);
+  border-radius: 999px;
+}
+.md-drawer__count:empty { display: none; }
+.md-drawer__close {
+  margin-left: auto;
+  width: 2rem;
+  height: 2rem;
   border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--md-muted);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.md-drawer__close:hover { background: var(--md-bg); color: var(--md-fg); }
+
+.md-drawer__search {
+  margin: 0 0.7rem 0.55rem;
+  padding: 0.45rem 0.65rem;
+  background: var(--md-bg);
   color: var(--md-fg);
+  border: 1px solid var(--md-border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.9rem;
+}
+.md-drawer__search:focus { outline: none; border-color: var(--md-accent); }
+
+.md-drawer__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 0.8rem;
+  border-top: 1px solid var(--md-border);
+}
+
+.md-drawer__section {
+  padding: 0.7rem 0.9rem 0.25rem;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--md-muted);
+}
+
+.md-drawer__row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0.2rem 0.7rem 0.2rem calc(0.6rem + var(--depth, 0) * 0.95rem);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.8rem;
-  text-align: left;
-  padding: 0.4rem 0.7rem;
+  color: var(--md-fg);
   cursor: pointer;
-  overflow: hidden;
+  user-select: none;
 }
-.md-docs-menu__name {
-  display: block;
+@media (pointer: coarse) { .md-drawer__row { min-height: 2.6rem; } }
+.md-drawer__row:hover { background: color-mix(in srgb, var(--md-accent) 12%, transparent); }
+.md-drawer__row:focus { outline: none; }
+.md-drawer__row:focus-visible {
+  background: color-mix(in srgb, var(--md-accent) 18%, transparent);
+  box-shadow: inset 2px 0 0 var(--md-accent);
+}
+.md-drawer__row--active { color: var(--md-accent); font-weight: 650; }
+.md-drawer__caret {
+  flex: 0 0 1em;
+  color: var(--md-muted);
+  text-align: center;
+}
+.md-drawer__name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.md-docs-menu__dir {
-  display: block;
-  margin-top: 1px;
+.md-drawer__badge {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--md-muted);
+}
+/* Two-line rows (search results, recents): filename + dimmed directory. */
+.md-drawer__row--flat {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 1px;
+  padding: 0.3rem 0.9rem;
+}
+/* Name + age badge on one line (the "Recently modified" rows). */
+.md-drawer__line {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+}
+.md-drawer__dir {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.72rem;
+  font-weight: 400;
   color: var(--md-muted);
 }
-.md-docs-menu__item:hover { background: color-mix(in srgb, var(--md-accent) 16%, transparent); }
-.md-docs-menu__item--active {
-  color: var(--md-accent);
-  font-weight: 650;
-  cursor: default;
+.md-drawer mark {
+  background: color-mix(in srgb, var(--md-accent) 32%, transparent);
+  color: inherit;
+  border-radius: 2px;
 }
-.md-docs-menu__note {
-  padding: 0.4rem 0.7rem;
+.md-drawer__note {
+  padding: 0.6rem 0.9rem;
   color: var(--md-muted);
   font-size: 0.78rem;
 }
@@ -281,5 +387,8 @@ button.md-bar__btn { cursor: pointer; font: inherit; }
 
 @media (max-width: 600px) {
   html, body { font-size: 15px; }
+  body.md-drawer-overlay .md-drawer { width: 100vw; border-right: none; box-shadow: none; }
+  /* 16px stops mobile browsers zooming the page when the search focuses. */
+  .md-drawer__search { font-size: 16px; }
   .md-doc { padding: 1.4rem 1rem 5rem; }
 }

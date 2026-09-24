@@ -120,12 +120,14 @@ _FS_EDITOR_LIMIT = 1 * 1024 * 1024     # 1 MiB
 # binary files in practice). UTF-8 decode failures are also rejected.
 _FS_BINARY_SNIFF = 1024
 
-# Markdown index (the toolbar "Docs" dropdown). A bounded walk of the
+# Markdown index (the viewer's "docs" drawer). A bounded walk of the
 # project root for *.md / *.markdown so the list can't blow up on a huge
 # tree, and the walk stays cheap by pruning VCS / build / dependency dirs
 # in place. Hidden dirs are pruned too, which also keeps the walk clear of
 # the deny-listed state dirs (.claude, .local/state/ccpipe, …).
-_FS_MD_INDEX_MAX_ENTRIES = 500
+# 2000 entries is ~200 KB of JSON; the drawer searches it client-side, so
+# the whole index must arrive in one response (no lazy per-dir loading).
+_FS_MD_INDEX_MAX_ENTRIES = 2000
 _FS_MD_INDEX_MAX_DEPTH = 8
 # Cap on inline-served images (/api/fs/raw). Unlike /api/fs/download (which
 # is operator-initiated and uncapped), raw is auto-fetched by the viewer for
@@ -377,8 +379,8 @@ async def fs_list(path: str, show_hidden: int = 0,
 @router.get("/api/fs/markdown-index", dependencies=[AuthDep, SameOriginDep])
 async def fs_markdown_index(root: str) -> dict[str, Any]:
     """Return every Markdown file under *root* (the session's project
-    directory) as ``{name, path, rel}`` sorted by relative path — the
-    data source for the toolbar "Docs" dropdown. The walk is bounded in
+    directory) as ``{name, path, rel, mtime}`` sorted by relative path — the
+    data source for the viewer's "docs" drawer. The walk is bounded in
     depth and entry count, does not follow directory symlinks, and prunes
     hidden + known-heavy dirs in place so it stays cheap on a large tree.
     The deny-list is enforced explicitly on every returned path (not left
@@ -406,9 +408,10 @@ async def fs_markdown_index(root: str) -> dict[str, Any]:
             # listing them just yields broken entries (and leaks the link's
             # existence). followlinks=False already excludes symlinked dirs.
             try:
-                if stat_mod.S_ISLNK(os.lstat(full).st_mode):
-                    continue
+                st = os.lstat(full)
             except OSError:
+                continue
+            if stat_mod.S_ISLNK(st.st_mode):
                 continue
             # Enforce the jail + deny-list on the leaf itself rather than
             # relying on the hidden-dir prune to coincide with the deny-list.
@@ -420,6 +423,7 @@ async def fs_markdown_index(root: str) -> dict[str, Any]:
                 "name": fn,
                 "path": full,
                 "rel": os.path.relpath(full, root_str),
+                "mtime": int(st.st_mtime),
             })
             if len(out) >= _FS_MD_INDEX_MAX_ENTRIES:
                 truncated = True

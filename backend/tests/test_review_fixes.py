@@ -667,6 +667,24 @@ def test_fs_list_rejects_path_outside_jail(authed_client):
     assert r.status_code == 403
 
 
+def test_fs_markdown_index_entries_carry_mtime(authed_client, tmp_path):
+    """The viewer's docs drawer sorts "Recently modified" by the index's
+    mtime; symlinked docs stay excluded."""
+    import os as _os
+    proj = tmp_path / "proj"
+    (proj / "docs").mkdir(parents=True)
+    (proj / "README.md").write_text("# a")
+    (proj / "docs" / "guide.md").write_text("# b")
+    _os.utime(proj / "docs" / "guide.md", (1_700_000_000, 1_700_000_000))
+    (proj / "link.md").symlink_to(proj / "README.md")
+    r = authed_client.get(f"/api/fs/markdown-index?root={proj}")
+    assert r.status_code == 200
+    by_rel = {e["rel"]: e for e in r.json()["entries"]}
+    assert set(by_rel) == {"README.md", "docs/guide.md"}
+    assert by_rel["docs/guide.md"]["mtime"] == 1_700_000_000
+    assert isinstance(by_rel["README.md"]["mtime"], int)
+
+
 def test_fs_write_rejects_path_outside_jail(authed_client):
     r = authed_client.post(
         "/api/fs/write",
