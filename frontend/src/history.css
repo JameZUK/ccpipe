@@ -8,13 +8,22 @@ body {
 }
 
 .hist-bar {
-  flex: 0 0 auto; display: flex; align-items: baseline; gap: .5rem;
+  flex: 0 0 auto; display: flex; align-items: center; gap: .5rem;
   padding: .5rem .75rem; background: #15130d; border-bottom: 1px solid #2a2820;
   font-size: .8rem; color: #a8a290;
 }
 .hist-bar__name { font-weight: 600; color: #d8d4c8; }
 .hist-bar__spacer { flex: 1 1 auto; }
 .hist-bar__meta { font-size: .7rem; color: #6a6656; }
+.hist-bar__close {
+  flex: 0 0 auto;
+  width: 2rem; height: 2rem;
+  border: 1px solid #2a2820; border-radius: 6px;
+  background: transparent; color: #a8a290;
+  font: inherit; font-size: .95rem; line-height: 1;
+  cursor: pointer;
+}
+.hist-bar__close:hover { background: #0d0c08; color: #d8d4c8; }
 
 /* The single scroll container. min-height:0 lets it shrink inside the flex
    column so it — not the body — owns the scroll (matches the mobile-modal

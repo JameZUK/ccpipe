@@ -11,6 +11,7 @@
 //   - reloads from the tail if the bound transcript changes (claude restart).
 import "./history.css";
 import { renderMarkdown } from "./md-chat";
+import { bindCloseButton } from "./close-page";
 
 interface Block { i: number; role: string; text: string; ts: string | null; }
 interface Page {
@@ -29,6 +30,8 @@ const doc = document.getElementById("hist-doc") as HTMLElement;
 const statusEl = document.getElementById("hist-status");
 const nameEl = document.getElementById("hist-name") as HTMLElement;
 const metaEl = document.getElementById("hist-meta") as HTMLElement;
+
+bindCloseButton("hist-close");
 nameEl.textContent = session ? `${session} · history` : "history";
 
 const PAGE = 40;

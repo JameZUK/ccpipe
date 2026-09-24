@@ -20,6 +20,7 @@ import hljs from "highlight.js/lib/common";
 import DOMPurify from "dompurify";
 import { makeHighlight } from "./md-highlight";
 import { setupDocsDrawer } from "./docs-drawer";
+import { bindCloseButton } from "./close-page";
 
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
@@ -264,16 +265,7 @@ async function poll(): Promise<void> {
 const docsBtn = document.getElementById("md-docs") as HTMLButtonElement | null;
 
 // ── close (back to the main ccpipe screen) ──────────────────────────────
-// Run as an installed app there's no tab strip or back button, so the
-// viewer needs its own way out. window.close() works when the browser
-// considers the window script-closable (opened via window.open, one
-// history entry — the drawer navigates with location.replace to keep it
-// that way). Where it's refused, fall back to the main app, which reopens
-// the last session on its own.
-document.getElementById("md-close")?.addEventListener("click", () => {
-  window.close();
-  window.setTimeout(() => { if (!window.closed) location.replace("/"); }, 250);
-});
+bindCloseButton("md-close");
 
 // ── boot ─────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {

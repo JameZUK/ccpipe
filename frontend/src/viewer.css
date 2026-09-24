@@ -87,7 +87,6 @@ html, body {
   flex: 0 0 auto;
   width: 2rem;
   height: 2rem;
-  margin-left: -0.35rem;
   border: 1px solid var(--md-border);
   border-radius: 6px;
   background: transparent;
