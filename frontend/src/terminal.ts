@@ -821,11 +821,20 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     }, ok ? 1100 : 1800);
   };
   let lastCopied = "";
-  const doCopy = async (text: string, dedupe: boolean): Promise<void> => {
+  const doCopy = async (text: string, dedupe: boolean, preview = false): Promise<void> => {
     if (!text || !text.trim() || (dedupe && text === lastCopied)) return;
     const wasFocused = document.activeElement === document.querySelector(".xterm-helper-textarea");
     const ok = await writeClipboard(text);
-    if (ok) { lastCopied = text; flashToast(`copied ${text.length} char${text.length === 1 ? "" : "s"}`); }
+    if (ok) {
+      lastCopied = text;
+      let msg = `copied ${text.length} char${text.length === 1 ? "" : "s"}`;
+      // Terminal-originated copies show what landed on the clipboard.
+      if (preview) {
+        const oneLine = text.replace(/\s+/g, " ").trim();
+        msg += `: “${oneLine.length > 40 ? oneLine.slice(0, 40) + "…" : oneLine}”`;
+      }
+      flashToast(msg);
+    }
     else { flashToast("copy blocked by browser", false); }
     if (wasFocused) try { term.focus(); } catch {}   // execCommand fallback steals focus
   };
@@ -836,17 +845,40 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   const selDisposable = term.onSelectionChange(() => {
     if (!term.getSelection()) lastCopied = "";
   });
-  // 2. OSC 52: when the app or tmux (set-clipboard) emits a clipboard-write
-  //    sequence, mirror it to the local clipboard. Covers selections made via
-  //    tmux copy-mode, which never touch xterm's own selection.
+  // 2. OSC 52: when tmux emits a clipboard-write sequence, mirror it to the
+  //    local clipboard. Covers selections made via tmux copy-mode, which never
+  //    touch xterm's own selection.
+  //    OSC 52 is just bytes in the output stream, so anything that can print
+  //    to the terminal could otherwise plant text (e.g. a command) in the
+  //    operator's clipboard. Only honour it right after the operator's own
+  //    input — tmux copy-mode emits it the instant the copy key is pressed —
+  //    and cap the size. (tmux itself is pinned to set-clipboard external +
+  //    allow-passthrough off, so pane programs can't emit it anyway; this is
+  //    the second layer.) Unsolicited writes are refused visibly.
+  const OSC52_GESTURE_WINDOW_MS = 2000;
+  const OSC52_MAX_B64 = 350_000;          // ≈ 256 KiB of decoded text
+  let lastUserInputAt = 0;
+  const noteUserInput = (): void => { lastUserInputAt = performance.now(); };
+  document.addEventListener("pointerdown", noteUserInput, true);
+  document.addEventListener("keydown", noteUserInput, true);
   const oscDisposable = term.parser.registerOscHandler(52, (data) => {
+    if (performance.now() - lastUserInputAt > OSC52_GESTURE_WINDOW_MS) {
+      flashToast("ignored clipboard write from terminal", false);
+      return true;
+    }
+    if (data.length > OSC52_MAX_B64) {
+      flashToast("clipboard write too large — ignored", false);
+      return true;
+    }
     const text = decodeOsc52(data);
-    if (text) void doCopy(text, false);
+    if (text) void doCopy(text, false, true);
     return true;   // handled (don't pass through)
   });
   const copyCleanup = (): void => {
     document.removeEventListener("mouseup", copySelection);
     container.removeEventListener("touchend", copySelection);
+    document.removeEventListener("pointerdown", noteUserInput, true);
+    document.removeEventListener("keydown", noteUserInput, true);
     selDisposable.dispose();
     oscDisposable.dispose();
     if (copyToastTimer !== null) clearTimeout(copyToastTimer);

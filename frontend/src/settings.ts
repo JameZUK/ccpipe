@@ -13,7 +13,7 @@
 // to the helpers it needs.
 
 import { getMicConfig, type MicConfig, setMicConfig } from "./api";
-import { changeCredentials, logout as apiLogout } from "./auth";
+import { changeCredentials, logout as apiLogout, logoutEverywhere } from "./auth";
 import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
 import {
@@ -622,6 +622,7 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
     <div class="modal__row-actions">
       <span class="modal__status" data-role="account-status"></span>
       <button type="button" class="btn btn--ghost" data-role="signout">${ICONS.logout}<span>sign out</span></button>
+      <button type="button" class="btn btn--ghost" data-role="signout-all" title="Sign out every device, including this one">${ICONS.logout}<span>sign out everywhere</span></button>
       <button type="button" class="btn btn--primary" data-role="save">Save credentials</button>
     </div>
   `;
@@ -634,6 +635,7 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
   const totpRow = sec.querySelector<HTMLElement>("[data-role=totp-row]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
   const signOutBtn = sec.querySelector<HTMLButtonElement>("[data-role=signout]")!;
+  const signOutAllBtn = sec.querySelector<HTMLButtonElement>("[data-role=signout-all]")!;
 
   // Reveal the 2FA code input when the account has TOTP enrolled (H1).
   // /api/auth/status surfaces otp_enrolled only for authenticated callers,
@@ -681,6 +683,33 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
 
   signOutBtn.addEventListener("click", async () => {
     await apiLogout().catch(() => {});
+    closeSettings();
+    opts.onSessionInvalidated();
+  });
+
+  // Two-tap confirm (the app has no confirm dialogs): signs out the phone,
+  // iPad and every other device too.
+  let signOutAllArmed: number | null = null;
+  const signOutAllLabel = signOutAllBtn.querySelector("span")!;
+  signOutAllBtn.addEventListener("click", async () => {
+    if (signOutAllArmed === null) {
+      signOutAllLabel.textContent = "tap again to confirm";
+      signOutAllArmed = window.setTimeout(() => {
+        signOutAllArmed = null;
+        signOutAllLabel.textContent = "sign out everywhere";
+      }, 4000);
+      return;
+    }
+    clearTimeout(signOutAllArmed);
+    signOutAllArmed = null;
+    try {
+      await logoutEverywhere();
+    } catch (err) {
+      status.classList.add("modal__status--error");
+      status.textContent = (err as Error).message;
+      signOutAllLabel.textContent = "sign out everywhere";
+      return;
+    }
     closeSettings();
     opts.onSessionInvalidated();
   });

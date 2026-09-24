@@ -1651,7 +1651,10 @@ class _FakeWS:
     Starlette WebSocket is heavier than necessary — we only need the
     two attributes close_stale_ws_sockets reads from + calls."""
     def __init__(self, cred_version: int | None) -> None:
-        self.scope = {"session": {"cred_version": cred_version} if cred_version is not None else {}}
+        # A real logged-in session carries authed=True; close_stale_ws_sockets
+        # now applies the full is_session_authed() check (version + revocation).
+        self.scope = {"session": {"authed": True, "cred_version": cred_version}
+                      if cred_version is not None else {"authed": True}}
         self.closed: list[tuple[int, str]] = []
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed.append((code, reason))

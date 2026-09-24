@@ -1156,6 +1156,10 @@ a:hover { color: var(--fg); }
   position: absolute;
   left: 50%;
   bottom: var(--s-3);
+  max-width: calc(100% - 2rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   transform: translate(-50%, 6px);
   padding: 0.28rem 0.75rem;
   background: rgba(13, 12, 8, 0.96);

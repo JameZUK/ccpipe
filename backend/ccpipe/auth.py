@@ -41,8 +41,9 @@ import os
 import pwd
 import secrets
 import sys
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -427,6 +428,20 @@ def get_credential() -> Credential:
     return _cached_credential
 
 
+def drop_bootstrap_password_env() -> None:
+    """Remove ``CCPIPE_AUTH_PASSWORD`` from our environment once it has been
+    hashed into the credentials file (from then on the file is
+    authoritative and the env value is ignored). Keeps the plaintext out of
+    everything ccpipe spawns — notably libtmux, which can start the tmux
+    server with our full environment, so every claude / shell pane would
+    inherit it. Left in place when the file couldn't be written, since the
+    env value is then still the live credential."""
+    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    if os.environ.get(PASSWORD_ENV) and path.exists():
+        os.environ.pop(PASSWORD_ENV, None)
+        log.info("%s consumed; removed from the process environment", PASSWORD_ENV)
+
+
 def reset_cached_credential() -> None:
     """For tests only — wipes the memoized credential so env/file changes
     take effect on the next get_credential() call."""
@@ -708,8 +723,113 @@ def is_auth_enabled() -> bool:
     return True
 
 
+# ─── Session lifetime + revocation ─────────────────────────────────────────
+# The session is a signed, self-contained Starlette cookie. Its signature
+# carries a timestamp that SessionMiddleware checks against max_age, but
+# Starlette only re-issues the cookie when the session is MODIFIED — so
+# left alone, a login hard-expires SESSION_MAX_AGE_S after sign-in however
+# much it's used. touch_session() re-stamps it at most once per
+# SESSION_RENEW_S, turning max_age into an idle timeout instead.
+SESSION_MAX_AGE_S = 60 * 60 * 24 * 30
+SESSION_RENEW_S = 60 * 60
+
+# Every login carries a random ``sid``. Logout records it here so a copy of
+# that cookie stops working even though its signature still verifies.
+# Entries only need to outlive the cookie's own max_age.
+_revoked: dict[str, float] | None = None
+_revoked_lock = threading.Lock()
+
+
+def _revoked_path() -> Path:
+    # Beside the credentials file, so tests that relocate it (and operators
+    # who override CCPIPE_CREDENTIALS_FILE) keep both together.
+    creds = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    return creds.with_name("revoked_sessions.json")
+
+
+def _load_revoked() -> dict[str, float]:
+    global _revoked
+    if _revoked is None:
+        try:
+            data = json.loads(_revoked_path().read_text())
+            _revoked = {k: float(v) for k, v in data.items()
+                        if isinstance(k, str) and isinstance(v, (int, float))}
+        except (OSError, ValueError, AttributeError):
+            _revoked = {}
+    return _revoked
+
+
+def revoke_session(session: dict) -> None:
+    """Revoke the login carried by *session* (logout). Persisted, so it
+    survives a restart; kept in memory even if the write fails."""
+    sid = session.get("sid")
+    if not isinstance(sid, str):
+        return
+    with _revoked_lock:
+        revoked = _load_revoked()
+        now = time.time()
+        for k in [k for k, exp in revoked.items() if exp < now]:
+            del revoked[k]
+        revoked[sid] = now + SESSION_MAX_AGE_S
+        path = _revoked_path()
+        try:
+            _ensure_state_dir(path.parent)
+            tmp = path.with_suffix(".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, json.dumps(revoked).encode())
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except OSError as exc:
+            log.error("could not persist session revocation to %s: %s", path, exc)
+
+
+def start_session(session: dict, cred: "Credential") -> None:
+    """Fill *session* for a fresh login. Cleared first so nothing from a
+    pre-login session carries over."""
+    session.clear()
+    session["authed"] = True
+    session["username"] = cred.username
+    # Stamp the version so a later credential change can invalidate this
+    # session even though its signed cookie still verifies cleanly.
+    session["cred_version"] = cred.version
+    session["sid"] = secrets.token_urlsafe(16)
+    session["seen"] = int(time.time())
+
+
+def touch_session(session: dict) -> None:
+    """Call on authenticated HTTP requests: re-stamps the session at most
+    once per SESSION_RENEW_S so the cookie is re-issued and its max_age
+    window slides, and gives pre-``sid`` cookies a sid so they become
+    revocable."""
+    now = int(time.time())
+    if not isinstance(session.get("sid"), str):
+        session["sid"] = secrets.token_urlsafe(16)
+    seen = session.get("seen")
+    if not isinstance(seen, int) or now - seen >= SESSION_RENEW_S:
+        session["seen"] = now
+
+
+def bump_credential_version() -> tuple[bool, str]:
+    """"Sign out everywhere": invalidate every existing session (and, via
+    close_stale_ws_sockets, every live socket) without changing the
+    password or TOTP secret."""
+    cred = get_credential()
+    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    try:
+        _write_credentials_file(path, replace(cred, version=cred.version + 1))
+    except OSError as exc:
+        return False, f"failed to write credentials: {exc}"
+    reset_cached_credential()
+    return True, "updated"
+
+
 def is_session_authed(session: dict) -> bool:
     if not session.get("authed"):
+        return False
+    sid = session.get("sid")
+    if isinstance(sid, str) and sid in _load_revoked():
         return False
     # Reject sessions issued under a stale credential version. Sessions
     # without a stored version are pre-versioning cookies — invalidate
@@ -732,6 +852,7 @@ def require_auth(request: Request) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="authentication required",
         )
+    touch_session(request.session)
 
 
 async def authorize_websocket(websocket: WebSocket) -> bool:

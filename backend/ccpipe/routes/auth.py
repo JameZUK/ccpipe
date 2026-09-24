@@ -30,10 +30,14 @@ from ..auth import (
     AuthStatus,
     CsrfDep,
     LoginBody,
+    bump_credential_version,
     get_credential,
     is_auth_enabled,
     is_session_authed,
+    revoke_session,
     session_username,
+    start_session,
+    touch_session,
     set_totp_secret,
     totp_enrolled,
     totp_generate_secret,
@@ -50,6 +54,9 @@ router = APIRouter()
 @router.get("/api/auth/status", response_model=AuthStatus)
 async def auth_status(request: Request) -> AuthStatus:
     authed = is_session_authed(request.session)
+    if authed:
+        # Page loads hit this first; keep the login's idle window sliding.
+        touch_session(request.session)
     # Don't leak account-level security state (e.g. whether TOTP is
     # enrolled) to unauthenticated callers — that hands an attacker
     # writing automation a target/skip signal for free. Surface
@@ -271,11 +278,7 @@ async def auth_login(request: Request) -> AuthStatus:
             await asyncio.sleep(1.0)
             raise HTTPException(status_code=401, detail="invalid credentials")
 
-    request.session["authed"] = True
-    request.session["username"] = cred.username
-    # Stamp the version so a later credential change can invalidate this
-    # session even though its signed cookie still verifies cleanly.
-    request.session["cred_version"] = cred.version
+    start_session(request.session, cred)
     return AuthStatus(
         required=True,
         authenticated=True,
@@ -286,7 +289,26 @@ async def auth_login(request: Request) -> AuthStatus:
 
 @router.post("/api/auth/logout", response_model=AuthStatus, dependencies=[CsrfDep])
 async def auth_logout(request: Request) -> AuthStatus:
+    # Clearing the cookie only affects this browser; revoking the sid also
+    # kills any copy of it, and closes this login's open terminal sockets.
+    revoke_session(request.session)
     request.session.clear()
+    from ..ws import close_stale_ws_sockets
+    await close_stale_ws_sockets("signed out")
+    return AuthStatus(required=True, authenticated=False, username=None)
+
+
+@router.post("/api/auth/logout-all", response_model=AuthStatus,
+             dependencies=[AuthDep, CsrfDep])
+async def auth_logout_all(request: Request) -> AuthStatus:
+    """Sign out everywhere: invalidates every session, on every device,
+    without changing the password or TOTP secret."""
+    ok, msg = bump_credential_version()
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    request.session.clear()
+    from ..ws import close_stale_ws_sockets
+    await close_stale_ws_sockets("signed out everywhere")
     return AuthStatus(required=True, authenticated=False, username=None)
 
 

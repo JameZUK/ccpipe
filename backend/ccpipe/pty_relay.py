@@ -128,11 +128,15 @@ class PtyProcess:
         # output path. Chunks land in this queue; read() just drains
         # it. EOF is signalled by an empty bytes sentinel.
         #
-        # maxsize=64 caps the queue at ~4 MiB worth of 64 KiB chunks
-        # — if pump can't drain (e.g. the WS is stalled), the kernel
-        # PTY buffer fills, then the callback drops chunks here and
-        # records the loss rather than growing the heap unbounded.
+        # maxsize=64 caps the queue at ~4 MiB worth of 64 KiB chunks.
+        # When it fills (pump can't drain — e.g. the WS is stalled) the
+        # reader is PAUSED (remove_reader) until read() makes room, so
+        # the kernel PTY buffer fills and the tmux client blocks; tmux's
+        # own slow-client handling then catches the view up with a
+        # redraw. Dropping chunks instead would split escape sequences
+        # mid-stream and corrupt xterm's state with no redraw to fix it.
         self._read_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
+        self._reader_paused = False
         self._read_eof = False
         # Bytes the reader couldn't enqueue because the queue was
         # full. Reported through PtyProcess.bytes_dropped() so the
@@ -243,7 +247,14 @@ class PtyProcess:
                 asyncio.get_running_loop().remove_reader(fd)
         try:
             self._read_queue.put_nowait(data)
+            if data and self._read_queue.full():
+                # Backpressure: stop reading until read() drains a slot.
+                with contextlib.suppress(ValueError, KeyError, OSError):
+                    asyncio.get_running_loop().remove_reader(fd)
+                self._reader_paused = True
         except asyncio.QueueFull:
+            # Unreachable while the pause above is in place (we stop
+            # reading as soon as the queue fills); kept as a safety net.
             # pump() isn't keeping up — almost certainly because the
             # WS is stalled. Drop this chunk and count the loss; the
             # natural backpressure into the kernel PTY buffer will
@@ -286,7 +297,12 @@ class PtyProcess:
         KiB); we keep the parameter for backwards compatibility with
         existing callers but it's effectively informational now.
         """
-        return await self._read_queue.get()
+        chunk = await self._read_queue.get()
+        fd = self._master_fd
+        if self._reader_paused and fd is not None and not self._read_eof:
+            self._reader_paused = False
+            asyncio.get_running_loop().add_reader(fd, self._on_master_readable)
+        return chunk
 
     def write(self, data: bytes) -> None:
         """Write to the PTY master. After terminate() this is a no-op so
@@ -422,6 +438,9 @@ class PtyProcess:
         """
         loop = asyncio.get_running_loop()
         fd = self._master_fd
+        # A paused reader must not be re-armed by a late read() while the
+        # fd is being torn down (see the backpressure note in __init__).
+        self._reader_paused = False
 
         # 1. Unregister the reader first so the loop stops poking the fd.
         if fd is not None:

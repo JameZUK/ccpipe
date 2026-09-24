@@ -61,6 +61,16 @@ export async function logout(): Promise<void> {
   });
 }
 
+/** Invalidate every session on every device (password unchanged). */
+export async function logoutEverywhere(): Promise<void> {
+  const res = await fetch("/api/auth/logout-all", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "X-Requested-By": "ccpipe" },
+  });
+  if (!res.ok) throw new Error(`sign out everywhere: ${res.status}`);
+}
+
 export function isSecureContext(): boolean {
   // True for https:// and http://localhost. getUserMedia requires this.
   return window.isSecureContext;

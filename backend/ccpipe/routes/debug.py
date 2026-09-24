@@ -88,7 +88,7 @@ async def _capture_pane_plain(
     n = min(max(1, int(lines)), _DIFF_MAX_LINES)
     cmd = [
         tmux.TMUX_BIN, "capture-pane",
-        "-t", validated,
+        "-t", tmux.pane_target(validated),
         "-p",                  # print to stdout
         "-S", f"-{n}",         # start N lines back from current
         # No -E: capture extends through visible bottom, so the
@@ -102,6 +102,7 @@ async def _capture_pane_plain(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=tmux.tmux_env(),
             )
         except FileNotFoundError:
             return None

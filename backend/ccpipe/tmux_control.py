@@ -136,9 +136,10 @@ class TmuxControlClient:
         # idempotency check.
         try:
             checker = await asyncio.create_subprocess_exec(
-                _tmux.TMUX_BIN, "has-session", "-t", CONTROL_SESSION_NAME,
+                _tmux.TMUX_BIN, "has-session", "-t", _tmux.session_target(CONTROL_SESSION_NAME),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=_tmux.tmux_env(),
             )
             await checker.wait()
         except FileNotFoundError:
@@ -152,6 +153,7 @@ class TmuxControlClient:
                     "sleep", "infinity",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
+                    env=_tmux.tmux_env(),
                 )
                 _, stderr = await creator.communicate()
             except FileNotFoundError:
@@ -164,10 +166,11 @@ class TmuxControlClient:
                             stderr.decode(errors="replace").strip()[:300])
 
         proc = await asyncio.create_subprocess_exec(
-            _tmux.TMUX_BIN, "-C", "attach-session", "-t", CONTROL_SESSION_NAME,
+            _tmux.TMUX_BIN, "-C", "attach-session", "-t", _tmux.session_target(CONTROL_SESSION_NAME),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_tmux.tmux_env(),
         )
         self._proc = proc
         assert proc.stdout is not None

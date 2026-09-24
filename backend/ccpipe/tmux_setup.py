@@ -33,6 +33,8 @@ async def _run_tmux(*args: str, capture: bool = True) -> tuple[int, str]:
         # inherited pipe fd open for its lifetime. Leaving stderr as a pipe
         # hangs communicate() exactly as a stdout pipe would.
         stderr=asyncio.subprocess.STDOUT if capture else asyncio.subprocess.DEVNULL,
+        # This call may be the one that starts the server; see tmux_env().
+        env=_tmux.tmux_env(),
     )
     out, err = await proc.communicate()
     blob = out if out is not None else err
@@ -92,6 +94,11 @@ async def apply_server_defaults() -> None:
         # client currently attached (often a stale terminal you forgot
         # about) — making attached web sessions appear cropped.
         ("window-size", "latest"),
+        # Pinned (they're tmux's defaults) because the browser mirrors any
+        # OSC 52 it receives to the local clipboard: with "external" only
+        # tmux's own copy-mode emits OSC 52, and programs in a pane can't
+        # write the operator's clipboard. See the OSC 52 gate in terminal.ts.
+        ("set-clipboard", "external"),
     ]
     # alternate-screen is a per-window option. With it OFF, tmux intercepts
     # the ?1049h escape sequence from TUI apps (Claude Code, vim, less)
@@ -101,6 +108,9 @@ async def apply_server_defaults() -> None:
     # discarded buffer xterm can't scroll.
     window_options = [
         ("alternate-screen", "off"),
+        # No raw escape passthrough: it would let pane programs bypass tmux
+        # and reach the browser terminal directly (OSC 52 included).
+        ("allow-passthrough", "off"),
     ]
     for name, value in options:
         code, out = await _run_tmux("set-option", "-g", name, value)
@@ -110,4 +120,13 @@ async def apply_server_defaults() -> None:
         code, out = await _run_tmux("set-window-option", "-g", name, value)
         if code != 0:
             log.warning("tmux set-window-option -g %s %s failed: %s", name, value, out)
+    # A server started before tmux_env() existed (or by an older ccpipe)
+    # still carries CCPIPE_* in its global environment, which new panes
+    # inherit. Drop them; panes already running keep what they have.
+    code, out = await _run_tmux("show-environment", "-g")
+    if code == 0:
+        for line in out.splitlines():
+            var = line.split("=", 1)[0].lstrip("-")
+            if var.startswith("CCPIPE_"):
+                await _run_tmux("set-environment", "-g", "-u", var)
     log.info("tmux server defaults applied (shell=%s)", shell)

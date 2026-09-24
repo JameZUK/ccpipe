@@ -444,7 +444,10 @@ export function renderSessionPicker(
       return;
     }
     if (!nameTouched) {
-      nameInput.value = basename(cwd) || "session";
+      // Session names are [A-Za-z0-9_-] only (backend tmux.safe_name), so
+      // fold anything else — "jamez.me.uk" → "jamez-me-uk".
+      nameInput.value = basename(cwd).replace(/[^A-Za-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "session";
     }
     showError("");
     try {

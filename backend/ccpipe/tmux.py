@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,15 @@ class TmuxSession:
     # bubbles to the top of its group automatically. Zero when tmux
     # doesn't expose it (older tmux, or libtmux fallback).
     activity: int = 0
+
+
+def tmux_env() -> dict[str, str]:
+    """``os.environ`` minus ccpipe's own ``CCPIPE_*`` settings, for every
+    tmux spawn. A tmux server copies the environment of the client that
+    starts it into its global environment, and every pane inherits that —
+    so without this each claude/shell would see ccpipe's config (and
+    ``CCPIPE_AUTH_PASSWORD`` whenever a drop-in sets it)."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("CCPIPE_")}
 
 
 def _server() -> libtmux.Server:
@@ -174,9 +184,10 @@ async def _pane_pid(name: str) -> int | None:
     """Active-pane PID for a tmux session, or None if the lookup failed."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            TMUX_BIN, "display-message", "-t", name, "-p", "#{pane_pid}",
+            TMUX_BIN, "display-message", "-t", pane_target(name), "-p", "#{pane_pid}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env=tmux_env(),
         )
     except FileNotFoundError:
         return None
@@ -396,17 +407,34 @@ def attach_argv(name: str) -> list[str]:
     """argv for spawning a tmux client attached to the given session.
     `--` terminates option parsing so a session name like ``-foo`` can't
     be reinterpreted as a flag (also rejected by ``safe_name``)."""
-    return [TMUX_BIN, "attach-session", "-t", name, "--"]
+    return [TMUX_BIN, "attach-session", "-t", session_target(name), "--"]
+
+
+# tmux resolves a bare `-t name` by prefix / fnmatch, and treats `%3` / `@1`
+# as pane / window ids — so `-t fo` lands in session "foobar". A leading
+# "=" demands an exact session-name match. Commands that take a
+# target-SESSION accept "=name"; commands that take a target-PANE (or
+# window) need "=name:" — with plain "=name" they match nothing and fail
+# silently (verified against tmux 3.7c).
+def session_target(name: str) -> str:
+    return f"={name}"
+
+
+def pane_target(name: str) -> str:
+    """The active pane of session *name*, matched exactly."""
+    return f"={name}:"
+
+
+_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def safe_name(name: str) -> str:
-    """Validate tmux session names; reject anything with shell metacharacters,
-    dots, slashes, or a leading dash (which would look like a tmux flag).
+    """Validate tmux session names: letters, digits, "_" and "-" only, no
+    leading dash (it would look like a tmux flag).
 
-    Slashes in particular are forbidden because tmux historically built
-    socket paths from session names — even though that doesn't apply to
-    ccpipe today, it's cheap forward-looking hardening for any future
-    code that interpolates a session name into a filesystem path."""
+    An allowlist rather than a list of bad characters, so tmux target
+    syntax (`%3`, `@1`, `=x`, `!`, `~`), control characters and NUL can't
+    slip through, and nothing path- or shell-like ever reaches tmux argv."""
     if not name or name.startswith("-"):
         raise ValueError(f"invalid session name: {name!r}")
     # Defense-in-depth length cap: a session name is a short human label;
@@ -414,6 +442,6 @@ def safe_name(name: str) -> str:
     # size of every tmux argv / log line / display-message it flows into.
     if len(name) > 128:
         raise ValueError(f"invalid session name (too long): {name[:32]!r}…")
-    if any(c in name for c in " \t\n.:/'\"\\$`;&|<>(){}[]*?#"):
+    if not _SAFE_NAME_RE.fullmatch(name):
         raise ValueError(f"invalid session name: {name!r}")
     return name

@@ -138,13 +138,15 @@ python3 -m venv "$BACKEND/.venv"
 # shellcheck source=/dev/null
 . "$BACKEND/.venv/bin/activate"
 python -m pip install --upgrade --quiet pip
-pip install --quiet -e "$BACKEND"
+pip install --quiet -c "$BACKEND/constraints.txt" -e "$BACKEND"
 deactivate
 ok  "backend deps installed into $BACKEND/.venv"
 
 # ─── 2. frontend build ────────────────────────────────────────────────
 say "installing frontend deps"
-(cd "$FRONTEND" && npm install --silent)
+# npm ci installs exactly what package-lock.json pins (npm install may
+# drift to newer versions within the semver ranges).
+(cd "$FRONTEND" && npm ci --silent)
 say "building frontend bundle"
 (cd "$FRONTEND" && npm run build --silent)
 ok  "frontend built to $FRONTEND/dist"

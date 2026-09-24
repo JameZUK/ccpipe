@@ -154,9 +154,10 @@ _live_ws: set[WebSocket] = set()
 
 
 async def close_stale_ws_sockets(reason: str = "credentials changed") -> int:
-    """Close every live WebSocket whose session ``cred_version`` no
-    longer matches the current credential. Returns the count of sockets
-    actually closed.
+    """Close every live WebSocket whose session is no longer valid: its
+    ``cred_version`` no longer matches the current credential, or its login
+    has been revoked (logout). Returns the count of sockets actually
+    closed.
 
     Called from the credential-mutation routes (auth_change_credentials,
     totp_confirm_endpoint, totp_disable_endpoint) immediately after the
@@ -164,15 +165,12 @@ async def close_stale_ws_sockets(reason: str = "credentials changed") -> int:
     each close goes through Starlette's WebSocket.close which is
     idempotent and handles "already closed" cleanly.
     """
-    from .auth import get_credential
-    current_version = get_credential().version
     # Snapshot the set before iterating — close() schedules a discard
     # via the WS handler's finally block, which may mutate _live_ws.
     closed = 0
     for ws in list(_live_ws):
         session = ws.scope.get("session") or {}
-        stored = session.get("cred_version")
-        if not isinstance(stored, int) or stored != current_version:
+        if not is_session_authed(session):
             try:
                 await ws.close(code=1008, reason=reason)
                 closed += 1
@@ -180,7 +178,7 @@ async def close_stale_ws_sockets(reason: str = "credentials changed") -> int:
                 # Already-closed or transport-level error — log and continue.
                 log.debug("close_stale_ws_sockets: close failed: %s", exc)
     if closed:
-        log.info("credential rotation closed %d stale ws (reason=%r)", closed, reason)
+        log.info("closed %d stale ws (reason=%r)", closed, reason)
     return closed
 
 
@@ -347,6 +345,10 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
         "voice": voice_available,
     })
 
+    # Fallible (spawns a tmux query) — so it runs BEFORE anything below is
+    # registered in module-level state; a raise here leaks nothing.
+    tts_filter = await _build_tts_filter(session)
+
     # Track WS-send so we can serialize sends from multiple tasks safely.
     send_lock = asyncio.Lock()
 
@@ -490,7 +492,7 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     tmux_sub = control_client.subscribe(on_tmux_event)
     tts_sub = tts_service.subscribe(
         on_start=on_tts_start, on_chunk=on_tts_chunk, on_end=on_tts_end,
-        content_filter=await _build_tts_filter(session),
+        content_filter=tts_filter,
     )
 
     # Send any captured history before the live pump starts. xterm.js
@@ -550,20 +552,25 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     # that can raise-and-escape, so once the `tmux attach-session` child
     # exists it is guaranteed to be reaped by that loop's finally
     # (pty_proc.terminate()). See the NOTE near _capture_session_history.
-    pty_proc = PtyProcess(tmux.attach_argv(session),
+    pty_proc = PtyProcess(tmux.attach_argv(session), env=tmux.tmux_env(),
                           cols=initial_cols, rows=initial_rows)
     try:
         await pty_proc.start()
     except BaseException:
-        # start() itself failed (fork/exec) — reap any half-spawned child
-        # before propagating, since the finally below is not yet active.
+        # start() itself failed (fork/exec — likely under memory pressure)
+        # — reap any half-spawned child and undo the registrations made
+        # above before propagating, since the finally below is not yet
+        # active. Without this each failure leaked its counters, its
+        # _live_ws entry and a tmux subscription that keeps spawning a
+        # has-session probe on every sessions-changed event.
         with contextlib.suppress(Exception):
             await pty_proc.terminate()
+        with contextlib.suppress(ValueError):
+            _active_counters.remove(counters)
+        _live_ws.discard(websocket)
+        tmux_sub.cancel()
+        tts_sub.cancel()
         raise
-    # Any non-resize messages we drained while waiting for the initial
-    # resize are applied now that the relay exists.
-    for msg in leftover:
-        _handle_client_text(msg, pty_proc, session)
 
     pty_task = asyncio.create_task(_pty_lifecycle())
     mic_limiter = _MicRateLimiter()
@@ -580,6 +587,11 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     pending_releases: set[asyncio.Task[None]] = set()
 
     try:
+        # Any non-resize messages we drained while waiting for the initial
+        # resize are applied now that the relay exists (inside the try so a
+        # malformed one can't skip the teardown in finally).
+        for msg in leftover:
+            _handle_client_text(msg, pty_proc, session)
         while True:
             msg = await websocket.receive()
             if msg.get("type") == "websocket.disconnect":
@@ -955,7 +967,7 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     try:
         proc = await asyncio.create_subprocess_exec(
             tmux.TMUX_BIN, "capture-pane",
-            "-t", session,
+            "-t", tmux.pane_target(session),
             "-p",                              # print to stdout
             "-e",                              # include escape sequences
             "-J",                              # join wrapped lines (+ trailing
@@ -970,6 +982,7 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
             # pane state at this instant.
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env=tmux.tmux_env(),
         )
     except FileNotFoundError:
         return b""

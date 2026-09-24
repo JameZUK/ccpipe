@@ -19,8 +19,10 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import tmux
 from .auth import (
+    SESSION_MAX_AGE_S,
     authorize_websocket,
     behind_tls,
+    drop_bootstrap_password_env,
     get_credential,
     load_or_create_secret,
 )
@@ -152,6 +154,7 @@ async def lifespan(app: FastAPI):
     # Eagerly resolve (or generate + persist) credentials so the operator
     # can see them in the journal right away rather than on first login.
     get_credential()
+    drop_bootstrap_password_env()
     _warn_if_tls_with_public_bind()
     _warn_if_tls_with_open_host_validation()
     # Reset the login throttle on every app launch. Module-level state
@@ -216,7 +219,9 @@ app.add_middleware(
     session_cookie="__Host-ccpipe_session" if _BEHIND_TLS else "ccpipe_session",
     same_site="lax",
     https_only=_BEHIND_TLS,
-    max_age=60 * 60 * 24 * 30,   # 30 days
+    # Idle timeout, not an absolute one: auth.touch_session() re-stamps
+    # the cookie hourly while it's in use. See SESSION_MAX_AGE_S.
+    max_age=SESSION_MAX_AGE_S,
 )
 if _BEHIND_TLS:
     from starlette.middleware.trustedhost import TrustedHostMiddleware
