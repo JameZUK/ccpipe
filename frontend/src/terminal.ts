@@ -130,6 +130,20 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // Generous scrollback so long Claude responses (and replayed tmux
     // history sent on attach) stay reachable by scrolling up.
     scrollback: 10000,
+    // OSC 8 hyperlinks: xterm's default handler confirm()s and then
+    // window.open()s ANY URI the program emitted (javascript:, file:,
+    // custom app schemes…). Terminal output is untrusted, and dialogs are
+    // blocked in the PWA anyway — so open http(s) only, without an opener,
+    // and silently ignore everything else. (WebLinksAddon, for plain-text
+    // URLs, is separate and unaffected.)
+    linkHandler: {
+      activate: (_ev, uri) => {
+        let url: URL;
+        try { url = new URL(uri); } catch { return; }
+        if (url.protocol !== "http:" && url.protocol !== "https:") return;
+        window.open(url.href, "_blank", "noopener,noreferrer");
+      },
+    },
     theme: {
       background: "#0d0c08",
       foreground: "#e8dfc8",

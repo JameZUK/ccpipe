@@ -10,6 +10,10 @@
 // The re-render preserves scroll position by anchoring on the nearest
 // heading above the fold, so appends/edits don't jump the page. Mermaid
 // loads lazily — only when a document actually contains a diagram.
+//
+// While `claude` streams edits into a doc, changes arrive every poll, so
+// re-renders are debounced and rendered Mermaid SVG is cached by diagram
+// source — only new/changed diagrams go back through mermaid.
 
 import MarkdownIt from "markdown-it";
 import anchor from "markdown-it-anchor";
@@ -21,6 +25,7 @@ import DOMPurify from "dompurify";
 import { makeHighlight } from "./md-highlight";
 import { setupDocsDrawer } from "./docs-drawer";
 import { bindCloseButton } from "./close-page";
+import { mdViewUrl } from "./view-url";
 
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
@@ -91,8 +96,8 @@ const rootDir = _params.get("root") || baseDir;
 
 /** /view URL for *absPath*, preserving the project root so the switcher
  *  stays scoped as the reader navigates between documents. */
-function mdViewUrl(absPath: string): string {
-  return `/view?path=${encodeURIComponent(absPath)}&root=${encodeURIComponent(rootDir)}`;
+function viewUrl(absPath: string): string {
+  return mdViewUrl(absPath, rootDir);
 }
 
 function fail(message: string): void {
@@ -134,7 +139,7 @@ function renderSource(source: string): void {
       a.removeAttribute("rel");
       const target = resolveRelative(baseDir, href);
       if (/\.(md|markdown)$/i.test(target.replace(/[?#].*$/, ""))) {
-        a.setAttribute("href", mdViewUrl(target));
+        a.setAttribute("href", viewUrl(target));
       } else {
         a.setAttribute("href", `/api/fs/download?path=${encodeURIComponent(target)}`);
       }
@@ -144,24 +149,78 @@ function renderSource(source: string): void {
     }
   });
 
-  const mermaidNodes = Array.from(
-    docEl.querySelectorAll<HTMLElement>("pre.mermaid"),
-  );
-  if (mermaidNodes.length) void renderMermaid(mermaidNodes);
+  renderMermaid(Array.from(docEl.querySelectorAll<HTMLElement>("pre.mermaid")));
 }
 
-async function renderMermaid(nodes: HTMLElement[]): Promise<void> {
-  try {
-    const mermaid = (await import("mermaid")).default;
+// ── mermaid (lazy, cached by diagram source) ─────────────────────────────
+// Rendered diagram content keyed by the fence's source text. A cached
+// entry is a fragment holding clones of what mermaid put in the <pre>;
+// reuse clones it again (DOM nodes, no HTML strings). Failed renders are
+// never cached, so a broken diagram is retried once its source changes.
+const mermaidCache = new Map<string, DocumentFragment>();
+let mermaidReady: Promise<typeof import("mermaid").default> | null = null;
+// Bumped per render so an in-flight pass over a superseded document stops
+// early instead of rendering diagrams that are already detached.
+let mermaidGen = 0;
+
+function loadMermaid(): Promise<typeof import("mermaid").default> {
+  mermaidReady ??= import("mermaid").then(({ default: mermaid }) => {
     mermaid.initialize({
       startOnLoad: false,
       theme: "dark",
       securityLevel: "strict",
       fontFamily: "inherit",
     });
-    await mermaid.run({ nodes });
+    return mermaid;
+  });
+  // Let a failed chunk load retry on the next render.
+  mermaidReady.catch(() => { mermaidReady = null; });
+  return mermaidReady;
+}
+
+function renderMermaid(nodes: HTMLElement[]): void {
+  const gen = ++mermaidGen;
+  const todo: { node: HTMLElement; src: string }[] = [];
+  const used = new Set<string>();
+  for (const node of nodes) {
+    const src = node.textContent ?? "";
+    used.add(src);
+    const hit = mermaidCache.get(src);
+    if (hit) {
+      node.replaceChildren(hit.cloneNode(true));
+      // Mark as done so mermaid.run() would skip it, as for a fresh render.
+      node.setAttribute("data-processed", "true");
+    } else {
+      todo.push({ node, src });
+    }
+  }
+  // Bound the cache to the diagrams in the current document.
+  for (const k of mermaidCache.keys()) if (!used.has(k)) mermaidCache.delete(k);
+  if (todo.length) void renderMermaidNodes(todo, gen);
+}
+
+async function renderMermaidNodes(
+  todo: { node: HTMLElement; src: string }[], gen: number,
+): Promise<void> {
+  let mermaid: typeof import("mermaid").default;
+  try {
+    mermaid = await loadMermaid();
   } catch {
-    for (const n of nodes) n.classList.add("mermaid--failed");
+    for (const { node } of todo) node.classList.add("mermaid--failed");
+    return;
+  }
+  // One node per run() so a failure is attributed to its own diagram —
+  // run() otherwise throws the first error for the whole batch.
+  for (const { node, src } of todo) {
+    if (gen !== mermaidGen) return;
+    try {
+      await mermaid.run({ nodes: [node] });
+      const frag = document.createDocumentFragment();
+      for (const c of node.childNodes) frag.append(c.cloneNode(true));
+      mermaidCache.set(src, frag);
+    } catch {
+      node.classList.add("mermaid--failed");
+    }
   }
 }
 
@@ -199,6 +258,12 @@ function restoreScroll(a: ScrollAnchor): void {
 
 // ── live polling ─────────────────────────────────────────────────────────
 const POLL_MS = 1200;
+// Trailing debounce on change-driven re-renders: a burst of edits (e.g.
+// `claude` writing a doc piecemeal) collapses into one render of the
+// latest content, still landing well under a poll interval after quiet.
+const RENDER_DEBOUNCE_MS = 300;
+let renderTimer: number | undefined;
+let pendingSource: string | null = null;
 let lastKey = "";          // `${mtime}:${size}` of the rendered content
 let inFlight = false;      // guard against overlapping polls
 let removedShown = false;
@@ -247,18 +312,29 @@ async function poll(): Promise<void> {
       if (cr.status >= 400 && cr.status < 500) lastKey = key;
       return;
     }
-    const source = (await cr.json()).content ?? "";
-
-    const anchor = captureScroll();
-    renderSource(source);
-    restoreScroll(anchor);
+    pendingSource = (await cr.json()).content ?? "";
     lastKey = key;
-    pulseLive();
+    scheduleRender();
   } catch {
     /* transient network/JSON error — next tick retries */
   } finally {
     inFlight = false;
   }
+}
+
+function scheduleRender(): void {
+  window.clearTimeout(renderTimer);
+  renderTimer = window.setTimeout(() => {
+    if (pendingSource === null) return;
+    const source = pendingSource;
+    pendingSource = null;
+    // Capture at render time, not fetch time — the reader may have
+    // scrolled during the debounce.
+    const anchor = captureScroll();
+    renderSource(source);
+    restoreScroll(anchor);
+    pulseLive();
+  }, RENDER_DEBOUNCE_MS);
 }
 
 // ── document drawer (search + tree over the project's docs) ────────────
@@ -298,7 +374,7 @@ async function main(): Promise<void> {
 
   statusEl?.remove();
   renderSource(body.content ?? "");
-  if (docsBtn) setupDocsDrawer({ button: docsBtn, rootDir, filePath, viewUrl: mdViewUrl });
+  if (docsBtn) setupDocsDrawer({ button: docsBtn, rootDir, filePath, viewUrl });
 
   // Seed the change key from a stat call so its representation matches the
   // poll's (read returns an int mtime; stat a float — comparing the two

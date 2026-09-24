@@ -21,7 +21,6 @@ export interface AuthStatus {
   username?: string | null;
   // Retained for backward compat with the wire model only — the server
   // no longer sets it, and the client never branches on it.
-  otp_required?: boolean;
   otp_enrolled?: boolean;
 }
 

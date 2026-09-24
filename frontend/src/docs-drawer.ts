@@ -16,6 +16,7 @@
 // get a full-height overlay sheet. "/" opens it and focuses the search;
 // arrows / Enter / ←→ drive the list.
 
+import { listMarkdown } from "./api";
 import { MODIFIED_SHOW, RECENT_SHOW, fmtAge, readRecents, recentlyModified, recordRecent } from "./doc-recents";
 
 interface DocEntry { path: string; rel: string; mtime: number }
@@ -202,11 +203,7 @@ export function setupDocsDrawer(opts: DocsDrawerOptions): void {
     loading ??= (async () => {
       try {
         loadError = null;
-        const res = await fetch(`/api/fs/markdown-index?root=${encodeURIComponent(rootDir)}`, {
-          credentials: "same-origin", headers: { Accept: "application/json" },
-        });
-        if (!res.ok) { loadError = "Couldn't list documents."; return; }
-        const data = await res.json() as { entries: DocEntry[]; truncated?: boolean };
+        const data = await listMarkdown(rootDir);
         entries = data.entries.map((e) => ({ path: e.path, rel: e.rel, mtime: e.mtime ?? 0 }));
         loadedAt = Date.now();
         truncated = !!data.truncated;
@@ -219,7 +216,8 @@ export function setupDocsDrawer(opts: DocsDrawerOptions): void {
         }
         countEl.textContent = String(entries.length);
       } catch {
-        loadError = "Failed to load.";
+        // listMarkdown throws for both HTTP errors and network failures.
+        loadError = "Couldn't list documents.";
       }
     })();
     return loading;

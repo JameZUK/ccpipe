@@ -8,7 +8,7 @@
 import { getFsConfig } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
 import { FOLDER_SVG, MIC_SVG, STOP_SVG } from "./icons";
-import { commitPendingShare, discardPendingShare, peekPendingShare } from "./main";
+import { commitPendingShare, discardPendingShare, peekPendingShare } from "./share";
 import { TerminalSocket } from "./ws";
 import type { Waveform } from "./waveform";
 

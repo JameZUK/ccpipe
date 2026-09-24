@@ -19,16 +19,11 @@
 
 import { apiJson } from "./api";
 import { CLOSE_SVG, EYE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
+import { mdViewUrl } from "./view-url";
 
 // Matches Markdown files for the "view rendered" affordances.
 const MARKDOWN_RE = /\.(md|markdown)$/i;
 
-/** Build a /view URL for *absPath*, optionally scoping the viewer's
- *  document switcher to a project *root*. */
-function mdViewUrl(absPath: string, root?: string): string {
-  const u = `/view?path=${encodeURIComponent(absPath)}`;
-  return root ? `${u}&root=${encodeURIComponent(root)}` : u;
-}
 /** Open the rendered-Markdown viewer for *absPath* in a new tab. */
 function openMarkdownView(absPath: string, root?: string): void {
   window.open(mdViewUrl(absPath, root), "_blank", "noopener");
