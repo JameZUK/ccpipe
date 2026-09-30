@@ -63,12 +63,23 @@ Desktop:
 **Document viewer.** Any Markdown file in your project opens fully rendered
 in its own browser tab — GitHub-flavoured, with syntax highlighting, KaTeX
 math, and Mermaid diagrams. Open one from the file browser, the editor's
-preview button, or the toolbar **Docs ▾** menu (which lists every `.md`
-under the session's project root). It **live-updates**: edit the file — or
-let `claude` edit it — and the rendered view refreshes in place without
-moving your scroll position. Images and relative links resolve against the
-document's own directory. The page is served with its own tightened CSP,
-separate from the terminal app.
+preview button, or the toolbar **Docs** menu, which leads with your
+**Recent** documents and the **Recently modified** ones (with ages) above
+every `.md` under the session's project root. It **live-updates**: edit the
+file — or let `claude` edit it — and the rendered view refreshes in place
+without moving your scroll position (bursts of edits are coalesced, and
+unchanged diagrams aren't redrawn). Images and relative links resolve
+against the document's own directory. The page is served with its own
+tightened CSP, separate from the terminal app.
+
+Inside the viewer, **docs** opens a document drawer: type to search every
+Markdown file in the project (ranked, highlighted matches), or browse a
+folder tree that opens along the current document's path — with the same
+Recent / Recently modified sections on top. It docks beside the document on
+wide screens and is a full-height sheet on phones; `/` opens it from the
+keyboard. When ccpipe is installed as an app (no tab strip or back button),
+the **✕** at the top right of the viewer and the history view closes it and
+returns you to the terminal.
 
 <p align="center">
   <img src="docs/screenshots/Viewer-Markdown.png" width="520" alt="Rendered Markdown viewer: a live-updating tab showing GFM tables, syntax-highlighted code, a task list, KaTeX math, and a Mermaid diagram">
@@ -86,6 +97,22 @@ keeps no scrollback of its own, so this is the place to scroll back through
 what actually happened. On mobile, in-terminal touch-scroll is forwarded to
 Claude as wheel events, so dragging up scrolls Claude's own view (clean), the
 same as a desktop mouse wheel.
+
+**Prompt box.** Under the terminal — on phones, tablets and desktop — is a
+prompt box for composing longer prompts before sending them with **Enter**.
+Whatever you type is the session's **draft**: it's kept on the server, comes
+back whenever you re-enter the session, and **syncs live between devices**
+(type on the phone, see it appear on the iPad; the last edit wins). Sending
+clears it everywhere. Two small buttons beside it manage **saved prompts**:
+the bookmark saves the box's contents under a name, and the list button
+drops down your saved prompts (filterable, with a preview and delete) and
+inserts the one you pick at the cursor. Saved prompts are shared by every
+session and every device. On desktop, keystrokes still go straight to the
+terminal until you click into the box.
+
+**Copying from the terminal.** Select text and it's copied to your
+clipboard automatically (a toast confirms). Inside `claude`, which captures
+the mouse, hold **Shift** while dragging to make a selection.
 
 <p align="center">
   <img src="docs/screenshots/History-View.png" width="560" alt="Conversation history view: Markdown-rendered Claude replies with inline tool calls — shell commands run and file edits shown as diffs — live-updating in a console-styled tab">
@@ -279,6 +306,9 @@ proxy host.
   etc. remain reachable because this is an admin tool.
 - **TTS reads your Claude transcripts.** Only run ccpipe on a host
   where you trust everyone with access to those files.
+- **Drafts and saved prompts live on the server.** Unsent prompt-box
+  text and saved prompts are stored in plain text (`0600`) in ccpipe's
+  state directory so they can follow you between devices.
 - **0.0.0.0 bind.** Required for an off-host proxy; firewall `:8080`
   to the proxy host (IPv6 too, if you bind `::` — see
   [`docs/deployment.md`](docs/deployment.md)). The startup banner

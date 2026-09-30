@@ -148,6 +148,13 @@ breaks. Details live in the linked code and docs.
   can't ride the session cookie to download files or meter Kokoro. An
   absent header is allowed (non-browser clients have no ambient cookie).
   State-changing methods are covered by the `X-Requested-By` CSRF check.
+- **Drafts and saved prompts.** Prompt-box drafts (per session) and the
+  saved-prompts library are stored server-side in `drafts.json` /
+  `prompts.json` (`0600`, beside the credentials file) so they sync
+  between devices. Draft updates travel only over an authenticated
+  terminal WebSocket (re-checked per frame) and are relayed only to
+  other connections on the same session; the prompts API requires auth
+  plus the CSRF header (writes) or the same-origin gate (reads).
 - **Resource caps.** At most 32 user tmux sessions (each a live
   `claude`) can be created, so a runaway client can't exhaust memory;
   terminal-relay output is backpressured rather than buffered without

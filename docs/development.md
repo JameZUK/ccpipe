@@ -20,7 +20,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-The suite is ~270 cases; about 90 are skipped by default because they
+The suite is ~310 cases; about 95 are skipped by default because they
 require live credentials or external services. Set
 `CCPIPE_TEST_PASSWORD`, `CCPIPE_EXTERNAL_BASE`, etc. to enable them
 (see `tests/test_external_security.py` for the env-var list).
@@ -39,10 +39,16 @@ backend/
                        /api/sessions/{name}/history (transcript blocks,
                        before/after paged, for the /history view)
       fs.py            /api/fs/* (list, read, write, upload, download, ...)
+      prompts.py       /api/prompts (saved prompts: list, save, delete)
       tts.py           /api/tts/* (voices, config, speak, preview)
       mic.py           /api/mic/config (voice-input timing knobs)
       static.py        /, /view (Markdown viewer), /history (conversation
                        view), /manifest.webmanifest, /sw.js, icons
+    drafts.py          Per-session composer drafts (drafts.json), relayed
+                       live between devices by ws.py
+    safe_write.py      Atomic saves that keep the file's mode and write
+                       through symlinks (file panel + settings patch)
+    paths.py           state_dir() shared by auth/config/sticky
     tmux.py            libtmux wrapper for one-shot ops
     tmux_control.py    Long-lived `tmux -C` listener; pushes events
     tmux_setup.py      Sets server-wide default-shell etc. at startup
@@ -67,10 +73,18 @@ frontend/
     terminal.ts        xterm.js setup, resize, input wiring; mobile
                        touch-scroll → SGR wheel forwarding when the app
                        owns the mouse (so Claude scrolls its own view)
-    mobile.ts          Composer bar + modifier-key row for phone/tablet
+    mobile.ts          Composer bar (draft sync, saved prompts) on every
+                       layout + modifier-key row for phone/tablet
+    share.ts           PWA share-target capture + review helpers
+    inline-prompt.ts   In-app prompt/confirm dialogs (PWAs suppress the
+                       native ones)
     file-panel.ts      Adaptive file browser + inline editor
     viewer.ts          /view page: markdown-it + highlight.js + KaTeX +
                        Mermaid, DOMPurify-sanitised, live file reload
+    docs-drawer.ts     Viewer's document drawer: search, tree, recents
+    doc-recents.ts     Recent / recently-modified docs (viewer + main)
+    view-url.ts        The one /view URL builder
+    close-page.ts      ✕ close for /view and /history (installed app)
     history.ts         /history page: console-style conversation review,
                        lazy older paging + live tail (after cursor)
     md-chat.ts         Lean markdown renderer (markdown-it + highlight.js
@@ -84,7 +98,8 @@ frontend/
     styles.css
   public/
     manifest.webmanifest
-    sw.js              Minimal service worker for PWA install
+    sw.js              Self-retiring worker (retires any an old install
+                       registered; nothing registers it now)
     mic-worklet.js     AudioWorkletProcessor: 48k→16k mono Int16 PCM
   index.html
   vite.config.ts
@@ -115,12 +130,17 @@ Client → server text frames (JSON):
   the server can skip Kokoro round-trips while the user isn't listening
 - `{"type":"mic_stop"}` — the client tore down its mic; server
   computes drain + pad and writes release-PTT to the PTY itself
+- `{"type":"draft","text":"…"}` — the prompt box changed; the server
+  stores it as the session's draft and relays it to the session's other
+  connections (last write wins). Routed before the control-frame sniffs.
 
 Client → server binary frames are prefixed with a 1-byte channel tag:
 - `0x01` — Int16 PCM mic audio (16 kHz mono)
 
 Server → client text frames (JSON):
-- `hello` — session name + TTS + voice availability
+- `hello` — session name, cwd, TTS + voice availability, and the
+  session's current `draft`
+- `draft` — the draft was changed on another device
 - `session_event` — tmux control-mode forwarded events
 - `session_gone` — tmux session closed
 - `tts_start` / `tts_end` — frame the audio that follows

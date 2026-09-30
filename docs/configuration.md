@@ -223,6 +223,11 @@ lists transcripts by cwd and lets you pick one.
 - `~/.local/state/ccpipe/revoked_sessions.json` — ids of logins that
   were signed out, kept until their cookies would have expired anyway
   (beside the credentials file if `CCPIPE_CREDENTIALS_FILE` moves it).
+- `~/.local/state/ccpipe/drafts.json` — each session's prompt-box draft
+  (what's typed but not yet sent), shared across devices; capped per
+  draft, drafts untouched for 30 days are dropped. `0600`.
+- `~/.local/state/ccpipe/prompts.json` — the saved-prompts library
+  (name → text), shared by every session and device. `0600`.
 - `~/.local/state/ccpipe/initial_password.txt` — read-once `0400` file
   with the auto-generated password on first run. **Delete after
   reading.**
