@@ -1,5 +1,9 @@
-// Mobile UI: composer bar (textarea + mic + send), modifier-key row
-// above the soft keyboard, realtime waveform overlay during recording.
+// Composer bar (textarea + saved prompts + mic + send), plus — in the
+// touch layout — the modifier-key row above the soft keyboard and the
+// realtime waveform overlay during recording. Desktop mounts the same
+// composer with { desktop: true }: no key row (there's a real keyboard),
+// no composer mic (the statusbar mic pill is desktop's), no auto-focus
+// (keystrokes keep going to the terminal until the box is clicked).
 //
 // The mic button lives INSIDE the composer flow (not a fixed-position
 // FAB) so the soft keyboard opening doesn't shove it under the user's
@@ -57,9 +61,16 @@ export interface MobileUI {
   dispose(): void;
 }
 
+export interface ComposerOptions {
+  /** Desktop layout: composer only — see the header comment. */
+  desktop?: boolean;
+}
+
 export function mountMobileUI(parent: HTMLElement,
                                socket: TerminalSocket,
-                               mic: MobileMicAdapter): MobileUI {
+                               mic: MobileMicAdapter,
+                               opts: ComposerOptions = {}): MobileUI {
+  const desktop = opts.desktop === true;
   // ─── Composer row ────────────────────────────────────────────────────
   const composer = document.createElement("form");
   composer.className = "composer";
@@ -565,7 +576,7 @@ export function mountMobileUI(parent: HTMLElement,
   // The callback fires once immediately with the current value, then
   // again whenever main.ts flips micAvailable in onHello.
   const unsubAvail = mic.onAvailabilityChange((avail) => {
-    micBtn.hidden = !avail;
+    micBtn.hidden = desktop || !avail;
   });
 
   let waveform: Waveform | null = null;
@@ -888,7 +899,8 @@ export function mountMobileUI(parent: HTMLElement,
     ctrlStrip.append(ck);
   }
 
-  parent.append(composer, ctrlStrip, modifierRow);
+  if (desktop) parent.append(composer);
+  else parent.append(composer, ctrlStrip, modifierRow);
 
   // PWA share_target hand-off: if the user shared text into ccpipe
   // from another app, render an explicit review chip ABOVE the composer
@@ -963,7 +975,9 @@ export function mountMobileUI(parent: HTMLElement,
   // session open — without this they have to tap the textarea first to
   // get the soft keyboard up. We're inside a user-gesture context
   // (session-pick tap) so iOS / Android browsers should honour focus().
-  textarea.focus({ preventScroll: true });
+  // Not on desktop: there the terminal keeps the keyboard until the user
+  // clicks into the box.
+  if (!desktop) textarea.focus({ preventScroll: true });
 
   return {
     composer,

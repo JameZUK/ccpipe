@@ -744,7 +744,7 @@ async function attachTerminal(session: string): Promise<void> {
     }
   };
 
-  // Composer (touch layout only). A draft can arrive (in `hello` or relayed
+  // Composer. A draft can arrive (in `hello` or relayed
   // from another device) before the composer is mounted below; hold the
   // latest one until it is.
   let mobileUi: MobileUI | null = null;
@@ -978,8 +978,8 @@ async function attachTerminal(session: string): Promise<void> {
     try { terminalApi.dispose(); } catch (e) { console.warn("terminal dispose failed:", e); }
   }, { once: true });
 
-  // ─── Wire the mic controller into both UIs ────────────────────────────
-  if (mobile) {
+  // ─── Composer (both layouts) + mic wiring ─────────────────────────────
+  {
     mobileUi = mountMobileUI(view, socket, {
       get available() { return micAvailable; },
       onMicEvent: (kind) => handleMicEvent(kind),
@@ -998,12 +998,13 @@ async function attachTerminal(session: string): Promise<void> {
       onConnectionChange,
       onAvailabilityChange: onMicAvailabilityChange,
       getSessionCwd: () => sessionCwd,
-    });
+    }, { desktop: !mobile });
     // (Assigned inside the socket callbacks, so TS can't see it may be set.)
     const early = pendingDraft as { text: string; fromHello: boolean } | null;
     if (early) { mobileUi.applyDraft(early.text, early.fromHello); pendingDraft = null; }
-  } else {
-    // Desktop FAB: same tap-to-toggle behaviour
+  }
+  if (!mobile) {
+    // Desktop mic: the statusbar pill, same tap-to-toggle behaviour
     micFab.addEventListener("click", () => { void toggleMic(); });
     stateSubs.push((r) => micFab.classList.toggle("recording", r));
   }
