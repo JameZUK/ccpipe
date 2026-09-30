@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import tmux
+from . import drafts, tmux
 from .auth import is_session_authed
 from .mic import MicWriter
 from .pty_relay import PtyProcess, pump
@@ -307,6 +307,21 @@ async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
     await _TerminalConnection(websocket, session).run()
 
 
+# Live connections per tmux session, for fanning out composer-draft edits:
+# typing on one device updates the prompt box on every other device viewing
+# the same session (last write wins — the server just relays the newest).
+_draft_peers: dict[str, set["_TerminalConnection"]] = {}
+# Held so fire-and-forget relay sends aren't garbage-collected mid-flight.
+_draft_sends: set[asyncio.Task[bool]] = set()
+
+
+def _is_draft_frame(text: str) -> bool:
+    # The client serialises {"type":"draft","text":…} with "type" first, so
+    # a prefix check routes it without parsing every keystroke. Both the
+    # compact and the ": " spellings are accepted, as for control frames.
+    return text.startswith(('{"type":"draft"', '{"type": "draft"'))
+
+
 class _TerminalConnection:
     """One browser terminal connection to a tmux session.
 
@@ -468,6 +483,8 @@ class _TerminalConnection:
             "cwd": session_cwd_value,
             "tts": tts_service.enabled,
             "voice": voice_available,
+            # The session's composer draft, restored into the prompt box.
+            "draft": drafts.get(self.session),
         })
 
     def _register(self, tts_filter: Any) -> None:
@@ -477,6 +494,7 @@ class _TerminalConnection:
         _active_counters.append(self.counters)
         # Register for credential-rotation / logout kicks (M2).
         _live_ws.add(self.ws)
+        _draft_peers.setdefault(self.session, set()).add(self)
         # Subscribe to control-mode events; forward to this WS as JSON.
         self.tmux_sub = control_client.subscribe(self._on_tmux_event)
         self.tts_sub = tts_service.subscribe(
@@ -488,6 +506,11 @@ class _TerminalConnection:
         with contextlib.suppress(ValueError):
             _active_counters.remove(self.counters)
         _live_ws.discard(self.ws)
+        peers = _draft_peers.get(self.session)
+        if peers is not None:
+            peers.discard(self)
+            if not peers:
+                _draft_peers.pop(self.session, None)
         self.tmux_sub.cancel()
         self.tts_sub.cancel()
 
@@ -652,6 +675,13 @@ class _TerminalConnection:
             _warn_limited("oversized", "oversized text frame (%d > %d bytes); dropping",
                           tlen, _TEXT_FRAME_MAX_BYTES)
             return True
+        # Draft frames first: they carry arbitrary typed text, so they must
+        # never reach the substring sniffs below (ping / tts_mute / mic_stop).
+        if _is_draft_frame(text):
+            if not await self._still_authed("draft"):
+                return False
+            self._on_draft(text)
+            return True
         # Intercept "ping" first so we can reply pong from here. The pong
         # lets the frontend detect dead-but-not-yet-closed sockets after
         # Android tab-freeze: it expects a pong (or any server message)
@@ -688,6 +718,24 @@ class _TerminalConnection:
             return False
         _handle_client_text(text, self.pty_proc, self.session)
         return True
+
+    def _on_draft(self, text: str) -> None:
+        """The prompt box changed on this device: store it as the session's
+        draft and relay it to every OTHER connection on the session."""
+        try:
+            msg = _safe_json_loads(text)
+        except ValueError:
+            return
+        draft = msg.get("text")
+        if not isinstance(draft, str):
+            return
+        stored = drafts.put(self.session, draft)
+        for peer in list(_draft_peers.get(self.session, ())):
+            if peer is self:
+                continue
+            task = asyncio.create_task(peer.send_json({"type": "draft", "text": stored}))
+            _draft_sends.add(task)
+            task.add_done_callback(_draft_sends.discard)
 
     def _on_mic_stop(self) -> None:
         """The client has torn down its mic and wants claude's /voice

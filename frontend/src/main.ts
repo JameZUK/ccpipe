@@ -8,7 +8,7 @@ import {
   saveLastSession,
 } from "./display-prefs";
 import { DOC_SVG, FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
-import { isMobileLayout, mountMobileUI } from "./mobile";
+import { isMobileLayout, mountMobileUI, type MobileUI } from "./mobile";
 import { capturePendingShare } from "./share";
 import * as notifications from "./notifications";
 import { attachOptionSpacePtt } from "./ptt";
@@ -744,6 +744,16 @@ async function attachTerminal(session: string): Promise<void> {
     }
   };
 
+  // Composer (touch layout only). A draft can arrive (in `hello` or relayed
+  // from another device) before the composer is mounted below; hold the
+  // latest one until it is.
+  let mobileUi: MobileUI | null = null;
+  let pendingDraft: { text: string; fromHello: boolean } | null = null;
+  const deliverDraft = (text: string, fromHello: boolean): void => {
+    if (mobileUi) mobileUi.applyDraft(text, fromHello);
+    else pendingDraft = { text, fromHello };
+  };
+
   const socket = new TerminalSocket(wsUrlFor(session), {
     onStatus(status, info) {
       dot.className = "statusbar__dot " + (
@@ -808,7 +818,9 @@ async function attachTerminal(session: string): Promise<void> {
         socket.send({ type: "tts_mute", value: tts.isMuted });
       }
     },
+    onDraft(text) { deliverDraft(text, false); },
     onHello(msg) {
+      deliverDraft(msg.draft ?? "", true);
       // Seamless reconnect (short-gap reconnect to the same session): the
       // existing buffer is still accurate, and ws.ts drops the pane replay,
       // so we must NOT wipe and must NOT yank the view to the bottom — the
@@ -968,7 +980,7 @@ async function attachTerminal(session: string): Promise<void> {
 
   // ─── Wire the mic controller into both UIs ────────────────────────────
   if (mobile) {
-    mountMobileUI(view, socket, {
+    mobileUi = mountMobileUI(view, socket, {
       get available() { return micAvailable; },
       onMicEvent: (kind) => handleMicEvent(kind),
       onStateChange: (cb) => {
@@ -987,6 +999,9 @@ async function attachTerminal(session: string): Promise<void> {
       onAvailabilityChange: onMicAvailabilityChange,
       getSessionCwd: () => sessionCwd,
     });
+    // (Assigned inside the socket callbacks, so TS can't see it may be set.)
+    const early = pendingDraft as { text: string; fromHello: boolean } | null;
+    if (early) { mobileUi.applyDraft(early.text, early.fromHello); pendingDraft = null; }
   } else {
     // Desktop FAB: same tap-to-toggle behaviour
     micFab.addEventListener("click", () => { void toggleMic(); });

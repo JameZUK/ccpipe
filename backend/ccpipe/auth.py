@@ -33,6 +33,7 @@ The session secret used to sign cookies is handled separately in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import hashlib
 import hmac
@@ -752,11 +753,34 @@ _revoked: dict[str, float] | None = None
 _revoked_lock = threading.Lock()
 
 
-def _revoked_path() -> Path:
-    # Beside the credentials file, so tests that relocate it (and operators
-    # who override CCPIPE_CREDENTIALS_FILE) keep both together.
+def state_file(name: str) -> Path:
+    """Path for a small ccpipe state file (revoked sessions, drafts, saved
+    prompts). Kept beside the credentials file, so tests that relocate it
+    (and operators who override CCPIPE_CREDENTIALS_FILE) keep them all
+    together — and a test can never write into the real state dir."""
     creds = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    return creds.with_name("revoked_sessions.json")
+    return creds.with_name(name)
+
+
+def write_state_file(path: Path, data: bytes) -> None:
+    """Atomically replace *path* with *data*, 0600, in a 0700 dir."""
+    _ensure_state_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _revoked_path() -> Path:
+    return state_file("revoked_sessions.json")
 
 
 def _load_revoked() -> dict[str, float]:
@@ -785,14 +809,7 @@ def revoke_session(session: dict) -> None:
         revoked[sid] = now + SESSION_MAX_AGE_S
         path = _revoked_path()
         try:
-            _ensure_state_dir(path.parent)
-            tmp = path.with_suffix(".tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            try:
-                os.write(fd, json.dumps(revoked).encode())
-            finally:
-                os.close(fd)
-            os.replace(tmp, path)
+            write_state_file(path, json.dumps(revoked).encode())
         except OSError as exc:
             log.error("could not persist session revocation to %s: %s", path, exc)
 

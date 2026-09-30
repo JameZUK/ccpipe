@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import sticky, tmux, ws
+from .. import drafts, sticky, tmux, ws
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..tmux_control import CONTROL_SESSION_NAME
 from .fs import _enforce_fs_jail, content_disposition_attachment
@@ -182,6 +182,8 @@ async def rename_session_endpoint(name: str, body: RenameSessionBody) -> Session
         # Preserve sticky flag across rename — without this a sticky
         # session would silently lose its persisted entry on rename.
         sticky.rename(name, new_name)
+        # The composer draft follows the session too.
+        drafts.rename(name, new_name)
         # Drop any cached capture-pane blob under BOTH names so a
         # reconnect can't be served the prior occupant's history.
         ws.invalidate_history_cache(name)

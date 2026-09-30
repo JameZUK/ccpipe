@@ -12,6 +12,14 @@ export type ServerHello = {
   cwd: string | null;
   tts: boolean;
   voice: boolean;
+  /** The session's composer draft (shared across devices; "" if none). */
+  draft?: string;
+};
+
+/** Another device edited this session's composer draft. */
+export type ServerDraft = {
+  type: "draft";
+  text: string;
 };
 
 export type ServerSessionEvent = {
@@ -44,7 +52,8 @@ export type ServerMessage =
   | ServerSessionEvent
   | ServerSessionGone
   | ServerTtsStart
-  | ServerTtsEnd;
+  | ServerTtsEnd
+  | ServerDraft;
 
 export type ClientMessage =
   | { type: "input"; data: string }
@@ -57,7 +66,10 @@ export type ClientMessage =
   // the audio drain time from bytes-written stats, adds the configured
   // pad, and writes claude's release-PTT keystroke to the PTY itself
   // after that delay — the client no longer schedules it.
-  | { type: "mic_stop" };
+  | { type: "mic_stop" }
+  // The composer's contents changed on this device. The server stores it
+  // as the session's draft and relays it to the session's other devices.
+  | { type: "draft"; text: string };
 
 // Binary frame type prefixes (must match backend ws.py). Every binary
 // frame is now tagged so a PTY byte that happens to look like a TTS
@@ -77,6 +89,8 @@ export interface TerminalSocketHandlers {
   onTtsStart?: (msg: ServerTtsStart) => void;
   onTtsAudio?: (chunk: Uint8Array) => void;
   onTtsEnd?: () => void;
+  /** The session's composer draft was changed on another device. */
+  onDraft?: (text: string) => void;
   onStatus: (status: "connecting" | "open" | "closed" | "reconnecting",
              info?: { attempt: number; nextRetryMs?: number }) => void;
   /** Fires when the server closes the socket with code 1008 (policy
@@ -283,6 +297,9 @@ export class TerminalSocket {
             case "session_gone": this.handlers.onSessionGone?.(parsed as unknown as ServerSessionGone); return;
             case "tts_start": this.handlers.onTtsStart?.(parsed as unknown as ServerTtsStart); return;
             case "tts_end": this.handlers.onTtsEnd?.(); return;
+            case "draft":
+              if (typeof parsed.text === "string") this.handlers.onDraft?.(parsed.text);
+              return;
             case "pong":
               // Surface round-trip latency so the statusbar can show
               // it next to the connection dot. lastPingSentAt is 0 if
@@ -492,7 +509,26 @@ export class TerminalSocket {
     this.ws.send(out);
   }
 
+  private beforeCloseHooks = new Set<() => void>();
+
+  /** Run *cb* just before this socket is deliberately closed, while it is
+   *  still open — e.g. the composer flushing its last draft edit when the
+   *  user leaves the session. Returns an unsubscribe function. */
+  onBeforeClose(cb: () => void): () => void {
+    this.beforeCloseHooks.add(cb);
+    return () => { this.beforeCloseHooks.delete(cb); };
+  }
+
+  /** True while the underlying WebSocket is open (sends will be delivered). */
+  get isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   close(): void {
+    for (const cb of this.beforeCloseHooks) {
+      try { cb(); } catch { /* a hook must never block the close */ }
+    }
+    this.beforeCloseHooks.clear();
     this.closed = true;
     this.stopKeepalive();
     this.stopStaleCheck();

@@ -119,6 +119,43 @@ export function listMarkdown(root: string): Promise<MarkdownIndex> {
   );
 }
 
+// ─── /api/prompts ─────────────────────────────────────────────────────
+// Saved composer prompts: a global named library shared by every device.
+export interface SavedPrompt {
+  name: string;
+  text: string;
+  updated: number;   // unix seconds; the list comes newest first
+}
+
+export function listPrompts(): Promise<SavedPrompt[]> {
+  return apiJson<SavedPrompt[]>("/api/prompts");
+}
+
+/** Save *text* under *name*. Resolves "exists" (without saving) when the
+ *  name is taken and *overwrite* is false, so the caller can ask to
+ *  replace against the server's current list rather than a stale copy. */
+export async function savePrompt(name: string, text: string,
+                                 overwrite = false): Promise<"saved" | "exists"> {
+  const res = await fetch("/api/prompts", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-Requested-By": "ccpipe" },
+    body: JSON.stringify({ name, text, overwrite }),
+  });
+  if (res.status === 409 && !overwrite) {
+    const body = await res.json().catch(() => ({}));
+    // 409 is also the "prompt limit reached" answer — only a name clash
+    // is resolvable by replacing.
+    if (typeof body?.detail === "string" && body.detail.includes("exists")) return "exists";
+  }
+  if (!res.ok) throw await extractError(res);
+  return "saved";
+}
+
+export function deletePrompt(name: string): Promise<{ deleted: boolean }> {
+  return apiJson("/api/prompts/delete", { method: "POST", body: JSON.stringify({ name }) });
+}
+
 // ─── /api/mic/config ──────────────────────────────────────────────────
 // Voice-input behaviour knobs (see backend MicConfig). Not cached —
 // the settings modal mutates this and the mic streamer must see the

@@ -26,6 +26,7 @@ from .auth import (
     get_credential,
     load_or_create_secret,
 )
+from . import drafts
 from .settings_patch import patch_keybindings_safe, patch_settings_safe, should_apply
 from .tmux_control import CONTROL_SESSION_NAME, control_client
 from .tmux_setup import apply_server_defaults
@@ -192,6 +193,8 @@ async def lifespan(app: FastAPI):
             await _sidecar_task
         await tts_service.stop()
         await control_client.stop()
+        # Persist any composer-draft edits still inside the save debounce.
+        drafts.flush()
 
 
 # Disable the OpenAPI surface (/docs, /redoc, /openapi.json) by default
@@ -496,6 +499,7 @@ from .routes.debug import router as _debug_router
 from .routes.fs import router as _fs_router
 from .routes.mic import router as _mic_router
 from .routes.sessions import router as _sessions_router
+from .routes.prompts import router as _prompts_router
 from .routes.static import mount_static, router as _static_router
 from .routes.tts import router as _tts_router
 
@@ -503,6 +507,7 @@ app.include_router(_auth_router)
 app.include_router(_tts_router)
 app.include_router(_mic_router)
 app.include_router(_sessions_router)
+app.include_router(_prompts_router)
 app.include_router(_fs_router)
 app.include_router(_debug_router)
 app.include_router(_static_router)

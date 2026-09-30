@@ -75,3 +75,20 @@ export const EYE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
   <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>
   <circle cx="12" cy="12" r="3"/>
 </svg>`;
+
+// Composer "save prompt": a bookmark with a plus.
+export const BOOKMARK_PLUS_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+  <line x1="12" y1="7" x2="12" y2="13"/>
+  <line x1="9" y1="10" x2="15" y2="10"/>
+</svg>`;
+
+// Composer "load saved prompt": a stacked list.
+export const PROMPT_LIST_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <line x1="9" y1="6" x2="20" y2="6"/>
+  <line x1="9" y1="12" x2="20" y2="12"/>
+  <line x1="9" y1="18" x2="20" y2="18"/>
+  <circle cx="4.5" cy="6" r="1"/>
+  <circle cx="4.5" cy="12" r="1"/>
+  <circle cx="4.5" cy="18" r="1"/>
+</svg>`;

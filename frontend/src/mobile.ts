@@ -5,9 +5,10 @@
 // FAB) so the soft keyboard opening doesn't shove it under the user's
 // finger and cancel the touch.
 
-import { getFsConfig } from "./api";
+import { deletePrompt, getFsConfig, listPrompts, savePrompt, type SavedPrompt } from "./api";
 import { openDirectoryBrowser } from "./directory-browser";
-import { FOLDER_SVG, MIC_SVG, STOP_SVG } from "./icons";
+import { BOOKMARK_PLUS_SVG, FOLDER_SVG, MIC_SVG, PROMPT_LIST_SVG, STOP_SVG } from "./icons";
+import { inlineConfirm, inlinePrompt } from "./inline-prompt";
 import { commitPendingShare, discardPendingShare, peekPendingShare } from "./share";
 import { TerminalSocket } from "./ws";
 import type { Waveform } from "./waveform";
@@ -50,6 +51,9 @@ export interface MobileMicAdapter {
 export interface MobileUI {
   composer: HTMLFormElement;
   modifierRow: HTMLDivElement;
+  /** Apply the session's draft from the server: from the connect `hello`
+   *  (fromHello) or relayed live from another device. */
+  applyDraft(text: string, fromHello: boolean): void;
   dispose(): void;
 }
 
@@ -133,11 +137,92 @@ export function mountMobileUI(parent: HTMLElement,
   enterBtn.title = "Send (Enter)";
   enterBtn.textContent = "Enter";
 
-  composer.append(attachBtn, inputbox, micBtn, enterBtn);
+  // Saved prompts: save the box's contents under a name, and a list to
+  // insert a saved one back. Small buttons between the input and the mic.
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "composer__prompt-btn";
+  saveBtn.title = "Save this prompt";
+  saveBtn.setAttribute("aria-label", "Save this prompt");
+  saveBtn.innerHTML = BOOKMARK_PLUS_SVG;
+  saveBtn.disabled = true;
+  const loadBtn = document.createElement("button");
+  loadBtn.type = "button";
+  loadBtn.className = "composer__prompt-btn";
+  loadBtn.title = "Saved prompts";
+  loadBtn.setAttribute("aria-label", "Saved prompts");
+  loadBtn.setAttribute("aria-haspopup", "true");
+  loadBtn.innerHTML = PROMPT_LIST_SVG;
+
+  composer.append(attachBtn, inputbox, saveBtn, loadBtn, micBtn, enterBtn);
+
+  // Brief confirmation above the composer ("saved “…”", errors).
+  const toast = document.createElement("div");
+  toast.className = "composer__toast";
+  toast.hidden = true;
+  composer.append(toast);
+  let toastTimer: number | null = null;
+  const flash = (msg: string, ok = true): void => {
+    toast.textContent = msg;
+    toast.classList.toggle("composer__toast--err", !ok);
+    toast.hidden = false;
+    if (toastTimer !== null) clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => { toast.hidden = true; }, ok ? 1600 : 2600);
+  };
+
+  // ─── Draft sync ──────────────────────────────────────────────────────
+  // The box's contents are the session's draft, stored on the server and
+  // shared live with every other device on this session (last write wins).
+  // Edits go out throttled; drafts relayed from another device come in via
+  // applyDraft(). `lastSynced` is the text the server and this device last
+  // agreed on — anything else in the box is a local edit not yet sent.
+  const DRAFT_SEND_MS = 200;
+  let lastSynced = "";
+  let applyingRemote = false;
+  let draftTimer: number | null = null;
+  const sendDraftNow = (): void => {
+    if (draftTimer !== null) { clearTimeout(draftTimer); draftTimer = null; }
+    const v = textarea.value;
+    if (v === lastSynced || !socket.isOpen) return;
+    socket.send({ type: "draft", text: v });
+    lastSynced = v;
+  };
+  const scheduleDraftSend = (): void => {
+    if (applyingRemote || draftTimer !== null) return;
+    draftTimer = window.setTimeout(sendDraftNow, DRAFT_SEND_MS);
+  };
+  const applyDraft = (text: string, fromHello: boolean): void => {
+    if (fromHello && textarea.value !== lastSynced) {
+      // Edits typed here that never reached the server (e.g. just before
+      // the connection dropped) are the newest — they win, and go out now.
+      sendDraftNow();
+      return;
+    }
+    lastSynced = text;
+    if (textarea.value === text) return;
+    const focused = document.activeElement === textarea;
+    const start = textarea.selectionStart, end = textarea.selectionEnd;
+    applyingRemote = true;
+    textarea.value = text;
+    autoresize();
+    applyingRemote = false;
+    if (focused) {
+      textarea.setSelectionRange(Math.min(start, text.length), Math.min(end, text.length));
+    }
+  };
+  // Leaving the session (or the socket otherwise being closed on purpose)
+  // flushes the last edit while the socket is still open.
+  const unsubBeforeClose = socket.onBeforeClose(sendDraftNow);
+  const onHide = (): void => { if (document.visibilityState === "hidden") sendDraftNow(); };
+  document.addEventListener("visibilitychange", onHide);
 
   const autoresize = () => {
     textarea.style.height = "auto";
     textarea.style.height = Math.min(textarea.scrollHeight, 160) + "px";
+    // Every change to the box — typing, path insert, slash completion,
+    // shared text, send — funnels through here.
+    saveBtn.disabled = !textarea.value.trim();
+    scheduleDraftSend();
   };
 
   // Slash-command palette. When the composer starts with "/", surface
@@ -243,6 +328,7 @@ export function mountMobileUI(parent: HTMLElement,
       socket.send({ type: "input", data: v + "\r" });
       textarea.value = "";
       autoresize();
+      sendDraftNow();   // sent → the shared draft is now empty, everywhere
       return;
     }
     // Empty composer + Enter: nudge claude past a TUI prompt that
@@ -250,6 +336,160 @@ export function mountMobileUI(parent: HTMLElement,
     // the user having to type a space first. Matches what the old
     // modifier-row Enter did before it was promoted into the composer.
     socket.send({ type: "input", data: "\r" });
+  });
+
+  // ─── Saved prompts ───────────────────────────────────────────────────
+  const insertAtCursor = (snippet: string): void => {
+    const v = textarea.value;
+    const start = textarea.selectionStart ?? v.length;
+    const end = textarea.selectionEnd ?? v.length;
+    textarea.value = v.slice(0, start) + snippet + v.slice(end);
+    const pos = start + snippet.length;
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(pos, pos);
+    autoresize();
+  };
+
+  saveBtn.addEventListener("click", async () => {
+    const text = textarea.value;
+    if (!text.trim()) return;
+    const suggested = text.trim().split(/\s+/).slice(0, 5).join(" ").slice(0, 60);
+    const raw = await inlinePrompt("Save prompt as:", suggested);
+    const name = raw?.trim();
+    if (!name) return;
+    try {
+      let result = await savePrompt(name, text);
+      if (result === "exists") {
+        if (!(await inlineConfirm(`Replace the saved prompt “${name}”?`, "Replace"))) return;
+        result = await savePrompt(name, text, true);
+      }
+      flash(`saved “${name}”`);
+    } catch (err) {
+      flash(`couldn't save: ${(err as Error).message}`, false);
+    }
+  });
+
+  const menu = document.createElement("div");
+  menu.className = "prompt-menu";
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+  composer.append(menu);
+
+  const closeMenu = (): void => {
+    menu.hidden = true;
+    menu.replaceChildren();
+    loadBtn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onAway, true);
+    document.removeEventListener("keydown", onMenuKey, true);
+  };
+  function onAway(e: Event): void {
+    const t = e.target as Node;
+    if (!menu.contains(t) && !loadBtn.contains(t)) closeMenu();
+  }
+  function onMenuKey(e: KeyboardEvent): void {
+    if (e.key === "Escape") { e.preventDefault(); closeMenu(); }
+  }
+  const menuNote = (text: string): HTMLElement => {
+    const n = document.createElement("div");
+    n.className = "prompt-menu__note";
+    n.textContent = text;
+    return n;
+  };
+
+  const renderMenu = (prompts: SavedPrompt[], filter = ""): void => {
+    const list = menu.querySelector<HTMLElement>(".prompt-menu__list")!;
+    list.replaceChildren();
+    const q = filter.trim().toLowerCase();
+    const shown = q
+      ? prompts.filter((p) => p.name.toLowerCase().includes(q) || p.text.toLowerCase().includes(q))
+      : prompts;
+    if (!prompts.length) {
+      list.append(menuNote("No saved prompts yet — use the bookmark button to save one."));
+      return;
+    }
+    if (!shown.length) { list.append(menuNote("No matches.")); return; }
+    for (const p of shown) {
+      const row = document.createElement("div");
+      row.className = "prompt-menu__row";
+      row.setAttribute("role", "menuitem");
+      row.tabIndex = 0;
+      const body = document.createElement("div");
+      body.className = "prompt-menu__body";
+      const name = document.createElement("span");
+      name.className = "prompt-menu__name";
+      name.textContent = p.name;
+      const preview = document.createElement("span");
+      preview.className = "prompt-menu__preview";
+      preview.textContent = p.text.replace(/\s+/g, " ").trim();
+      body.append(name, preview);
+      // Two-tap delete: first tap arms it, a second within 3 s deletes.
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "prompt-menu__del";
+      del.title = "Delete";
+      del.setAttribute("aria-label", `Delete “${p.name}”`);
+      del.textContent = "×";
+      let armed: number | null = null;
+      del.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (armed === null) {
+          del.textContent = "delete?";
+          del.classList.add("prompt-menu__del--armed");
+          armed = window.setTimeout(() => {
+            armed = null;
+            del.textContent = "×";
+            del.classList.remove("prompt-menu__del--armed");
+          }, 3000);
+          return;
+        }
+        clearTimeout(armed);
+        try {
+          await deletePrompt(p.name);
+          const i = prompts.indexOf(p);
+          if (i >= 0) prompts.splice(i, 1);
+          renderMenu(prompts, filter);
+        } catch (err) {
+          flash(`couldn't delete: ${(err as Error).message}`, false);
+        }
+      });
+      const pick = (): void => { closeMenu(); insertAtCursor(p.text); };
+      row.addEventListener("click", pick);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
+      });
+      row.append(body, del);
+      list.append(row);
+    }
+  };
+
+  loadBtn.addEventListener("click", async () => {
+    if (!menu.hidden) { closeMenu(); return; }
+    const list = document.createElement("div");
+    list.className = "prompt-menu__list";
+    list.append(menuNote("Loading…"));
+    menu.replaceChildren(list);
+    menu.hidden = false;
+    loadBtn.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onAway, true);
+    document.addEventListener("keydown", onMenuKey, true);
+    let prompts: SavedPrompt[];
+    try {
+      prompts = await listPrompts();
+    } catch (err) {
+      list.replaceChildren(menuNote(`Couldn't load saved prompts: ${(err as Error).message}`));
+      return;
+    }
+    if (menu.hidden) return;                      // closed while loading
+    if (prompts.length > 6) {
+      const search = document.createElement("input");
+      search.type = "search";
+      search.className = "prompt-menu__search";
+      search.placeholder = "Filter saved prompts…";
+      search.setAttribute("aria-label", "Filter saved prompts");
+      search.addEventListener("input", () => renderMenu(prompts, search.value));
+      menu.prepend(search);
+    }
+    renderMenu(prompts);
   });
 
   // Mic gestures. Tap = toggle (existing behaviour). Long-press =
@@ -728,7 +968,13 @@ export function mountMobileUI(parent: HTMLElement,
   return {
     composer,
     modifierRow,
+    applyDraft,
     dispose() {
+      sendDraftNow();
+      unsubBeforeClose();
+      document.removeEventListener("visibilitychange", onHide);
+      closeMenu();
+      if (toastTimer !== null) clearTimeout(toastTimer);
       unsubscribe();
       unsubConn();
       unsubAvail();
