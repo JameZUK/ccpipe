@@ -65,6 +65,18 @@ function sgrWheel(down: boolean, col = 1, row = 1): string {
  *  execCommand("copy") — which works in more places (older / Firefox-Android /
  *  http-origin contexts where navigator.clipboard is absent or rejects).
  *  Returns whether SOMETHING copied so the caller can tell the user. */
+/** Open a link from terminal output (plain URL or OSC 8 hyperlink) the way
+ *  a link should open from an installed app: the real URL goes straight to
+ *  window.open in a new browsing context with no opener, so the browser
+ *  sends an out-of-app site to a browser tab / in-app browser and ccpipe
+ *  stays where it was. Only http(s) — terminal output is untrusted. */
+function openTerminalLink(uri: string): void {
+  let url: URL;
+  try { url = new URL(uri); } catch { return; }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return;
+  window.open(url.href, "_blank", "noopener,noreferrer");
+}
+
 async function writeClipboard(text: string): Promise<boolean> {
   if (!text) return false;
   try {
@@ -133,16 +145,10 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // OSC 8 hyperlinks: xterm's default handler confirm()s and then
     // window.open()s ANY URI the program emitted (javascript:, file:,
     // custom app schemes…). Terminal output is untrusted, and dialogs are
-    // blocked in the PWA anyway — so open http(s) only, without an opener,
-    // and silently ignore everything else. (WebLinksAddon, for plain-text
-    // URLs, is separate and unaffected.)
+    // blocked in the PWA anyway — so route through openTerminalLink
+    // (http(s) only, no opener).
     linkHandler: {
-      activate: (_ev, uri) => {
-        let url: URL;
-        try { url = new URL(uri); } catch { return; }
-        if (url.protocol !== "http:" && url.protocol !== "https:") return;
-        window.open(url.href, "_blank", "noopener,noreferrer");
-      },
+      activate: (_ev, uri) => openTerminalLink(uri),
     },
     theme: {
       background: "#0d0c08",
@@ -173,7 +179,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
 
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.loadAddon(new WebLinksAddon());
+  // Plain-text URLs. The addon's default handler opens a BLANK window and
+  // then navigates it — in the installed app that blank window is in the
+  // app's scope, so the browser opens it inside ccpipe's own window and the
+  // site loads there, replacing the terminal UI. openTerminalLink hands the
+  // real URL to window.open, so the browser routes it out of the app.
+  term.loadAddon(new WebLinksAddon((_ev, uri) => openTerminalLink(uri)));
   const search = new SearchAddon();
   term.loadAddon(search);
 
@@ -865,15 +876,20 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   //    OSC 52 is just bytes in the output stream, so anything that can print
   //    to the terminal could otherwise plant text (e.g. a command) in the
   //    operator's clipboard. Only honour it right after the operator's own
-  //    input — tmux copy-mode emits it the instant the copy key is pressed —
-  //    and cap the size. (tmux itself is pinned to set-clipboard external +
-  //    allow-passthrough off, so pane programs can't emit it anyway; this is
-  //    the second layer.) Unsolicited writes are refused visibly.
-  const OSC52_GESTURE_WINDOW_MS = 2000;
+  //    input, and cap the size. (tmux is pinned to set-clipboard external +
+  //    allow-passthrough off, so pane programs can't emit raw OSC 52; but
+  //    tmux-initiated copies still pass — notably Claude Code, which copies
+  //    a mouse selection made in its own UI via `tmux load-buffer -w`.)
+  //    Unsolicited writes are refused visibly.
+  //    The window counts from the gesture's RELEASE too: Claude copies when
+  //    the drag ends, so timing from the press made any selection slower
+  //    than the window fail ("ignored…") while quick ones worked.
+  const OSC52_GESTURE_WINDOW_MS = 3000;
   const OSC52_MAX_B64 = 350_000;          // ≈ 256 KiB of decoded text
   let lastUserInputAt = 0;
   const noteUserInput = (): void => { lastUserInputAt = performance.now(); };
   document.addEventListener("pointerdown", noteUserInput, true);
+  document.addEventListener("pointerup", noteUserInput, true);
   document.addEventListener("keydown", noteUserInput, true);
   const oscDisposable = term.parser.registerOscHandler(52, (data) => {
     if (performance.now() - lastUserInputAt > OSC52_GESTURE_WINDOW_MS) {
@@ -892,6 +908,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     document.removeEventListener("mouseup", copySelection);
     container.removeEventListener("touchend", copySelection);
     document.removeEventListener("pointerdown", noteUserInput, true);
+    document.removeEventListener("pointerup", noteUserInput, true);
     document.removeEventListener("keydown", noteUserInput, true);
     selDisposable.dispose();
     oscDisposable.dispose();

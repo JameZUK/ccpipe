@@ -122,9 +122,12 @@ breaks. Details live in the linked code and docs.
   bootstrap password set in a drop-in doesn't leak into every pane.
 - **Terminal clipboard (OSC 52).** tmux is pinned to
   `set-clipboard external` and `allow-passthrough off`, so programs in
-  a pane can't pass clipboard writes through to the browser. As a
-  second layer, the browser only honours an OSC 52 write within 2 s of
-  the operator's own key or pointer input on the page, caps its size,
+  a pane can't pass raw clipboard writes through to the browser — only
+  tmux-initiated copies reach it (notably Claude Code, which copies a
+  selection made in its own UI via `tmux load-buffer -w`). As a second
+  layer, the browser only honours an OSC 52 write within 3 s of the
+  operator's own key or pointer input on the page (press *or release*,
+  since Claude copies when a drag ends), caps its size,
   and toasts a preview of what was copied; an unsolicited write is
   refused with a visible "ignored" toast. Clipboard *reads* are never
   answered.
