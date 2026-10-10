@@ -92,8 +92,17 @@ function wsUrlFor(session: string): string {
   // replay replaces rather than appends. This is what fixes the bug
   // where output that arrived during a disconnect window never made it
   // into xterm's scrollback (refresh was the only workaround).
-  return `${proto}//${location.host}/ws?session=${encodeURIComponent(session)}`;
+  return `${proto}//${location.host}/ws?session=${encodeURIComponent(session)}`
+    + `&build=${encodeURIComponent(WS_BUILD_TAG)}`;
 }
+
+// This bundle's build id, carried on every terminal connection so the
+// server's access log shows which frontend each device is running (e.g.
+// "WebSocket /ws?session=x&build=daed158_2026-10-10T1110Z [accepted]") —
+// a device still on a stale cached build is then visible at a glance
+// instead of being inferred. Compact form of __BUILD_ID__ ("sha · date
+// HH:MMZ"); the backend ignores the parameter.
+const WS_BUILD_TAG = __BUILD_ID__.replace(" · ", "_").replace(" ", "T").replace(":", "");
 
 let authRequired = false;
 
