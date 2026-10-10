@@ -490,3 +490,17 @@ async def test_session_mutations_invalidate_list_cache(monkeypatch):
     await tmux.kill_session("x")
     await tmux.rename_session("x", "y")
     assert len(seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_handshake_disconnect_is_quiet(monkeypatch):
+    # A client that vanishes before hello used to escape as an
+    # "Exception in ASGI application" traceback on every network handoff.
+    from fastapi import WebSocketDisconnect
+    from ccpipe import ws
+
+    async def boom(self):
+        raise WebSocketDisconnect(code=1006)
+
+    monkeypatch.setattr(ws._TerminalConnection, "run", boom)
+    await ws.handle_terminal_ws(object(), "work")    # must not raise

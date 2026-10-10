@@ -110,6 +110,18 @@ export class TerminalSocket {
   private closed = false;
   private reconnectDelayMs = 500;
   private readonly maxReconnectDelayMs = 8000;
+  // A dial that never completes. During a mobile network handoff a new
+  // socket can be dialled on the network that's going away; its SYNs are
+  // black-holed and the browser leaves it CONNECTING for minutes. Nothing
+  // else touched a CONNECTING socket (reconnectNow / kickStaleSocket skip
+  // it, the stale watchdog only runs once open), so the app sat silent —
+  // no attempts reached the server — until a manual reload. Abandon a dial
+  // after CONNECT_TIMEOUT_MS (→ normal backoff retry), and let lifecycle
+  // events (resume, online) replace one older than STALE_CONNECTING_MS.
+  private static readonly CONNECT_TIMEOUT_MS = 10_000;
+  private static readonly STALE_CONNECTING_MS = 3_000;
+  private connectStartedAt = 0;
+  private connectTimer: number | null = null;
   private retryAttempt = 0;
   private hadOpenedOnce = false;
   // Cache of the latest viewport size so that a resize computed before
@@ -202,6 +214,16 @@ export class TerminalSocket {
                            { attempt: this.retryAttempt });
     const ws = new WebSocket(this.resolveUrl());
     ws.binaryType = "arraybuffer";
+    this.connectStartedAt = Date.now();
+    this.clearConnectTimer();
+    this.connectTimer = window.setTimeout(() => {
+      this.connectTimer = null;
+      // Closing a CONNECTING socket fires onclose (1006) → the usual
+      // backoff retry below.
+      if (this.ws === ws && ws.readyState === WebSocket.CONNECTING) {
+        try { ws.close(); } catch {}
+      }
+    }, TerminalSocket.CONNECT_TIMEOUT_MS);
 
     ws.onopen = () => {
       // Ignore events from a socket we already replaced — without this
@@ -209,6 +231,7 @@ export class TerminalSocket {
       // to 'open' even though `this.ws` now points at a different,
       // possibly-still-connecting socket.
       if (this.ws !== ws) return;
+      this.clearConnectTimer();
       this.reconnectDelayMs = 500;
       this.retryAttempt = 0;
       this.hadOpenedOnce = true;
@@ -530,6 +553,7 @@ export class TerminalSocket {
     }
     this.beforeCloseHooks.clear();
     this.closed = true;
+    this.clearConnectTimer();
     this.stopKeepalive();
     this.stopStaleCheck();
     if (this.pendingRetry !== null) {
@@ -595,7 +619,10 @@ export class TerminalSocket {
     if (this.closed) return;
     if (this.ws) {
       const rs = this.ws.readyState;
-      if (rs === WebSocket.OPEN || rs === WebSocket.CONNECTING) return;
+      if (rs === WebSocket.OPEN) return;
+      // A dial in flight is left alone — unless it has been stuck long
+      // enough to be the black-holed kind (see CONNECT_TIMEOUT_MS).
+      if (rs === WebSocket.CONNECTING && !this.connectingIsStale()) return;
     }
     if (!force) {
       const now = Date.now();
@@ -648,7 +675,7 @@ export class TerminalSocket {
    * and there's no reason to tear it down. */
   private kickStaleSocket(force: boolean): void {
     if (!this.ws) return;
-    if (this.ws.readyState === WebSocket.CONNECTING) return;
+    if (this.ws.readyState === WebSocket.CONNECTING && !this.connectingIsStale()) return;
     if (!force && this.ws.readyState === WebSocket.OPEN) {
       // Heuristic: a socket that's received data within the most
       // recent keepalive cycle is genuinely alive. The keepalive
@@ -666,6 +693,17 @@ export class TerminalSocket {
     }
     try { this.ws.close(); } catch {}
     this.ws = null;
+  }
+
+  private connectingIsStale(): boolean {
+    return Date.now() - this.connectStartedAt > TerminalSocket.STALE_CONNECTING_MS;
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
   }
 
   private attachLifecycleHooks(): void {

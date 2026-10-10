@@ -157,8 +157,10 @@ async def test_no_relay_leak_when_handshake_send_fails():
     before the failing hello and terminate() was never called, so this
     asserts the exact regression away."""
     ws = _FakeWS(fail_hello=True)
-    with pytest.raises(WebSocketDisconnect):
-        await wsmod.handle_terminal_ws(ws, "sess")
+    # The handshake disconnect is absorbed by handle_terminal_ws (logged
+    # quietly — it's routine on mobile network handoffs); what matters
+    # here is that it leaves nothing behind.
+    await wsmod.handle_terminal_ws(ws, "sess")
     # Either no relay was spawned, or if one was it was also reaped —
     # never a spawn without a matching terminate.
     for pty in _FakePty.instances:

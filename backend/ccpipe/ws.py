@@ -304,7 +304,14 @@ async def _release_ptt_after(
 
 
 async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
-    await _TerminalConnection(websocket, session).run()
+    try:
+        await _TerminalConnection(websocket, session).run()
+    except WebSocketDisconnect:
+        # The client went away mid-handshake (e.g. a phone's network
+        # handoff, or the browser replacing a dial it had just started).
+        # Routine, and nothing to clean up — registrations happen after
+        # the handshake sends — so don't log it as an ASGI traceback.
+        log.debug("ws for session=%s closed during handshake", session)
 
 
 # Live connections per tmux session, for fanning out composer-draft edits:
