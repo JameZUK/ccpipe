@@ -111,8 +111,18 @@ session and every device. On desktop, keystrokes still go straight to the
 terminal until you click into the box.
 
 **Copying from the terminal.** Select text and it's copied to your
-clipboard automatically (a toast confirms). Inside `claude`, which captures
-the mouse, hold **Shift** while dragging to make a selection.
+clipboard automatically — a toast confirms and previews what was copied.
+Inside `claude`, which captures the mouse, a normal drag selects in Claude's
+own UI and Claude copies it; hold **Shift** while dragging to select the
+terminal text directly instead. Links printed in the terminal open in your
+browser (a new tab, or the in-app browser on a phone), leaving ccpipe where
+it was.
+
+**Staying connected.** The terminal reconnects by itself — after a dropped
+signal, switching between Wi-Fi and mobile data, or coming back to the app.
+A connection attempt that gets stuck on a network that's gone is abandoned
+after 10 seconds and retried, and returning to the app redials straight
+away, so you shouldn't need to reload.
 
 <p align="center">
   <img src="docs/screenshots/History-View.png" width="560" alt="Conversation history view: Markdown-rendered Claude replies with inline tool calls — shell commands run and file edits shown as diffs — live-updating in a console-styled tab">

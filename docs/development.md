@@ -94,7 +94,9 @@ frontend/
                        config-driven VAD + max-record cap
     tts.ts             Chunked audio player + per-session mute
     ws.ts              WS client; JSON control (input/resize/ping/
-                       tts_mute/mic_stop) + tagged binary frames
+                       tts_mute/mic_stop/draft) + tagged binary frames;
+                       auto-reconnect (backoff ≤ 8 s, 10 s connect
+                       timeout, redial on resume / online)
     styles.css
   public/
     manifest.webmanifest

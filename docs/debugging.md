@@ -241,6 +241,41 @@ Order of likelihood:
    order — no loss, but a perceptible "catch-up flicker". Not a code
    bug; document for users if it's a recurring complaint.
 
+## "It looks crashed" — is it the server or the client?
+
+When the app looks dead (frozen terminal, stuck on "reconnecting"), check
+the server first; it is usually fine:
+
+```bash
+systemctl --user status ccpipe          # running? since when?
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: <your-host>' \
+     http://localhost:8080/api/health   # 200 = the app answers
+```
+
+Then read the connection timeline around the time it happened:
+
+```bash
+journalctl --user -u ccpipe --since "<time>" -o short-iso \
+  | grep -E '"GET / HTTP|WebSocket /ws|ws closed:'
+```
+
+A stretch with **no `WebSocket /ws … [accepted]` lines at all** until the
+user's manual reload (`"GET / HTTP`) means the client wasn't reaching the
+server — not a server fault. The classic cause is a phone switching
+between Wi-Fi and mobile data: a new connection attempt is dialled on the
+network that's going away, its packets are black-holed, and the browser
+leaves it "connecting" for minutes. The client now handles this
+(`frontend/src/ws.ts`): a dial still CONNECTING after 10 s is abandoned and
+retried with the normal backoff (capped at 8 s), and resume / `online`
+events replace a dial that has been stuck for more than 3 s. If a user
+still sees it, confirm they are on the current build (Settings → About
+shows the build id; Force-reload refreshes it).
+
+Short-lived connections closing with `close_code=1005` throughout the day
+are normal on a phone — app switches, screen locks and session changes all
+close the socket. A client that disappears *during* the attach handshake
+is logged at debug level only (it is routine on network handoffs).
+
 ## Where to look in code
 
 | Symptom                                      | Start reading at                                         |
