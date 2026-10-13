@@ -238,6 +238,30 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     console.warn("xterm webgl renderer unavailable, using DOM:", e);
   }
 
+  // Rebuild the glyph atlas when the app comes back to the foreground.
+  // Mobile browsers (seen on Firefox Android, 2026-10-13) can reclaim or
+  // corrupt the WebGL glyph texture while the app is backgrounded WITHOUT
+  // firing webglcontextlost, so onContextLoss above never runs and the
+  // renderer keeps stamping the wrong image for particular characters —
+  // tmux held "Cross-band … streaming-vbert-quality-metrics" while the
+  // screen showed "Cr  - nd … s□ream n -v□er□-□ua", with t/i/g/q/l broken
+  // everywhere — until the PWA was restarted. A rebuild on resume costs one
+  // redraw.
+  const rebuildGlyphs = (): void => {
+    if (!webglActive || !webgl) return;
+    try { webgl.clearTextureAtlas(); } catch {}
+    try { term.refresh(0, term.rows - 1); } catch {}
+  };
+  let wasHidden = false;
+  const onGlyphVisibility = (): void => {
+    if (document.visibilityState === "hidden") { wasHidden = true; return; }
+    if (wasHidden) { wasHidden = false; rebuildGlyphs(); }
+  };
+  // Restored from the back/forward cache: same risk, no visibility event.
+  const onGlyphPageshow = (e: PageTransitionEvent): void => { if (e.persisted) rebuildGlyphs(); };
+  document.addEventListener("visibilitychange", onGlyphVisibility);
+  window.addEventListener("pageshow", onGlyphPageshow);
+
   // ─── Resize handling ──────────────────────────────────────────────────
   // xterm.js cell metrics depend on the rendered font. If we fit before web
   // fonts swap in we get the wrong cols/rows. We:
@@ -1301,6 +1325,8 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     getDebugState, dumpBuffer, dumpAllBuffers,
     dispose: () => {
       disposed = true;
+      document.removeEventListener("visibilitychange", onGlyphVisibility);
+      window.removeEventListener("pageshow", onGlyphPageshow);
       if (wireRetryTimer !== null) { clearTimeout(wireRetryTimer); wireRetryTimer = null; }
       if (absorbTimer !== null) { clearTimeout(absorbTimer); absorbTimer = null; absorbRedraw = false; }
       // Tear down any outstanding scrollToBottom onRender subscriptions.
