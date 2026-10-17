@@ -126,6 +126,22 @@ async def apply_server_defaults() -> None:
         code, out = await _run_tmux("set-window-option", "-g", name, value)
         if code != 0:
             log.warning("tmux set-window-option -g %s %s failed: %s", name, value, out)
+    # Pass OSC 8 hyperlinks through to the browser. Claude Code wraps a long
+    # URL onto several rows itself (hard newlines, not a soft wrap), so the
+    # plain-text link detector only ever sees one row's worth of it and a
+    # tap opens half the URL. Each row also carries an OSC 8 with the WHOLE
+    # URL, but tmux drops OSC 8 for clients lacking the "hyperlinks"
+    # feature, which xterm* doesn't get by default. terminal-features is an
+    # array that -a appends to, so only add it once per server; it applies
+    # to clients attaching from now on. The browser opens OSC 8 links via
+    # openTerminalLink (http(s) only), same as plain-text URLs.
+    code, out = await _run_tmux("show-options", "-s", "terminal-features")
+    if code == 0 and not any(
+            "hyperlinks" in line and "xterm*" in line for line in out.splitlines()):
+        code, out = await _run_tmux("set-option", "-sa", "terminal-features",
+                                    "xterm*:hyperlinks")
+        if code != 0:
+            log.warning("tmux terminal-features hyperlinks failed: %s", out)
     # A server started before tmux_env() existed (or by an older ccpipe)
     # still carries CCPIPE_* in its global environment, which new panes
     # inherit. Drop them; panes already running keep what they have.

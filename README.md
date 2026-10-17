@@ -116,7 +116,8 @@ Inside `claude`, which captures the mouse, a normal drag selects in Claude's
 own UI and Claude copies it; hold **Shift** while dragging to select the
 terminal text directly instead. Links printed in the terminal open in your
 browser (a new tab, or the in-app browser on a phone), leaving ccpipe where
-it was.
+it was. A long link Claude wraps over several lines opens in full from any
+of them.
 
 **Staying connected.** The terminal reconnects by itself — after a dropped
 signal, switching between Wi-Fi and mobile data, or coming back to the app.

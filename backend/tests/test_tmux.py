@@ -86,3 +86,30 @@ async def test_apply_server_defaults_warm_restart_skips_anchor_create(monkeypatc
     await tmux_setup.apply_server_defaults()
     assert not any(c[0] == "new-session" for c in calls)
     assert "anchor session create" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_apply_server_defaults_enables_hyperlinks_once(monkeypatch):
+    # OSC 8 must reach the browser (claude hard-wraps long URLs, so only the
+    # OSC 8 carries the whole URL). terminal-features is an append-only
+    # array, so it's added only when not already present.
+    def run(existing: str):
+        calls: list[tuple[str, ...]] = []
+
+        async def fake_run_tmux(*args: str, capture: bool = True) -> tuple[int, str]:
+            calls.append(args)
+            if args[:3] == ("show-options", "-s", "terminal-features"):
+                return 0, existing
+            return 0, ""
+        return calls, fake_run_tmux
+
+    calls, fake = run("terminal-features[0] xterm*:clipboard:ccolour:cstyle:focus:title\n")
+    monkeypatch.setattr(tmux_setup, "_run_tmux", fake)
+    await tmux_setup.apply_server_defaults()
+    assert ("set-option", "-sa", "terminal-features", "xterm*:hyperlinks") in calls
+
+    calls, fake = run("terminal-features[0] xterm*:clipboard:title\n"
+                      "terminal-features[3] xterm*:hyperlinks\n")
+    monkeypatch.setattr(tmux_setup, "_run_tmux", fake)
+    await tmux_setup.apply_server_defaults()
+    assert not any(c[:3] == ("set-option", "-sa", "terminal-features") for c in calls)
