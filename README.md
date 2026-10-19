@@ -134,6 +134,13 @@ session on another device and its tiles come back. On a phone the screen is
 too narrow, so the terminal stays full-screen and the tiles wait for a
 bigger screen.
 
+<p align="center">
+  <img src="docs/screenshots/Desktop-Tiles.png" width="720" alt="Four sessions on one screen: the main session with a git log and a split pane, a live tile running the backend tests, and two watching tiles showing a server log and a system monitor">
+</p>
+<p align="center">
+  <img src="docs/screenshots/Desktop-Tiles-Menu.png" width="440" alt="The tiles menu: add another session beside or below the focused tile, or arrange the tiles side by side, as a grid, main + stack, or stacked">
+</p>
+
 **tmux controls.** (Hover over any toolbar icon, or press and hold it on a
 touch screen, to see what it does.) The toolbar **tmux** button opens a slim row of tmux
 controls for the focused session: window tabs (click to switch), new,
@@ -141,6 +148,10 @@ rename and close window; split the pane side by side or top/bottom, next
 pane, zoom, close pane; copy mode with page up/down; and a **C-b** prefix
 key for anything else. Each button runs a fixed tmux command on the server,
 so nothing you type there reaches tmux's command line.
+
+<p align="center">
+  <img src="docs/screenshots/Desktop-Tmux-Controls.png" width="560" alt="The tmux controls row: window tabs, new / rename / close window, pane split and zoom buttons, copy mode, and the C-b prefix key, with a tooltip explaining the split button; below, a window split into two panes">
+</p>
 
 **Staying connected.** The terminal reconnects by itself — after a dropped
 signal, switching between Wi-Fi and mobile data, or coming back to the app.
