@@ -228,6 +228,8 @@ lists transcripts by cwd and lets you pick one.
   draft, drafts untouched for 30 days are dropped. `0600`.
 - `~/.local/state/ccpipe/prompts.json` — the saved-prompts library
   (name → text), shared by every session and device. `0600`.
+- `~/.local/state/ccpipe/layouts.json` — each session's tile layout
+  (which other sessions are tiled beside it, and how). `0600`.
 - `~/.local/state/ccpipe/initial_password.txt` — read-once `0400` file
   with the auto-generated password on first run. **Delete after
   reading.**

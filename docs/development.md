@@ -40,6 +40,7 @@ backend/
                        before/after paged, for the /history view)
       fs.py            /api/fs/* (list, read, write, upload, download, ...)
       prompts.py       /api/prompts (saved prompts: list, save, delete)
+      layouts.py       /api/layouts/{session} (tile layouts, layouts.json)
       tts.py           /api/tts/* (voices, config, speak, preview)
       mic.py           /api/mic/config (voice-input timing knobs)
       static.py        /, /view (Markdown viewer), /history (conversation
@@ -52,6 +53,9 @@ backend/
     tmux.py            libtmux wrapper for one-shot ops
     tmux_control.py    Long-lived `tmux -C` listener; pushes events
     tmux_setup.py      Sets server-wide default-shell etc. at startup
+    tmux_ui.py         tmux toolbar: fixed action table (windows, panes,
+                       copy-mode) behind /api/sessions/{name}/tmux, plus
+                       window/size queries for watch tiles
     ws.py              WebSocket handler, tagged binary frame protocol;
                        owns backend-orchestrated mic release-PTT timing
     pty_relay.py       PTY spawn + async read/write
@@ -75,6 +79,12 @@ frontend/
                        owns the mouse (so Claude scrolls its own view)
     mobile.ts          Composer bar (draft sync, saved prompts) on every
                        layout + modifier-key row for phone/tablet
+    layout.ts          Tile layouts: split tree around the main terminal,
+                       dividers, presets, saved per session on the server
+    tile.ts            One tile: its own socket + xterm (DOM renderer);
+                       watch (read-only, ignore-size, scaled) or live
+    tiles-menu.ts      Toolbar tiles menu (add session, presets, clear)
+    tmuxbar.ts         tmux controls row for the focused session
     share.ts           PWA share-target capture + review helpers
     inline-prompt.ts   In-app prompt/confirm dialogs (PWAs suppress the
                        native ones)

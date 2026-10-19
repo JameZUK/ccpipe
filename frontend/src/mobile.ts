@@ -58,12 +58,18 @@ export interface MobileUI {
   /** Apply the session's draft from the server: from the connect `hello`
    *  (fromHello) or relayed live from another device. */
   applyDraft(text: string, fromHello: boolean): void;
+  /** Name the tile the composer and keys now type into (null: the main
+   *  terminal's session). */
+  setTarget(session: string | null): void;
   dispose(): void;
 }
 
 export interface ComposerOptions {
   /** Desktop layout: composer only — see the header comment. */
   desktop?: boolean;
+  /** Where typed input goes: the focused tile's socket when one is
+   *  focused. Drafts always stay with the main session's socket. */
+  inputSocket?: () => TerminalSocket;
 }
 
 export function mountMobileUI(parent: HTMLElement,
@@ -71,6 +77,7 @@ export function mountMobileUI(parent: HTMLElement,
                                mic: MobileMicAdapter,
                                opts: ComposerOptions = {}): MobileUI {
   const desktop = opts.desktop === true;
+  const inputSock = (): TerminalSocket => opts.inputSocket?.() ?? socket;
   // ─── Composer row ────────────────────────────────────────────────────
   const composer = document.createElement("form");
   composer.className = "composer";
@@ -81,7 +88,13 @@ export function mountMobileUI(parent: HTMLElement,
   const textarea = document.createElement("textarea");
   textarea.className = "composer__input";
   textarea.rows = 1;
-  textarea.placeholder = "Type a prompt…";
+  // The composer types into a focused tile's session when there is one.
+  let targetSession: string | null = null;
+  let lastConnected = true;
+  const placeholderText = (): string => !lastConnected
+    ? "offline — waiting to reconnect…"
+    : targetSession ? `Type into ${targetSession}…` : "Type a prompt…";
+  textarea.placeholder = placeholderText();
   textarea.spellcheck = false;
   textarea.autocapitalize = "none";
   textarea.autocomplete = "off";
@@ -336,7 +349,7 @@ export function mountMobileUI(parent: HTMLElement,
       // and interprets carriage-return as "submit prompt" — the same
       // byte a physical Enter from xterm produces. With \n the line
       // lands in claude's input field but the prompt never fires.
-      socket.send({ type: "input", data: v + "\r" });
+      inputSock().send({ type: "input", data: v + "\r" });
       textarea.value = "";
       autoresize();
       sendDraftNow();   // sent → the shared draft is now empty, everywhere
@@ -346,7 +359,7 @@ export function mountMobileUI(parent: HTMLElement,
     // expects a bare keypress (e.g. "press Enter to continue") without
     // the user having to type a space first. Matches what the old
     // modifier-row Enter did before it was promoted into the composer.
-    socket.send({ type: "input", data: "\r" });
+    inputSock().send({ type: "input", data: "\r" });
   });
 
   // ─── Saved prompts ───────────────────────────────────────────────────
@@ -569,7 +582,8 @@ export function mountMobileUI(parent: HTMLElement,
     textarea.disabled = !connected || composer.classList.contains("recording");
     micBtn.disabled = !connected;
     enterBtn.disabled = !connected || composer.classList.contains("recording");
-    textarea.placeholder = connected ? "Type a prompt…" : "offline — waiting to reconnect…";
+    lastConnected = connected;
+    textarea.placeholder = placeholderText();
   });
 
   // Mic visibility: hide when voice support hasn't arrived (or is gone).
@@ -746,7 +760,7 @@ export function mountMobileUI(parent: HTMLElement,
     let aborted = false;
     let wasFocused = false;
 
-    const fire = () => { socket.send({ type: "input", data: k.bytes ?? "" }); };
+    const fire = () => { inputSock().send({ type: "input", data: k.bytes ?? "" }); };
     const stop = () => {
       if (initialTimer !== null) { clearTimeout(initialTimer); initialTimer = null; }
       if (repeatTimer !== null) { clearInterval(repeatTimer); repeatTimer = null; }
@@ -824,7 +838,7 @@ export function mountMobileUI(parent: HTMLElement,
   const sendCtrlForChar = (s: string): void => {
     const c = s && s.length ? s[s.length - 1].toLowerCase() : "";
     if (c >= "a" && c <= "z") {
-      socket.send({ type: "input", data: String.fromCharCode(c.charCodeAt(0) - 96) });
+      inputSock().send({ type: "input", data: String.fromCharCode(c.charCodeAt(0) - 96) });
     }
     setCtrl(false);   // one combo consumes the armed Ctrl
   };
@@ -891,7 +905,7 @@ export function mountMobileUI(parent: HTMLElement,
     });
     ck.addEventListener("pointerup", () => {
       if (aborted) { aborted = false; return; }
-      socket.send({ type: "input", data: String.fromCharCode(letter.charCodeAt(0) - 96) });
+      inputSock().send({ type: "input", data: String.fromCharCode(letter.charCodeAt(0) - 96) });
       setCtrl(false);   // one combo → disarm + hide strip; keeps keyboard up
       try { if (document.activeElement !== textarea && !textarea.disabled) textarea.focus({ preventScroll: true }); } catch {}
     });
@@ -983,6 +997,11 @@ export function mountMobileUI(parent: HTMLElement,
     composer,
     modifierRow,
     applyDraft,
+    setTarget(session: string | null) {
+      targetSession = session;
+      textarea.placeholder = placeholderText();
+      composer.classList.toggle("composer--retargeted", session !== null);
+    },
     dispose() {
       sendDraftNow();
       unsubBeforeClose();

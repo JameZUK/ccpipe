@@ -116,9 +116,26 @@ function decodeOsc52(data: string): string | null {
   }
 }
 
+/** Extra knobs for terminals shown as tiles beside the main one. */
+export interface TerminalOptions {
+  /** Focus the terminal on creation (default true; tiles pass false). */
+  autoFocus?: boolean;
+  /** Whether document-level shortcuts (Ctrl+F search, Ctrl +/-/0 font size)
+   *  are this terminal's to handle — with several terminals on screen, only
+   *  the focused one's. Default: always. */
+  isActive?: () => boolean;
+  /** Watch tile: the size is the watched session's (setFixedSize), never
+   *  the container's, and the rendered terminal is scaled to fit. */
+  watch?: boolean;
+  /** Use the WebGL renderer (default true). Tiles pass false: xterm shares
+   *  one WebGL glyph atlas between terminals, and disposing one terminal
+   *  (closing a tile, switching its mode) corrupted the others' glyphs. */
+  webgl?: boolean;
+}
+
 export function createTerminal(container: HTMLElement, socket: TerminalSocket,
                                 initialPrefs: DisplayPrefs = loadDisplayPrefs(),
-                                sessionName?: string) {
+                                sessionName?: string, opts: TerminalOptions = {}) {
   // Theme tuned to the ccpipe palette: parchment-on-charcoal with amber
   // accents. The full ANSI 16 are overridden so TUI output (Claude Code uses
   // warm yellow / orange heavily) sits in the same hue family as the chrome.
@@ -193,7 +210,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // without the user having to click the terminal first. On mobile the
   // composer textarea will steal focus right after via mountMobileUI,
   // which is the desired behaviour there.
-  term.focus();
+  if (opts.autoFocus !== false) term.focus();
 
   // Suppress alt-screen toggles. tmux's own attach + Claude Code's TUI
   // both send `\x1b[?1049h` (and variants 47, 1047, 1048) which switch
@@ -229,7 +246,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // looks exactly like "the terminal didn't reflow for the new font".
   let webgl: WebglAddon | null = null;
   let webglActive = false;
-  try {
+  if (opts.webgl !== false) try {
     webgl = new WebglAddon();
     webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; webglActive = false; });
     term.loadAddon(webgl);
@@ -312,8 +329,38 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // the bug; pick 100 as a sane "definitely not a real terminal" floor.
   const MIN_CONTAINER_PX = 100;
 
+  // Watch tiles: the watched session's size, scaled to fit the container.
+  let fixedSize: { cols: number; rows: number } | null = null;
+  const rescaleWatch = (): void => {
+    const el = term.element;
+    const screen = container.querySelector(".xterm-screen") as HTMLElement | null;
+    if (!el || !screen) return;
+    el.style.transform = "";
+    const w = screen.offsetWidth;
+    const h = screen.offsetHeight;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (!w || !h || !cw || !ch) return;
+    const scale = Math.min(cw / w, ch / h, 1.25);
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    el.style.transformOrigin = "0 0";
+    el.style.transform = `scale(${scale})`;
+  };
+  const setFixedSize = (cols: number, rows: number): void => {
+    if (disposed || cols < 2 || rows < 2) return;
+    fixedSize = { cols, rows };
+    try { term.resize(cols, rows); } catch {}
+    requestAnimationFrame(() => { if (!disposed) rescaleWatch(); });
+  };
+
   const sendResize = () => {
     if (disposed) return;
+    if (opts.watch) {
+      // Never resize the session from a watch tile — just re-fit the scale.
+      if (fixedSize) rescaleWatch();
+      return;
+    }
     // Pre-flight: bail on transient too-small container states. See the
     // numbered comment above for the why.
     if (container.clientWidth < MIN_CONTAINER_PX
@@ -795,6 +842,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   };
 
   const onTermKeyForSearch = (e: KeyboardEvent) => {
+    if (opts.isActive && !opts.isActive()) return;
     const cmdLike = e.ctrlKey || e.metaKey;
     if (cmdLike && e.key.toLowerCase() === "f") {
       e.preventDefault();
@@ -1321,7 +1369,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   }
 
   return {
-    term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom,
+    term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom, setFixedSize,
     getDebugState, dumpBuffer, dumpAllBuffers,
     dispose: () => {
       disposed = true;

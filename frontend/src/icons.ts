@@ -92,3 +92,16 @@ export const PROMPT_LIST_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="cur
   <circle cx="4.5" cy="12" r="1"/>
   <circle cx="4.5" cy="18" r="1"/>
 </svg>`;
+
+// Small toolbar icons (tmux bar, tile headers). 24-unit stroke icons.
+const icon = (body: string): string =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+export const ICON_PLUS = icon(`<path d="M12 5v14M5 12h14"/>`);
+export const ICON_PENCIL = icon(`<path d="M17 3l4 4L8 20H4v-4z"/>`);
+export const ICON_X = icon(`<path d="M6 6l12 12M18 6L6 18"/>`);
+export const ICON_SPLIT_H = icon(`<rect x="3" y="4" width="18" height="16" rx="1"/><path d="M12 4v16"/>`);
+export const ICON_SPLIT_V = icon(`<rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 12h18"/>`);
+export const ICON_NEXT = icon(`<path d="M5 12h12M13 6l6 6-6 6"/>`);
+export const ICON_EXPAND = icon(`<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>`);
+export const ICON_COPY = icon(`<rect x="9" y="9" width="12" height="12" rx="1"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>`);
+export const ICON_OPEN = icon(`<path d="M14 3h7v7M10 14L21 3M19 14v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/>`);

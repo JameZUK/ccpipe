@@ -119,6 +119,28 @@ browser (a new tab, or the in-app browser on a phone), leaving ccpipe where
 it was. A long link Claude wraps over several lines opens in full from any
 of them.
 
+**Tiles: several sessions on one screen.** On an iPad or a desktop, the
+toolbar **tiles** button adds other sessions beside or below the terminal
+you're in, so you can keep an eye on several at once. Drag the dividers to
+resize, or pick a preset: side by side, grid, main + stack, stacked. Each
+tile starts out **watching**: a read-only view that never resizes the
+session, so watching a session doesn't reflow it on your other devices.
+Click into a tile and start typing (or tap its *watching* label) and it
+goes **live**: your keys, the prompt box and the tmux controls then act on
+that session. A tile's header lights up when it has new output, **⤢**
+gives it the whole screen for a moment, and **↗** makes it the main
+session. Tiles are remembered per session, on the server: open the same
+session on another device and its tiles come back. On a phone the screen is
+too narrow, so the terminal stays full-screen and the tiles wait for a
+bigger screen.
+
+**tmux controls.** The toolbar **tmux** button opens a slim row of tmux
+controls for the focused session: window tabs (click to switch), new,
+rename and close window; split the pane side by side or top/bottom, next
+pane, zoom, close pane; copy mode with page up/down; and a **C-b** prefix
+key for anything else. Each button runs a fixed tmux command on the server,
+so nothing you type there reaches tmux's command line.
+
 **Staying connected.** The terminal reconnects by itself — after a dropped
 signal, switching between Wi-Fi and mobile data, or coming back to the app.
 A connection attempt that gets stuck on a network that's gone is abandoned

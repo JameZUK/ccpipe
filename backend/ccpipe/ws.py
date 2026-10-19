@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import drafts, tmux
+from . import drafts, tmux, tmux_ui
 from .auth import is_session_authed
 from .mic import MicWriter
 from .pty_relay import PtyProcess, pump
@@ -303,9 +303,31 @@ async def _release_ptt_after(
         log.exception("scheduled release-PTT after %.2fs failed", delay_seconds)
 
 
-async def handle_terminal_ws(websocket: WebSocket, session: str) -> None:
+class _NoTts:
+    """Stand-in TTS subscription for tiles, which never speak."""
+    muted = True
+
+    def cancel(self) -> None:
+        pass
+
+
+# How often a watch tile re-checks its session's size.
+_WATCH_SIZE_POLL_S = 1.0
+
+
+async def _watch_client_size(session: str) -> tuple[int, int]:
+    """Client size that shows *session*'s window exactly: the window plus
+    the status line(s) tmux draws on every client."""
+    size = await tmux_ui.window_size(session) or (_FALLBACK_COLS, _FALLBACK_ROWS)
+    status = await tmux_ui.display(session, "#{status}") or "on"
+    lines = 0 if status == "off" else int(status) if status.isdigit() else 1
+    return _clamp_dim(size[0]), _clamp_dim(size[1] + lines)
+
+
+async def handle_terminal_ws(websocket: WebSocket, session: str,
+                             watch: bool = False, tile: bool = False) -> None:
     try:
-        await _TerminalConnection(websocket, session).run()
+        await _TerminalConnection(websocket, session, watch=watch, tile=tile).run()
     except WebSocketDisconnect:
         # The client went away mid-handshake (e.g. a phone's network
         # handoff, or the browser replacing a dial it had just started).
@@ -338,9 +360,18 @@ class _TerminalConnection:
     that used to live in one 570-line function's closures lives here, and
     each phase is its own method."""
 
-    def __init__(self, websocket: WebSocket, session: str) -> None:
+    def __init__(self, websocket: WebSocket, session: str,
+                 watch: bool = False, tile: bool = False) -> None:
         self.ws = websocket
         self.session = session
+        # A secondary tile beside the main terminal (tile=True): no TTS, no
+        # mic, and it never creates a session. A watch tile additionally
+        # attaches read-only + ignore-size, so watching never resizes the
+        # session, and its input is dropped.
+        self.watch = watch
+        self.tile = tile or watch
+        self.watch_size: tuple[int, int] | None = None
+        self.watch_task: asyncio.Task[None] | None = None
         # Track WS-send so we can serialize sends from multiple tasks safely.
         self.send_lock = asyncio.Lock()
         # Per-WS byte accounting. Registered in the global active list for
@@ -377,14 +408,31 @@ class _TerminalConnection:
     # ── lifecycle ──────────────────────────────────────────────────────
     async def run(self) -> None:
         await self.ws.accept()
-        if not await self._ensure_session():
+        if self.tile:
+            # A tile shows an existing session; it must never quietly
+            # (re)create one — a tile left over from a killed session would
+            # otherwise resurrect it.
+            if not await tmux.session_exists(self.session):
+                with contextlib.suppress(Exception):
+                    await self.ws.send_json({"type": "session_gone", "session": self.session})
+                    await self.ws.close(code=1000, reason="no such session")
+                return
+        elif not await self._ensure_session():
             return
 
-        # Wait briefly for the client's initial 'resize' message so we spawn
-        # the PTY (and thus the tmux client) at the correct dimensions. With
-        # window-size=latest this means the attached window resizes correctly
-        # on first attach instead of briefly rendering at the fallback 120x40.
-        cols, rows, leftover = await _wait_for_initial_resize(self.ws, self.session)
+        if self.watch:
+            # The tmux client is sized to the session, not the browser: the
+            # tile scales the result to fit.
+            self.watch_size = await _watch_client_size(self.session)
+            cols, rows = self.watch_size
+            leftover: list[str] = []
+        else:
+            # Wait briefly for the client's initial 'resize' message so we
+            # spawn the PTY (and thus the tmux client) at the correct
+            # dimensions. With window-size=latest this means the attached
+            # window resizes correctly on first attach instead of briefly
+            # rendering at the fallback 120x40.
+            cols, rows, leftover = await _wait_for_initial_resize(self.ws, self.session)
 
         # Capture tmux's full pane (history + visible) on EVERY connect, not
         # just the first one. The frontend `term.reset()`s on `hello` so the
@@ -393,7 +441,13 @@ class _TerminalConnection:
         # after a reconnect" hole — during a network blip, lines that
         # scrolled into tmux's history were previously never delivered to
         # xterm because we skipped this capture on reconnects.
-        history_bytes = await _capture_session_history(self.session, rows)
+        #
+        # Only for a single-pane window: the capture is the ACTIVE pane's
+        # history, which in a split window would be drawn across the whole
+        # screen. With splits, tmux's attach redraw alone paints the panes.
+        history_bytes = b""
+        if await tmux_ui.window_panes(self.session) <= 1:
+            history_bytes = await _capture_session_history(self.session, rows)
 
         # NOTE: the tmux-attach relay (PtyProcess) is spawned LATER, in the
         # no-await "commit zone" (_start_pty) just before the receive loop's
@@ -437,6 +491,8 @@ class _TerminalConnection:
 
         await self._start_pty(cols, rows)
         self.pty_task = asyncio.create_task(self._pty_lifecycle())
+        if self.watch:
+            self.watch_task = asyncio.create_task(self._follow_window_size())
         try:
             # Any non-resize messages we drained while waiting for the
             # initial resize are applied now that the relay exists (inside
@@ -492,6 +548,9 @@ class _TerminalConnection:
             "voice": voice_available,
             # The session's composer draft, restored into the prompt box.
             "draft": drafts.get(self.session),
+            # Watch tiles: the size the tmux client was attached at.
+            **({"cols": self.watch_size[0], "rows": self.watch_size[1]}
+               if self.watch_size else {}),
         })
 
     def _register(self, tts_filter: Any) -> None:
@@ -504,7 +563,9 @@ class _TerminalConnection:
         _draft_peers.setdefault(self.session, set()).add(self)
         # Subscribe to control-mode events; forward to this WS as JSON.
         self.tmux_sub = control_client.subscribe(self._on_tmux_event)
-        self.tts_sub = tts_service.subscribe(
+        # Only the main terminal speaks: a tile subscribing too would play
+        # every reply of its session a second time.
+        self.tts_sub = _NoTts() if self.tile else tts_service.subscribe(
             on_start=self._on_tts_start, on_chunk=self._on_tts_chunk,
             on_end=self._on_tts_end, content_filter=tts_filter,
         )
@@ -528,8 +589,8 @@ class _TerminalConnection:
         # that can raise-and-escape, so once the `tmux attach-session` child
         # exists it is guaranteed to be reaped by run()'s finally
         # (pty_proc.terminate()). See the NOTE in run().
-        self.pty_proc = PtyProcess(tmux.attach_argv(self.session), env=tmux.tmux_env(),
-                                   cols=cols, rows=rows)
+        self.pty_proc = PtyProcess(tmux.attach_argv(self.session, watch=self.watch),
+                                   env=tmux.tmux_env(), cols=cols, rows=rows)
         try:
             await self.pty_proc.start()
         except BaseException:
@@ -614,6 +675,8 @@ class _TerminalConnection:
         for rel_task in list(self.pending_releases):
             rel_task.cancel()
         self._unregister()
+        if self.watch_task is not None:
+            self.watch_task.cancel()
         self.pty_task.cancel()
         # Await pump cancellation BEFORE tearing down the PTY so a pending
         # send_text/send_bytes doesn't race with the socket close.
@@ -653,6 +716,8 @@ class _TerminalConnection:
                 # stop being able to push mic PCM into the FIFO too.
                 if not await self._still_authed("binary"):
                     return
+                if self.tile:
+                    continue                 # tiles have no mic
                 _handle_client_binary(data, self.pty_proc, self.mic_limiter, self.mic_token)
 
     async def _still_authed(self, what: str) -> bool:
@@ -723,6 +788,8 @@ class _TerminalConnection:
             return True
         if not await self._still_authed("input"):
             return False
+        if self.watch:
+            return True                      # read-only: no input, no resize
         _handle_client_text(text, self.pty_proc, self.session)
         return True
 
@@ -802,6 +869,22 @@ class _TerminalConnection:
         ))
         self.pending_releases.add(rel_task)
         rel_task.add_done_callback(self.pending_releases.discard)
+
+    async def _follow_window_size(self) -> None:
+        """Watch tiles: keep the read-only client exactly the session's size
+        (it's left out of tmux's sizing, so it must follow along) and tell
+        the browser, which rescales the tile."""
+        while True:
+            await asyncio.sleep(_WATCH_SIZE_POLL_S)
+            try:
+                size = await _watch_client_size(self.session)
+            except Exception:
+                continue
+            if size == self.watch_size or self.pty_proc is None:
+                continue
+            self.watch_size = size
+            self.pty_proc.resize(*size)
+            await self.send_json({"type": "size", "cols": size[0], "rows": size[1]})
 
     # ── send side ──────────────────────────────────────────────────────
     async def send_json(self, msg: dict) -> bool:

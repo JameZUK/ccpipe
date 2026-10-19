@@ -14,6 +14,9 @@ export type ServerHello = {
   voice: boolean;
   /** The session's composer draft (shared across devices; "" if none). */
   draft?: string;
+  /** Watch tiles only: the size the read-only tmux client attached at. */
+  cols?: number;
+  rows?: number;
 };
 
 /** Another device edited this session's composer draft. */
@@ -91,6 +94,8 @@ export interface TerminalSocketHandlers {
   onTtsEnd?: () => void;
   /** The session's composer draft was changed on another device. */
   onDraft?: (text: string) => void;
+  /** Watch tiles: the watched session changed size. */
+  onSize?: (cols: number, rows: number) => void;
   onStatus: (status: "connecting" | "open" | "closed" | "reconnecting",
              info?: { attempt: number; nextRetryMs?: number }) => void;
   /** Fires when the server closes the socket with code 1008 (policy
@@ -322,6 +327,11 @@ export class TerminalSocket {
             case "tts_end": this.handlers.onTtsEnd?.(); return;
             case "draft":
               if (typeof parsed.text === "string") this.handlers.onDraft?.(parsed.text);
+              return;
+            case "size":
+              if (typeof parsed.cols === "number" && typeof parsed.rows === "number") {
+                this.handlers.onSize?.(parsed.cols, parsed.rows);
+              }
               return;
             case "pong":
               // Surface round-trip latency so the statusbar can show

@@ -156,6 +156,49 @@ export function deletePrompt(name: string): Promise<{ deleted: boolean }> {
   return apiJson("/api/prompts/delete", { method: "POST", body: JSON.stringify({ name }) });
 }
 
+// ─── Screen layouts + tmux toolbar ────────────────────────────────────
+/** A tile layout: a split tree whose leaves are sessions. "h" lays
+ *  children side by side, "v" stacks them; sz are relative weights. */
+export type LayoutNode =
+  | { t: "leaf"; s: string; m: "live" | "watch" }
+  | { t: "split"; d: "h" | "v"; sz: number[]; c: LayoutNode[] };
+
+export async function getLayout(session: string): Promise<LayoutNode | null> {
+  const r = await apiJson<{ layout: LayoutNode | null }>(
+    `/api/layouts/${encodeURIComponent(session)}`);
+  return r.layout;
+}
+
+export function putLayout(session: string, layout: LayoutNode | null): Promise<unknown> {
+  return apiJson(`/api/layouts/${encodeURIComponent(session)}`,
+                 { method: "PUT", body: JSON.stringify({ layout }) });
+}
+
+export interface TmuxWindow {
+  index: number;
+  name: string;
+  active: boolean;
+  panes: number;
+  zoomed: boolean;
+}
+
+export function listWindows(session: string): Promise<TmuxWindow[]> {
+  return apiJson<TmuxWindow[]>(`/api/sessions/${encodeURIComponent(session)}/windows`);
+}
+
+export type TmuxAction =
+  | "split-h" | "split-v" | "pane-next" | "pane-zoom" | "pane-close"
+  | "window-new" | "window-next" | "window-prev" | "window-select"
+  | "window-rename" | "window-close"
+  | "copy-mode" | "page-up" | "page-down" | "copy-exit";
+
+/** Run a toolbar action on *session*; resolves to its windows afterwards. */
+export function tmuxAction(session: string, action: TmuxAction,
+                           arg?: number | string): Promise<TmuxWindow[]> {
+  return apiJson<TmuxWindow[]>(`/api/sessions/${encodeURIComponent(session)}/tmux`,
+                               { method: "POST", body: JSON.stringify({ action, arg }) });
+}
+
 // ─── /api/mic/config ──────────────────────────────────────────────────
 // Voice-input behaviour knobs (see backend MicConfig). Not cached —
 // the settings modal mutates this and the mic streamer must see the

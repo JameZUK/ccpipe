@@ -3113,3 +3113,230 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   color: var(--fg-muted);
   font-size: var(--t-sm);
 }
+
+/* ─── Tiles: other sessions beside the main terminal (layout.ts) ───── */
+.tiles {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tiles--on {
+  padding: var(--s-1);
+  gap: 0;
+}
+.tiles--on > * { flex: 1; min-width: 0; min-height: 0; }
+.tsplit {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+.tsplit--h { flex-direction: row; }
+.tsplit--v { flex-direction: column; }
+.tsplit__cell {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+.tsplit__cell > * { flex: 1; min-width: 0; min-height: 0; }
+.tsplit__divider {
+  flex: 0 0 6px;
+  touch-action: none;
+  position: relative;
+}
+.tsplit--h > .tsplit__divider { cursor: col-resize; }
+.tsplit--v > .tsplit__divider { cursor: row-resize; }
+.tsplit__divider::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  background: var(--border);
+  border-radius: 2px;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.tsplit--h > .tsplit__divider::after { width: 2px; height: 2.5rem; }
+.tsplit--v > .tsplit__divider::after { height: 2px; width: 2.5rem; }
+.tsplit__divider:hover::after,
+.tsplit__divider.dragging::after { background: var(--accent); }
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
+}
+.tile--focused { border-color: var(--accent-soft); }
+.tile__head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  height: 1.6rem;
+  padding: 0 var(--s-1) 0 var(--s-2);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  flex-shrink: 0;
+}
+.tile--focused .tile__head { color: var(--fg); }
+.tile__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex-shrink: 0;
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+.tile__dot[data-state="ok"]   { background: var(--ok); }
+.tile__dot[data-state="warn"] { background: var(--accent); }
+.tile__dot[data-state="err"]  { background: var(--critical); }
+.tile__dot[data-state="main"] { background: var(--accent); }
+.tile--activity .tile__dot { box-shadow: 0 0 0 3px var(--accent-bg); }
+.tile__name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile__badge {
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.62rem;
+}
+.tile__btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: var(--t-xs);
+  min-width: 1.5rem;
+  height: 1.3rem;
+  padding: 0 var(--s-1);
+  cursor: pointer;
+}
+.tile__btn:hover { color: var(--accent); border-color: var(--border-strong); }
+.tile__mode {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.62rem;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tile--watch .tile__mode { border-color: var(--border-strong); color: var(--fg-muted); }
+.tile--main #terminal { padding: var(--s-1) var(--s-2) 0 var(--s-2); }
+.term-pane {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  padding: var(--s-1) var(--s-2) 0 var(--s-2);
+  touch-action: pan-y;
+  overflow: hidden;
+}
+.tile--watch .term-pane { padding: 2px; }
+.tile__gone {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-overlay);
+  color: var(--fg-muted);
+  font-size: var(--t-sm);
+}
+.composer--retargeted .composer__input { border-color: var(--accent-soft); }
+
+.tiles-menu__list { display: flex; flex-direction: column; }
+.tiles-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-3);
+}
+.tiles-menu__name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
+.tiles-menu__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-3);
+}
+.tiles-menu__btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: var(--t-xs);
+  padding: var(--s-1) var(--s-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tiles-menu__btn:hover { border-color: var(--accent); color: var(--accent); }
+.tiles-menu__clear { margin: var(--s-1) var(--s-3) var(--s-2); align-self: flex-start; }
+
+/* ─── tmux toolbar (tmuxbar.ts) ─────────────────────────────────────── */
+.tmuxbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-1) var(--s-3);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--t-xs);
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.tmuxbar__target {
+  color: var(--fg-muted);
+  white-space: nowrap;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+.tmuxbar__tabs, .tmuxbar__group { display: flex; gap: 2px; flex-shrink: 0; }
+.tmuxbar__group {
+  padding-left: var(--s-2);
+  border-left: 1px solid var(--border);
+}
+.tmuxbar__btn {
+  font: inherit;
+  font-size: var(--t-xs);
+  min-width: 1.9rem;
+  height: 1.7rem;
+  padding: 0 var(--s-2);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tmuxbar__btn:hover { border-color: var(--accent); color: var(--accent); }
+.tmuxbar__btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+.tmuxbar__tab[data-panes]::after {
+  content: " ▪" attr(data-panes);
+  color: var(--fg-muted);
+}
+.tmuxbar__danger:hover { border-color: var(--critical); color: var(--critical); }
+.tmuxbar__prefix { color: var(--accent); }
+.tmuxbar__status { color: var(--critical); white-space: nowrap; }
+.tmuxbar__btn--icon { display: inline-flex; align-items: center; justify-content: center; }
+.tmuxbar__btn svg { width: 0.95rem; height: 0.95rem; }
+.tile__btn { display: inline-flex; align-items: center; justify-content: center; }
+.tile__btn svg { width: 0.8rem; height: 0.8rem; }

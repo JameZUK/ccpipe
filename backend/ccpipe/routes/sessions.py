@@ -23,7 +23,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import drafts, sticky, tmux, ws
+from .. import drafts, sticky, tmux, tmux_ui, ws
+from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..tmux_control import CONTROL_SESSION_NAME
 from .fs import _enforce_fs_jail, content_disposition_attachment
@@ -184,6 +185,8 @@ async def rename_session_endpoint(name: str, body: RenameSessionBody) -> Session
         sticky.rename(name, new_name)
         # The composer draft follows the session too.
         drafts.rename(name, new_name)
+        # …and so do saved screen layouts (its own and any tile showing it).
+        layouts.rename(name, new_name)
         # Drop any cached capture-pane blob under BOTH names so a
         # reconnect can't be served the prior occupant's history.
         ws.invalidate_history_cache(name)
@@ -717,3 +720,37 @@ async def claude_sessions(cwd: str) -> dict[str, Any]:
         for (sid, _, mtime, size), first in zip(viable, first_msgs)
     ]
     return {"sessions": out}
+
+
+# ─── tmux toolbar (windows / panes / copy-mode) ───────────────────────────
+
+class TmuxActionBody(BaseModel):
+    action: str
+    arg: int | str | None = None
+
+
+async def _existing_session(name: str) -> str:
+    try:
+        name = tmux.safe_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _reject_control_session(name)
+    if not await tmux.session_exists(name):
+        raise HTTPException(status_code=404, detail="session not found")
+    return name
+
+
+@router.get("/api/sessions/{name}/windows", dependencies=[AuthDep, SameOriginDep])
+async def session_windows(name: str) -> list[dict[str, Any]]:
+    return await tmux_ui.list_windows(await _existing_session(name))
+
+
+@router.post("/api/sessions/{name}/tmux", dependencies=[AuthDep, CsrfDep])
+async def session_tmux_action(name: str, body: TmuxActionBody) -> list[dict[str, Any]]:
+    """Run one toolbar action; returns the session's windows afterwards."""
+    name = await _existing_session(name)
+    try:
+        await tmux_ui.perform(name, body.action, body.arg)
+    except tmux_ui.ActionError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return await tmux_ui.list_windows(name)

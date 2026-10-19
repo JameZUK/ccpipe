@@ -100,3 +100,20 @@ matching fuzz case there too. The pattern is:
 CCPIPE_TEST_PASSWORD=… CCPIPE_EXTERNAL_BASE=http://localhost:8080 \
     pytest backend/tests/test_external_security.py -k T7
 ```
+
+## tmux controls and tiles
+
+The tmux toolbar (`POST /api/sessions/{name}/tmux`) takes an action
+**name** from a fixed table in `backend/ccpipe/tmux_ui.py`, never a tmux
+command line. The only free-form value is a window name, which is passed as
+a single argv element after `--` (control characters refused), so it can't
+reach tmux's command parser. Closing the last pane or the last window is
+refused, so the toolbar can't kill a session; that stays with the session
+picker. The endpoint has the usual auth + CSRF dependencies.
+
+Tiles add two WebSocket query flags, and both only take capabilities away.
+`tile=1` means no TTS subscription, no mic frames, and never auto-creating
+the session. `mode=watch` attaches tmux with `-f read-only,ignore-size` and
+the server drops the tile's input frames as well. Tile layouts
+(`/api/layouts/{name}`) are validated: session names go through
+`safe_name`, and there are at most 9 tiles, 4 levels deep.

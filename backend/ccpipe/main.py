@@ -500,6 +500,7 @@ from .routes.fs import router as _fs_router
 from .routes.mic import router as _mic_router
 from .routes.sessions import router as _sessions_router
 from .routes.prompts import router as _prompts_router
+from .routes.layouts import router as _layouts_router
 from .routes.static import mount_static, router as _static_router
 from .routes.tts import router as _tts_router
 
@@ -508,6 +509,7 @@ app.include_router(_tts_router)
 app.include_router(_mic_router)
 app.include_router(_sessions_router)
 app.include_router(_prompts_router)
+app.include_router(_layouts_router)
 app.include_router(_fs_router)
 app.include_router(_debug_router)
 app.include_router(_static_router)
@@ -515,7 +517,8 @@ mount_static(app)
 
 
 @app.websocket("/ws")
-async def ws(websocket: WebSocket, session: str, skip_history: int = 0) -> None:
+async def ws(websocket: WebSocket, session: str, skip_history: int = 0,
+             mode: str = "", tile: int = 0) -> None:
     # ``skip_history`` is accepted but ignored — we always replay tmux's
     # current pane on every (re)connect so xterm's scrollback can't drift
     # from tmux's during a disconnect window. The frontend ``term.reset()``s
@@ -535,6 +538,8 @@ async def ws(websocket: WebSocket, session: str, skip_history: int = 0) -> None:
     if name == CONTROL_SESSION_NAME:
         await websocket.close(code=1008, reason="reserved session name")
         return
-    await handle_terminal_ws(websocket, name)
+    # mode=watch: a read-only tile that never resizes the session;
+    # tile=1: a secondary tile (no TTS / mic, never creates the session).
+    await handle_terminal_ws(websocket, name, watch=(mode == "watch"), tile=bool(tile))
 
 

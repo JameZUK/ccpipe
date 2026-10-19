@@ -125,7 +125,7 @@ def _patch_deps(monkeypatch):
         await asyncio.Event().wait()
 
     monkeypatch.setattr(wsmod.tmux, "session_exists", _true)
-    monkeypatch.setattr(wsmod.tmux, "attach_argv", lambda name: ["tmux", "attach", "-t", name])
+    monkeypatch.setattr(wsmod.tmux, "attach_argv", lambda name, **_kw: ["tmux", "attach", "-t", name])
     monkeypatch.setattr(wsmod.tmux, "session_cwd", _cwd)
     monkeypatch.setattr(wsmod, "_capture_session_history", _no_history)
     monkeypatch.setattr(wsmod, "_wait_for_initial_resize", _resize)

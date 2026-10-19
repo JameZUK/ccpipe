@@ -85,6 +85,19 @@ applyOsChromeCompensation();
 // and could read it); the helpers live in share.ts — see there.
 capturePendingShare();
 
+/** Socket URL for a tile beside the main terminal (see tile.ts). */
+function tileWsUrl(session: string, mode: "live" | "watch"): string {
+  return wsUrlFor(session) + "&tile=1" + (mode === "watch" ? "&mode=watch" : "");
+}
+
+const TMUXBAR_KEY = "ccpipe.tmuxbar";
+function tmuxBarWanted(): boolean {
+  try { return localStorage.getItem(TMUXBAR_KEY) === "1"; } catch { return false; }
+}
+function setTmuxBarWanted(on: boolean): void {
+  try { localStorage.setItem(TMUXBAR_KEY, on ? "1" : "0"); } catch { /* private mode */ }
+}
+
 function wsUrlFor(session: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   // No more skip_history on reconnect — the server now always replays
@@ -125,12 +138,13 @@ async function attachTerminal(session: string): Promise<void> {
   const mobile = isMobileLayout();
   document.body.classList.toggle("mobile", mobile);
 
-  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }] =
+  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }, { TileLayout }] =
     await Promise.all([
       import("./terminal"),
       import("./mic"),
       import("./tts"),
       import("./waveform"),
+      import("./layout"),
     ]);
 
   const view = document.createElement("div");
@@ -422,14 +436,29 @@ async function attachTerminal(session: string): Promise<void> {
   micBtn.innerHTML = MIC_SVG;
   micBtn.hidden = true;
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, historyBtn, docsBtn, filesBtn, settingsBtn);
+  // Tiles: other sessions on screen beside this one (iPad / desktop).
+  const tilesBtn = document.createElement("button");
+  tilesBtn.className = "pill pill--icon";
+  tilesBtn.title = "Tiles: show other sessions beside this one";
+  tilesBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="18" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>`;
+  // tmux toolbar toggle (windows, panes, copy-mode, prefix key).
+  const tmuxBtn = document.createElement("button");
+  tmuxBtn.className = "pill pill--icon";
+  tmuxBtn.title = "tmux controls";
+  tmuxBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M12 4v12"/><path d="M12 10h9"/><path d="M3 16h18"/></svg>`;
+
+  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, tilesBtn, tmuxBtn, historyBtn, docsBtn, filesBtn, settingsBtn);
   statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────
   const terminalContainer = document.createElement("div");
   terminalContainer.id = "terminal";
+  // Holds the main terminal alone, or the tile layout around it (layout.ts).
+  const tilesRoot = document.createElement("div");
+  tilesRoot.className = "tiles";
+  tilesRoot.append(terminalContainer);
 
-  view.append(statusbar, terminalContainer);
+  view.append(statusbar, tilesRoot);
   app.append(view);
 
   // Mic button (desktop only — mobile uses the composer mic). Constructed
@@ -502,7 +531,7 @@ async function attachTerminal(session: string): Promise<void> {
       `;
       offlineBanner.querySelector<HTMLButtonElement>("[data-role=retry]")!
         .addEventListener("click", () => socket.reconnectNow(true));
-      view.insertBefore(offlineBanner, terminalContainer);
+      view.insertBefore(offlineBanner, tilesRoot);
     }
     const msg = offlineBanner.querySelector<HTMLDivElement>("[data-role=msg]")!;
     if (retryDeadlineMs > 0) {
@@ -535,7 +564,7 @@ async function attachTerminal(session: string): Promise<void> {
       httpsBanner?.remove();
       httpsBanner = null;
     });
-    view.insertBefore(httpsBanner, terminalContainer);
+    view.insertBefore(httpsBanner, tilesRoot);
   };
 
   let writeToTerm:
@@ -879,6 +908,7 @@ async function attachTerminal(session: string): Promise<void> {
       updateTtsBtn();
     },
     onSessionEvent(msg) {
+      if (TMUX_WINDOW_EVENTS.has(msg.event)) scheduleTmuxRefresh();
       const noisy = new Set([
         "client-attached", "client-detached",
         "window-renamed", "session-renamed",
@@ -938,7 +968,64 @@ async function attachTerminal(session: string): Promise<void> {
     },
   });
 
-  const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session);
+  // ─── Tiles + tmux toolbar ─────────────────────────────────────────────
+  // The focused tile (if any) receives the composer / key-row input and
+  // the tmux toolbar's actions; otherwise the main terminal does.
+  let focusedTile: { session: string; socket: TerminalSocket | null } | null = null;
+  const tmuxTarget = () => focusedTile
+    ? { session: focusedTile.session, socket: focusedTile.socket }
+    : { session, socket: socket as TerminalSocket | null };
+  let tmuxBar: import("./tmuxbar").TmuxBar | null = null;
+  let tmuxRefreshTimer: number | null = null;
+  function scheduleTmuxRefresh(): void {
+    if (!tmuxBar || tmuxRefreshTimer !== null) return;
+    tmuxRefreshTimer = window.setTimeout(() => { tmuxRefreshTimer = null; tmuxBar?.refresh(); }, 150);
+  }
+  const showTmuxBar = async (on: boolean): Promise<void> => {
+    if (on) tmuxBtn.setAttribute("aria-pressed", "true");
+    else tmuxBtn.removeAttribute("aria-pressed");
+    if (!on) { tmuxBar?.dispose(); tmuxBar = null; return; }
+    if (tmuxBar) return;
+    const { mountTmuxBar } = await import("./tmuxbar");
+    if (tmuxBar || !view.isConnected) return;
+    tmuxBar = mountTmuxBar(tmuxTarget);
+    statusbar.after(tmuxBar.el);
+    tmuxBar.refresh();
+  };
+  tmuxBtn.addEventListener("click", () => {
+    const on = !tmuxBar;
+    setTmuxBarWanted(on);
+    void showTmuxBar(on);
+  });
+  if (tmuxBarWanted()) void showTmuxBar(true);
+
+  const layout = new TileLayout(tilesRoot, {
+    owner: session,
+    mainEl: terminalContainer,
+    urlFor: tileWsUrl,
+    createTerminal,
+    onFocusChange: (s, sock) => {
+      focusedTile = s ? { session: s, socket: sock } : null;
+      mobileUi?.setTarget(s && sock ? s : null);
+      tmuxBar?.refresh();
+    },
+    openMain: (s) => { void attachTerminal(s); },
+  });
+  const syncTilesBtn = (): void => { tilesBtn.hidden = !layout.capable(); };
+  syncTilesBtn();
+  window.addEventListener("resize", syncTilesBtn);
+  tilesBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const { toggleTilesMenu } = await import("./tiles-menu");
+    toggleTilesMenu(tilesBtn, layout);
+  });
+
+  const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session, {
+    // With tiles on screen, Ctrl+F / font-size keys belong to whichever
+    // terminal is focused.
+    isActive: () => focusedTile === null,
+  });
+  void layout.load();
   writeToTerm = terminalApi.writeToTerm;
   resetTerminal = terminalApi.resetBuffer;
   scrollTerminalToBottom = terminalApi.scrollToBottom;
@@ -972,6 +1059,11 @@ async function attachTerminal(session: string): Promise<void> {
   const unsubPrefs = onDisplayPrefsChange((p) => terminalApi.applyPrefs(p));
   view.addEventListener("ccpipe:dispose", () => {
     unsubPrefs();
+    window.removeEventListener("resize", syncTilesBtn);
+    if (tmuxRefreshTimer !== null) clearTimeout(tmuxRefreshTimer);
+    tmuxBar?.dispose();
+    void import("./tiles-menu").then(({ closeTilesMenu }) => closeTilesMenu());
+    try { layout.dispose(); } catch (e) { console.warn("layout dispose failed:", e); }
     debugListenerDisposed = true;
     document.removeEventListener("keydown", onDebugKey);
     // Close the socket FIRST so its lifecycle hooks (online /
@@ -1007,7 +1099,11 @@ async function attachTerminal(session: string): Promise<void> {
       onConnectionChange,
       onAvailabilityChange: onMicAvailabilityChange,
       getSessionCwd: () => sessionCwd,
-    }, { desktop: !mobile });
+    }, {
+      desktop: !mobile,
+      // Typing goes to a focused live tile, if there is one.
+      inputSocket: () => focusedTile?.socket ?? socket,
+    });
     // (Assigned inside the socket callbacks, so TS can't see it may be set.)
     const early = pendingDraft as { text: string; fromHello: boolean } | null;
     if (early) { mobileUi.applyDraft(early.text, early.fromHello); pendingDraft = null; }
@@ -1028,6 +1124,12 @@ async function attachTerminal(session: string): Promise<void> {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+// tmux control-mode events after which the toolbar's window tabs re-read.
+const TMUX_WINDOW_EVENTS = new Set([
+  "window-add", "window-close", "window-renamed", "session-window-changed",
+  "layout-change", "unlinked-window-close",
+]);
 
 function flashState(el: HTMLElement, msg: string, ms: number = 2200): void {
   const prev = el.textContent ?? "";

@@ -490,11 +490,18 @@ async def rename_session(old: str, new: str) -> bool:
         invalidate_list_sessions_cache()
 
 
-def attach_argv(name: str) -> list[str]:
+def attach_argv(name: str, watch: bool = False) -> list[str]:
     """argv for spawning a tmux client attached to the given session.
     `--` terminates option parsing so a session name like ``-foo`` can't
-    be reinterpreted as a flag (also rejected by ``safe_name``)."""
-    return [TMUX_BIN, "attach-session", "-t", session_target(name), "--"]
+    be reinterpreted as a flag (also rejected by ``safe_name``).
+
+    ``watch`` attaches a read-only client that tmux leaves out of the
+    window-size calculation (``ignore-size``): a small monitor tile then
+    never shrinks the session on every other device."""
+    argv = [TMUX_BIN, "attach-session"]
+    if watch:
+        argv += ["-f", "read-only,ignore-size"]
+    return argv + ["-t", session_target(name), "--"]
 
 
 # tmux resolves a bare `-t name` by prefix / fnmatch, and treats `%3` / `@1`
