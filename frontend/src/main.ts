@@ -10,6 +10,7 @@ import {
 import { DOC_SVG, FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI, type MobileUI } from "./mobile";
 import { capturePendingShare } from "./share";
+import { installTooltips } from "./tooltip";
 import * as notifications from "./notifications";
 import { attachOptionSpacePtt } from "./ptt";
 import { mdViewUrl } from "./view-url";
@@ -84,6 +85,9 @@ applyOsChromeCompensation();
 // PWA share_target text is captured at app start (before anything mounts
 // and could read it); the helpers live in share.ts — see there.
 capturePendingShare();
+
+// Hover / press-and-hold tooltips for the toolbar icons (see tooltip.ts).
+installTooltips();
 
 /** Socket URL for a tile beside the main terminal (see tile.ts). */
 function tileWsUrl(session: string, mode: "live" | "watch"): string {

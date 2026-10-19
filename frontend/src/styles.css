@@ -3340,3 +3340,21 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
 .tmuxbar__btn svg { width: 0.95rem; height: 0.95rem; }
 .tile__btn { display: inline-flex; align-items: center; justify-content: center; }
 .tile__btn svg { width: 0.8rem; height: 0.8rem; }
+
+/* ─── Icon tooltips (tooltip.ts) ─────────────────────────────────────── */
+.tooltip {
+  position: fixed;
+  z-index: 80;
+  max-width: min(18rem, 80vw);
+  padding: var(--s-1) var(--s-2);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.45);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  line-height: 1.35;
+  pointer-events: none;
+}
+.statusbar button, .tmuxbar button, .tile__head button { -webkit-touch-callout: none; }

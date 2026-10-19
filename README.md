@@ -134,7 +134,8 @@ session on another device and its tiles come back. On a phone the screen is
 too narrow, so the terminal stays full-screen and the tiles wait for a
 bigger screen.
 
-**tmux controls.** The toolbar **tmux** button opens a slim row of tmux
+**tmux controls.** (Hover over any toolbar icon, or press and hold it on a
+touch screen, to see what it does.) The toolbar **tmux** button opens a slim row of tmux
 controls for the focused session: window tabs (click to switch), new,
 rename and close window; split the pane side by side or top/bottom, next
 pane, zoom, close pane; copy mode with page up/down; and a **C-b** prefix
