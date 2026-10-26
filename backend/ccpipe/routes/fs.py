@@ -32,6 +32,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import config as app_config
+from .. import fs_zip
 from ..safe_write import existing_mode, open_temp, temp_name
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 
@@ -167,6 +168,15 @@ def _enforce_fs_jail(resolved: Path) -> None:
             continue
         if parts[:len(deny_parts)] == deny_parts:
             raise HTTPException(status_code=403, detail="path denied")
+
+
+def _is_denied(resolved: Path) -> bool:
+    """Non-raising _enforce_fs_jail, for filtering a directory walk."""
+    try:
+        _enforce_fs_jail(resolved)
+    except HTTPException:
+        return True
+    return False
 
 
 def _resolve_fs_path(path: str) -> Path:
@@ -755,6 +765,56 @@ def fs_download(path: str) -> StreamingResponse:
             "Content-Length": str(st.st_size),
             "Content-Disposition": content_disposition_attachment(resolved.name),
         },
+    )
+
+
+def _open_dir_for_walk(path: str) -> tuple[Path, int]:
+    """Resolve + jail *path* as a directory and open it by fd without
+    following a symlink at any component (see _walk_parent_nofollow)."""
+    resolved = _resolve_fs_path(path)
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="not a directory")
+    if resolved == Path("/"):
+        raise HTTPException(status_code=400, detail="cannot zip /")
+    parent_fd, leaf = _walk_parent_nofollow(str(resolved))
+    try:
+        fd = fs_zip.open_dir_nofollow(parent_fd, leaf)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise HTTPException(status_code=403, detail="symlink at target")
+        if exc.errno == errno.EACCES:
+            raise HTTPException(status_code=403, detail="permission denied")
+        raise HTTPException(status_code=404, detail="path not found")
+    finally:
+        os.close(parent_fd)
+    return resolved, fd
+
+
+@router.get("/api/fs/dir-summary", dependencies=[AuthDep, SameOriginDep])
+def fs_dir_summary(path: str) -> dict[str, Any]:
+    """How much a directory download would contain: file count + bytes,
+    with hidden files (.git, .venv, …) counted separately so the UI can
+    offer to include them. Bounded; ``truncated`` means "at least"."""
+    resolved, fd = _open_dir_for_walk(path)
+    try:
+        out = fs_zip.summarize(fd, resolved, _is_denied)
+    finally:
+        os.close(fd)
+    return {"path": str(resolved), "name": resolved.name, **out}
+
+
+@router.get("/api/fs/download-zip", dependencies=[AuthDep, SameOriginDep])
+def fs_download_zip(path: str, hidden: int = 0) -> StreamingResponse:
+    """Stream a directory as ``<name>.zip``. No size cap — like a file
+    download it's operator-initiated (the UI shows the size first).
+    Symlinks and deny-listed paths are never included; hidden entries only
+    with ``hidden=1``."""
+    resolved, fd = _open_dir_for_walk(path)
+    name = resolved.name or "files"
+    return StreamingResponse(
+        fs_zip.stream_zip(fd, resolved, name, bool(hidden), _is_denied),
+        media_type="application/zip",
+        headers={"Content-Disposition": content_disposition_attachment(f"{name}.zip")},
     )
 
 

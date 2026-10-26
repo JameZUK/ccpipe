@@ -3358,3 +3358,11 @@ body.mobile .statusbar__controls .pill[data-role="tts"] { padding: var(--s-1) va
   pointer-events: none;
 }
 .statusbar button, .tmuxbar button, .tile__head button { -webkit-touch-callout: none; }
+
+.inline-prompt__detail {
+  margin: calc(-1 * var(--s-1)) 0 0;
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  line-height: 1.45;
+}
+.inline-prompt__actions { flex-wrap: wrap; }

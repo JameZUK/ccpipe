@@ -60,6 +60,15 @@ Desktop:
 </tr>
 </table>
 
+**File browser.** The toolbar **Files** button opens a file browser at
+the session's project folder: upload, create folders, rename, delete,
+edit text files in place, and download. A whole folder downloads as a
+**.zip**, from a folder's ⋮ menu or the **zip** button for the folder
+you're in. It first shows how many files and how much data that is, and
+leaves hidden files (`.git`, `.venv`, …) out unless you choose to include
+them. The zip is built as it downloads, so there's no wait for a big
+folder to be packed first.
+
 **Document viewer.** Any Markdown file in your project opens fully rendered
 in its own browser tab — GitHub-flavoured, with syntax highlighting, KaTeX
 math, and Mermaid diagrams. Open one from the file browser, the editor's
@@ -348,7 +357,9 @@ proxy host.
   passes the jail. The denylist covers only ccpipe's own state
   (`~/.local/state/ccpipe`, `~/.config/ccpipe`) and Claude Code's
   (`~/.claude`, `~/.claude.json`); `.ssh`, `.aws`, `.gnupg`, `.kube`,
-  etc. remain reachable because this is an admin tool.
+  etc. remain reachable because this is an admin tool. Folder downloads
+  (.zip) walk the folder without following symlinks and leave out
+  anything on the denylist, so zipping `$HOME` can't include `~/.claude`.
 - **TTS reads your Claude transcripts.** Only run ccpipe on a host
   where you trust everyone with access to those files.
 - **Drafts and saved prompts live on the server.** Unsent prompt-box

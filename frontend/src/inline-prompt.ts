@@ -109,3 +109,69 @@ export function inlineConfirm(message: string, okLabel = "OK"): Promise<boolean>
     setTimeout(() => ok.focus(), 30);
   });
 }
+
+/** A message with several choice buttons (plus Cancel), in the same style.
+ *  Resolves the chosen index, or null if cancelled. Enter picks the first
+ *  choice. *detail* is an optional dimmer second line. */
+export function inlineChoice(message: string, choices: string[],
+                             detail = ""): Promise<number | null> {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    const box = document.createElement("div");
+    box.className = "inline-prompt";
+    box.setAttribute("role", "alertdialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", message);
+    const text = document.createElement("p");
+    text.className = "inline-prompt__label";
+    text.textContent = message;
+    box.append(text);
+    if (detail) {
+      const d = document.createElement("p");
+      d.className = "inline-prompt__detail";
+      d.textContent = detail;
+      box.append(d);
+    }
+    const actions = document.createElement("div");
+    actions.className = "inline-prompt__actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn";
+    cancel.textContent = "Cancel";
+    actions.append(cancel);
+
+    let done = false;
+    const finish = (val: number | null): void => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      ov.remove();
+      resolve(val);
+    };
+    const buttons = choices.map((label, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = i === 0 ? "btn btn--primary" : "btn";
+      b.textContent = label;
+      b.addEventListener("click", () => finish(i));
+      return b;
+    });
+    // Primary choice last (rightmost), like the other dialogs.
+    actions.append(...buttons.slice(1), buttons[0]);
+    function onKey(e: KeyboardEvent): void {
+      if (e.key === "Escape") { e.preventDefault(); finish(null); }
+      else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) {
+        e.preventDefault(); finish(0);
+      }
+    }
+    cancel.addEventListener("click", () => finish(null));
+    ov.addEventListener("click", (e) => { if (e.target === ov) finish(null); });
+    document.addEventListener("keydown", onKey, true);
+
+    box.append(actions);
+    ov.append(box);
+    document.body.append(ov);
+    setTimeout(() => buttons[0].focus(), 30);
+  });
+}

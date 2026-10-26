@@ -38,13 +38,16 @@ backend/
                        /api/sessions/{name}/sticky,
                        /api/sessions/{name}/history (transcript blocks,
                        before/after paged, for the /history view)
-      fs.py            /api/fs/* (list, read, write, upload, download, ...)
+      fs.py            /api/fs/* (list, read, write, upload, download,
+                       download-zip, dir-summary, ...)
       prompts.py       /api/prompts (saved prompts: list, save, delete)
       layouts.py       /api/layouts/{session} (tile layouts, layouts.json)
       tts.py           /api/tts/* (voices, config, speak, preview)
       mic.py           /api/mic/config (voice-input timing knobs)
       static.py        /, /view (Markdown viewer), /history (conversation
                        view), /manifest.webmanifest, /sw.js, icons
+    fs_zip.py          Folder → streamed .zip: fd-based no-symlink walk,
+                       denylist + hidden filtering, size pre-flight
     drafts.py          Per-session composer drafts (drafts.json), relayed
                        live between devices by ws.py
     safe_write.py      Atomic saves that keep the file's mode and write

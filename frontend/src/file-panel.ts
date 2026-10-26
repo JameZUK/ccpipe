@@ -19,7 +19,7 @@
 
 import { apiJson } from "./api";
 import { CLOSE_SVG, EYE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
-import { inlinePrompt } from "./inline-prompt";
+import { inlineChoice, inlinePrompt } from "./inline-prompt";
 import { mdViewUrl } from "./view-url";
 
 // Matches Markdown files for the "view rendered" affordances.
@@ -225,7 +225,14 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   const statusEl = document.createElement("div");
   statusEl.className = "file-panel__status";
 
-  toolbar.append(uploadLabel, mkdirBtn, statusEl);
+  // Download the folder being shown as a .zip.
+  const zipBtn = document.createElement("button");
+  zipBtn.type = "button";
+  zipBtn.className = "btn btn--ghost";
+  zipBtn.title = "Download this folder as a .zip";
+  zipBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg><span>zip</span>`;
+
+  toolbar.append(uploadLabel, mkdirBtn, zipBtn, statusEl);
 
   // ── Listing ────────────────────────────────────────────────────────
   const list = document.createElement("div");
@@ -337,6 +344,12 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
     const fullPath = joinPath(currentPath, entry.name);
 
+    if (entry.type === "dir") {
+      menu.append(menuItem("download .zip", () => {
+        closeMenu();
+        void downloadZip(fullPath, entry.name);
+      }));
+    }
     if (entry.type === "file") {
       if (MARKDOWN_RE.test(entry.name)) {
         menu.append(menuItem("view", () => {
@@ -423,6 +436,48 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
     return row;
   };
 
+  /** Size the folder first ("120 files, 4.2 MB"), let the user include
+   *  hidden files (.git, .venv, …) or not, then download it as a .zip. */
+  const downloadZip = async (path: string, name: string): Promise<void> => {
+    setStatus(`sizing ${name}…`);
+    let s: {
+      name: string; files: number; bytes: number;
+      hidden_files: number; hidden_bytes: number; truncated: boolean;
+    };
+    try {
+      s = await apiJson(`/api/fs/dir-summary?path=${encodeURIComponent(path)}`);
+    } catch (err) {
+      setStatus(`zip failed: ${(err as Error).message}`, true);
+      return;
+    }
+    setStatus("");
+    const zipName = `${s.name || name}.zip`;
+    if (s.files === 0 && s.hidden_files === 0) {
+      setStatus(`${name} has no files to download`);
+      return;
+    }
+    const more = s.truncated ? "+" : "";
+    const count = (n: number, b: number): string =>
+      `${n.toLocaleString()}${more} file${n === 1 ? "" : "s"}, ${fmtSize(b)}${more}`;
+    const choices = s.files > 0 ? ["Download"] : [];
+    let detail = s.files > 0 ? count(s.files, s.bytes) : "Only hidden files in here.";
+    if (s.hidden_files > 0) {
+      choices.push("Include hidden files");
+      detail += ` · hidden files (.git etc.): ${count(s.hidden_files, s.hidden_bytes)}`;
+    }
+    const pick = await inlineChoice(`Download ${zipName}?`, choices, detail);
+    if (pick === null) return;
+    const hidden = choices[pick] === "Include hidden files" ? 1 : 0;
+    const a = document.createElement("a");
+    a.href = `/api/fs/download-zip?path=${encodeURIComponent(path)}&hidden=${hidden}`;
+    a.download = zipName;
+    a.style.display = "none";
+    document.body.append(a);
+    a.click();
+    setTimeout(() => a.remove(), 0);
+    setStatus(`downloading ${zipName}…`);
+  };
+
   const menuItem = (label: string, onClick: () => void): HTMLElement => {
     const b = document.createElement("button");
     b.type = "button";
@@ -487,6 +542,11 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   });
 
   // New dir
+  zipBtn.addEventListener("click", () => {
+    const name = currentPath.replace(/\/+$/, "").split("/").pop() || "files";
+    void downloadZip(currentPath, name);
+  });
+
   mkdirBtn.addEventListener("click", async () => {
     const name = await inlinePrompt("New directory name:");
     if (!name || name.includes("/")) return;
