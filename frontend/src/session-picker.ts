@@ -949,7 +949,11 @@ export function renderSessionPicker(
       const main = h("div", "sess__main");
       main.append(titleRow, taskEl);
       if (stopEl) main.append(stopEl);
-      item.append(dot, main, cwd, activity, ram, disk, dates, actions);
+      // Two table columns on a wide screen (display: contents); one short
+      // line on a phone.
+      const uses = h("div", "sess__uses");
+      uses.append(ram, disk);
+      item.append(dot, main, cwd, activity, uses, dates, actions);
     } else {
       const head = h("div", "sess__head");
       head.append(dot, titleRow, actions);

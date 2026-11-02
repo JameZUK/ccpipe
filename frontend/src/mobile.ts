@@ -22,6 +22,13 @@ export function isMobileLayout(): boolean {
     || window.matchMedia("(max-width: 768px)").matches;
 }
 
+/** What kind of device this is, for Settings labels: touch with a small
+ * screen is a phone, touch with a bigger one a tablet, otherwise a desktop. */
+export function deviceClass(): "phone" | "tablet" | "desktop" {
+  if (!window.matchMedia("(pointer: coarse)").matches) return "desktop";
+  return Math.min(screen.width, screen.height) < 600 ? "phone" : "tablet";
+}
+
 export type MicEventKind = "tap" | "hold-start" | "hold-end";
 
 export interface MobileMicAdapter {

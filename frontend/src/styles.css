@@ -1350,10 +1350,16 @@ a:hover { color: var(--fg); }
 .statusbar__latency--warn  { color: var(--accent); border-color: var(--accent); }
 .statusbar__latency--bad   { color: var(--critical); border-color: var(--critical); }
 @media (max-width: 768px) {
-  /* On phones the statusbar is tight; hide the latency badge so the
-     session label has room. The colour of the connection dot still
-     conveys health. */
-  .statusbar__latency { display: none; }
+  /* On phones the statusbar is tight: the latency is just the coloured
+     number tucked against the connection dot — no pill, no gap. */
+  .statusbar__latency {
+    padding: 0;
+    border: none;
+    margin-left: calc(-1 * var(--s-1));
+    font-size: 0.62rem;
+    letter-spacing: 0;
+  }
+  .statusbar__divider { display: none; }
 }
 .statusbar__session {
   color: var(--fg-muted);
@@ -3875,97 +3881,68 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
 .sv-bar--rel .sv-bar__fill { background: var(--accent-soft) !important; box-shadow: none; opacity: 0.85; }
 
 /* ─── Landing page: system panel (syspanel.ts) ─────────────────────────── */
+/* A compact strip: per card the number (label, value, one detail line) on
+   the left and its graph on the right — under 50 px tall. */
 .sp {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--s-3);
-  margin-bottom: var(--s-2);
+  gap: var(--s-2);
+  margin-bottom: var(--s-1);
 }
 .sp-card {
-  position: relative;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-  padding: var(--s-3) var(--s-3) var(--s-2);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
   background:
-    radial-gradient(circle at 100% 0%, rgba(245, 165, 36, 0.07), transparent 55%),
+    radial-gradient(circle at 100% 0%, rgba(245, 165, 36, 0.06), transparent 60%),
     var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
 }
-.sp-card__head {
+.sp-card__text {
+  min-width: 0;
   display: flex;
-  justify-content: space-between;
-  gap: var(--s-2);
-  font-size: var(--t-xs);
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--s-2);
+}
+.sp-card__label {
+  color: var(--fg-muted);
+  font-size: 0.62rem;
   text-transform: uppercase;
   letter-spacing: 0.16em;
 }
-.sp-card__label { color: var(--fg-muted); }
-.sp-card__meta { color: var(--fg-faint); letter-spacing: 0.06em; text-transform: none; white-space: nowrap; }
-.sp-card__body { display: flex; align-items: baseline; gap: var(--s-2); min-width: 0; }
 .sp-card__value {
-  font-size: var(--t-xl);
-  line-height: 1.15;
   color: var(--fg);
+  font-size: var(--t-md);
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .sp-card__value[data-level="warn"] { color: var(--level-warn); }
 .sp-card__value[data-level="hot"] { color: var(--critical); }
 .sp-card__sub {
+  flex-basis: 100%;
   color: var(--fg-muted);
-  font-size: var(--t-xs);
+  font-size: 0.66rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
-.sp-card__viz { height: 34px; }
-.sp-card--disk {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto 1fr;
-  column-gap: var(--s-3);
-}
-.sp-card--disk .sp-card__head { grid-column: 1 / -1; }
-.sp-card--disk .sp-card__body { flex-direction: column; align-items: flex-start; gap: 2px; align-self: center; }
-.sp-card--disk .sp-card__viz { height: auto; align-self: center; }
-.sp-ring { position: relative; width: 50px; height: 50px; }
-.sp-ring__pct {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: 0.66rem;
-  color: var(--fg-dim);
-  font-variant-numeric: tabular-nums;
-}
-.sp-card__foot {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  font-size: var(--t-xs);
-  margin-top: 2px;
-}
-.sp-card__foot:empty { display: none; }
-.sp-card__foot .sv-bar { flex: 1; }
-.sp-card__foot-k { color: var(--fg-muted); white-space: nowrap; }
-.sp-card__foot-v { color: var(--fg-dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sp-card__viz { min-width: 0; height: 28px; }
+.sp-card--disk .sp-card__viz { justify-self: end; width: 28px; }
 @media (max-width: 600px) {
-  .sp { gap: var(--s-2); }
-  .sp-card { padding: var(--s-2); }
-  .sp-card__value { font-size: var(--t-lg); }
-  .sp-card__head .sp-card__meta,
-  .sp-card:not(.sp-card--disk) .sp-card__sub { display: none; }
-  .sp-card__viz { height: 26px; }
-  .sp-card--disk { grid-template-columns: minmax(0, 1fr); }
-  .sp-card--disk .sp-card__sub { display: none; }
-  .sp-card--disk .sp-card__viz { position: absolute; right: var(--s-2); top: var(--s-2); }
-  .sp-ring { width: 34px; height: 34px; }
-  .sp-ring__pct { font-size: 0.56rem; }
-  .sp-card__foot-k { display: none; }
+  .sp-card { gap: var(--s-2); padding: var(--s-2); }
+  .sp-card__text { flex-direction: column; align-items: flex-start; }
+  .sp-card__sub { display: none; }
+  .sp-card__value { font-size: var(--t-sm); }
+  .sp-card__viz { height: 22px; }
+  .sp-card--disk .sp-card__viz { width: 22px; }
 }
 
 /* ─── Session bar: status meter + pop-up (sysmeter.ts) ─────────────────── */
@@ -4124,6 +4101,8 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
 .picker-shell[data-use="on"] .sess--detailed {
   grid-template-columns: 0.6rem minmax(0, 2.2fr) minmax(0, 1.2fr) 6rem 6.5rem 6.5rem 9.5rem 9.5rem 2.25rem;
 }
+/* Wide: memory and disk are two table columns (the wrapper dissolves). */
+.sess--detailed .sess__uses { display: contents; }
 .sess--detailed .sess__use { flex-direction: column; align-items: stretch; gap: 3px; }
 /* In the column layout flex: 1 would size the bar's HEIGHT to nothing. */
 .sess--detailed .sess__use .sv-bar { flex: none; width: 100%; }
@@ -4134,12 +4113,13 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
     grid-template-areas:
       "dot   main  act   menu"
       ".     cwd   cwd   cwd"
-      ".     ram   disk  disk"
+      ".     uses  uses  uses"
       ".     dates dates dates";
   }
-  .sess--detailed > .sess__use--ram { grid-area: ram; }
-  .sess--detailed > .sess__use--disk { grid-area: disk; }
-  .sess--detailed .sess__use { flex-direction: row; align-items: center; }
+  /* One short line — "ram 336 MB ▬   disk 1.2 GB ▬" — not bars across the row. */
+  .sess--detailed > .sess__uses { grid-area: uses; display: flex; gap: var(--s-4); }
+  .sess--detailed .sess__uses .sess__use { flex: none; flex-direction: row; align-items: center; }
+  .sess--detailed .sess__use .sv-bar { width: 2.5rem; min-width: 0; }
   .sess--detailed .sess__use-k { display: inline; }
 }
 
@@ -4198,3 +4178,35 @@ body.mobile .statusbar__brand .spark--brand {
   filter: drop-shadow(0 0 6px rgba(245, 165, 36, 0.25));
 }
 body.mobile .statusbar__brand .spark--brand * { animation: none; }
+
+/* Settings → Display is a group of sections; the group's last one still
+   needs its divider above the next section in the panel. */
+.modal__group > .modal__section:last-of-type { border-bottom: 1px solid var(--border); }
+.modal__panel > .modal__group:last-child > .modal__section:last-of-type { border-bottom: none; }
+
+/* Detailed view, tablet widths (760–1099 px) with memory/disk shown: nine
+   table columns squeezed the name and directory to "radio…" while the
+   bars and dates kept their width. Two lines per session instead —
+   name + task · ram / disk · activity, then directory · dates. */
+@media (min-width: 760px) and (max-width: 1099px) {
+  .picker-shell[data-use="on"] .picker__thead { display: none; }
+  .picker-shell[data-use="on"] .sess--detailed {
+    grid-template-columns: auto minmax(0, 1fr) auto 6rem 2.25rem;
+    grid-template-areas:
+      "dot main  uses  act   menu"
+      ".   cwd   dates dates dates";
+    column-gap: var(--s-4);
+    row-gap: 0.3rem;
+  }
+  .picker-shell[data-use="on"] .sess--detailed > .sess__dot { grid-area: dot; }
+  .picker-shell[data-use="on"] .sess--detailed > .sess__main { grid-area: main; }
+  .picker-shell[data-use="on"] .sess--detailed > .sess__activity { grid-area: act; text-align: right; }
+  .picker-shell[data-use="on"] .sess--detailed > .sess__actions { grid-area: menu; }
+  .picker-shell[data-use="on"] .sess--detailed > .sess__cwd { grid-area: cwd; }
+  .picker-shell[data-use="on"] .sess--detailed > .sess__uses { grid-area: uses; display: flex; gap: var(--s-4); }
+  .picker-shell[data-use="on"] .sess--detailed > .sess__dates { grid-area: dates; display: flex; justify-content: flex-end; }
+  .picker-shell[data-use="on"] .sess--detailed .sess__use { flex: none; flex-direction: row; align-items: center; }
+  .picker-shell[data-use="on"] .sess--detailed .sess__use .sv-bar { width: 2.5rem; min-width: 0; }
+  .picker-shell[data-use="on"] .sess--detailed .sess__use-k,
+  .picker-shell[data-use="on"] .sess--detailed .sess__date-k { display: inline; }
+}

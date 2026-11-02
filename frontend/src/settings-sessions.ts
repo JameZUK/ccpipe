@@ -8,6 +8,7 @@
 //   start at boot, and after how long completely idle each kind is stopped.
 
 import { apiJson } from "./api";
+import { deviceClass } from "./mobile";
 import { STATS_INTERVALS, loadStatsPrefs, saveStatsPrefs, type StatsPrefs } from "./sysviz";
 
 interface SessionsConfig {
@@ -77,10 +78,11 @@ export function buildStatsSection(): HTMLElement {
   const bar = checkbox(p.sessionBar);
   const per = checkbox(p.perSession);
   const every = select(STATS_INTERVALS.map((s) => [String(s), `${s} s`]), String(p.interval));
+  const only = `this ${deviceClass()} only`;
   rows.append(
-    row("System panel on the landing page", "this device only · CPU, memory and disk graphs", landing),
-    row("Status in a session's top bar", "this device only · beside the ping; tap it for details", bar),
-    row("Memory & disk per session", "this device only · on the landing page", per),
+    row("System panel on the landing page", `${only} · CPU, memory and disk graphs`, landing),
+    row("Status in a session's top bar", `${only} · beside the ping; tap it for details`, bar),
+    row("Memory & disk per session", `${only} · on the landing page`, per),
     row("Refresh every", "", every),
   );
   const save = (): void => {

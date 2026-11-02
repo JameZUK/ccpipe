@@ -18,6 +18,7 @@ import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
 import { onUpdateChange, pendingUpdate } from "./update";
 import { buildSessionsSection, buildStatsSection } from "./settings-sessions";
+import { deviceClass, isMobileLayout } from "./mobile";
 import {
   DEFAULT_PREFS,
   DisplayPrefs,
@@ -737,8 +738,16 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
 // ─── Display section ────────────────────────────────────────────────────
 
 function buildDisplaySection(opts: SettingsOpts): HTMLElement {
-  const sec = document.createElement("section");
-  sec.className = "modal__section";
+  // A group of sections — text, terminal font, cursor, rendering — rather
+  // than one long list. Display prefs live in this browser's storage, so
+  // only THIS device's terminal font is shown: the one terminal.ts uses
+  // here (isMobileLayout: coarse pointer or ≤ 768 px → the "mobile" font,
+  // which covers phones and tablets).
+  const sec = document.createElement("div");
+  sec.className = "modal__group";
+  const fontGrid: "Desktop" | "Mobile" = isMobileLayout() ? "Mobile" : "Desktop";
+  // A desktop window narrower than 768 px uses the small-screen font too.
+  const device = fontGrid === "Mobile" && deviceClass() === "desktop" ? "narrow window" : deviceClass();
   const prefs = loadDisplayPrefs();
   // System-mono fallback stack mirrored here so the card grid can
   // render its preview in the actual font the terminal will use.
@@ -780,7 +789,8 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
       }).join("")
     + `</div>`;
   sec.innerHTML = `
-    <h2 class="modal__section-title">display</h2>
+    <section class="modal__section">
+    <h2 class="modal__section-title">text</h2>
     <div class="modal__rows">
       <label class="row">
         <span class="row__label">Font size <span class="row__hint" data-role="fontSize-value">${prefs.fontSize}px</span></span>
@@ -794,18 +804,23 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
         <span class="row__label">Letter spacing <span class="row__hint" data-role="letterSpacing-value">${prefs.letterSpacing}px</span></span>
         <input type="range" name="letterSpacing" min="0" max="3" step="0.5" value="${prefs.letterSpacing}" class="slider"/>
       </label>
+    </div>
+    </section>
+    <section class="modal__section">
+    <h2 class="modal__section-title">terminal font · ${device}</h2>
+    <div class="modal__rows">
       <div class="row row--stacked">
-        <span class="row__label">Terminal font · desktop
-          <span class="row__hint" data-role="terminalFontDesktop-hint"></span>
+        <span class="row__label">Font on this ${device}
+          <span class="row__hint" data-role="terminalFont${fontGrid}-hint"></span>
+          ${fontGrid === "Mobile" ? `<span class="row__hint">★ marks fonts tuned for small screens</span>` : ""}
         </span>
-        ${fontCardsHTML(prefs.terminalFontDesktop, "Desktop")}
+        ${fontCardsHTML(fontGrid === "Mobile" ? prefs.terminalFontMobile : prefs.terminalFontDesktop, fontGrid)}
       </div>
-      <div class="row row--stacked">
-        <span class="row__label">Terminal font · mobile
-          <span class="row__hint" data-role="terminalFontMobile-hint">★ marks fonts tuned for small screens</span>
-        </span>
-        ${fontCardsHTML(prefs.terminalFontMobile, "Mobile")}
-      </div>
+    </div>
+    </section>
+    <section class="modal__section">
+    <h2 class="modal__section-title">cursor</h2>
+    <div class="modal__rows">
       <label class="row">
         <span class="row__label">Cursor style</span>
         <select name="cursorStyle" class="select">
@@ -844,15 +859,21 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
         <span class="row__label">Cursor blink</span>
         <input type="checkbox" name="cursorBlink" class="checkbox"${prefs.cursorBlink ? " checked" : ""}/>
       </label>
+    </div>
+    </section>
+    <section class="modal__section">
+    <h2 class="modal__section-title">rendering</h2>
+    <div class="modal__rows">
       <label class="row">
-        <span class="row__label">WebGL renderer <span class="row__hint">this device only · turn off if letters come out garbled or blank</span></span>
+        <span class="row__label">WebGL renderer <span class="row__hint">this ${device} only · turn off if letters come out garbled or blank</span></span>
         <input type="checkbox" name="webgl" class="checkbox"${prefs.webgl ? " checked" : ""}/>
       </label>
     </div>
     <div class="modal__row-actions">
-      <button type="button" class="btn btn--ghost" data-role="reset">Reset defaults</button>
-      <span class="modal__status" data-role="display-status">live</span>
+      <span class="modal__status" data-role="display-status">changes apply as you make them · saved on this ${device}</span>
+      <button type="button" class="btn btn--ghost" data-role="reset">Reset display</button>
     </div>
+    </section>
   `;
 
   // Mutable working copy. We seeded it once from loadDisplayPrefs() at
