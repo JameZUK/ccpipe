@@ -276,6 +276,71 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   };
   if (opts.webgl !== false && initialPrefs.webgl) enableWebgl();
 
+  // ── WORKAROUND (temporary): addon-webgl atlas page-merge bug ─────────
+  // ROLLBACK when @xterm/xterm 6.1 + @xterm/addon-webgl 0.20 ship stable
+  // (they carry the real fix, xtermjs/xterm.js#5883): delete this block,
+  // the `webglAtlas` entry in getDebugState, and the note in
+  // docs/development.md ("Temporary workarounds"). Added 2026-11-02.
+  //
+  // The bug: once the glyph atlas reaches its page limit (max(4,
+  // MAX_TEXTURE_IMAGE_UNITS), 16 on most phones) it merges four pages
+  // into one, and the merged page can land at an index whose texture
+  // version already matches, so the GPU copy isn't re-uploaded and
+  // glyphs sample the old page — the garbled colour/bold letters seen on
+  // the phone. No merge, no bug: when the atlas gets within a few pages
+  // of the limit, rebuild the WebGL addon, which starts a fresh atlas
+  // (disposing the renderer releases the cached atlas when this terminal
+  // is its only owner — tiles use the DOM renderer, so it always is).
+  // clearTextureAtlas() is NOT enough: it blanks pages but keeps them,
+  // and full pages never become active again, so the next page merges.
+  //
+  // Reads private internals (_renderer._charAtlas.pages, the class's
+  // static maxAtlasPages). If a future version renames them the guard
+  // switches itself off with a console warning; nothing else breaks.
+  let atlasRebuilds = 0;
+  let atlasGuardBroken = false;
+  let atlasRebuildPending = false;
+  const atlasState = (): { pages: number; limit: number; merged: number } | null => {
+    const atlas = (webgl as any)?._renderer?._charAtlas;
+    const pages = atlas?.pages;
+    const max = atlas?.constructor?.maxAtlasPages;
+    if (!Array.isArray(pages) || typeof max !== "number") return null;
+    // Merged pages are twice the base size. Non-zero means a merge got
+    // through anyway (one frame drawing more new glyphs than the headroom).
+    const widths: number[] = pages.map((p: any) => p?.canvas?.width ?? 0);
+    const base = Math.min(...widths);
+    const merged = widths.filter((w) => w > base).length;
+    return { pages: pages.length, limit: Math.max(4, max), merged };
+  };
+  term.onRender(() => {
+    if (!webglActive || atlasGuardBroken || atlasRebuildPending) return;
+    const st = atlasState();
+    if (!st) {
+      // No atlas yet right after (re)creation is normal; a missing
+      // static limit means the internals changed.
+      if ((webgl as any)?._renderer?._charAtlas) {
+        atlasGuardBroken = true;
+        console.warn("ccpipe: webgl atlas guard disabled (xterm internals changed)");
+      }
+      return;
+    }
+    // A single frame can add several pages (a fresh colourful screen),
+    // so keep three pages of headroom below the merge point.
+    if (st.pages < Math.max(2, st.limit - 3)) return;
+    atlasRebuildPending = true;
+    // Outside the render callback: swapping renderers mid-frame is asking
+    // for trouble.
+    setTimeout(() => {
+      atlasRebuildPending = false;
+      if (disposed || !webglActive) return;
+      disableWebgl();
+      enableWebgl();
+      atlasRebuilds++;
+      try { term.refresh(0, term.rows - 1); } catch {}
+    }, 0);
+  });
+  // ── end WORKAROUND ────────────────────────────────────────────────────
+
   // Rebuild the glyph atlas when the app comes back to the foreground.
   // Mobile browsers (seen on Firefox Android, 2026-10-13) can reclaim or
   // corrupt the WebGL glyph texture while the app is backgrounded WITHOUT
@@ -1388,6 +1453,10 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       cursorX: buf.cursorX,
       viewportY: buf.viewportY,
       renderer: webglActive ? "webgl" : "dom",
+      // Temporary — see the atlas-merge WORKAROUND block (rollback note).
+      webglAtlas: webglActive
+        ? { ...(atlasState() ?? { unreadable: true }), rebuilds: atlasRebuilds, guardBroken: atlasGuardBroken }
+        : null,
       viewportScrollTop: viewport?.scrollTop ?? null,
       viewportScrollHeight: viewport?.scrollHeight ?? null,
       viewportClientHeight: viewport?.clientHeight ?? null,

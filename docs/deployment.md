@@ -314,9 +314,12 @@ the unit files; your `tls.conf` drop-in is left alone).
 - **Letters garbled, blank or replaced by junk shapes** (often in
   coloured / dim / bold text, while plain text is fine): the WebGL
   renderer's glyph cache has gone bad — an atlas page-merge bug in
-  `@xterm/addon-webgl` 0.18/0.19, seen most on high-DPI phones. Turn
-  off **Settings → Display → WebGL renderer** on that device; the plain
-  renderer has no glyph cache. The setting is per device.
+  `@xterm/addon-webgl` 0.18/0.19, seen most on high-DPI phones. ccpipe
+  now rebuilds the atlas before a merge can happen (see "Temporary
+  workarounds" in development.md); a debug snapshot's
+  `terminal.webglAtlas.merged` above 0 means one got through anyway. If
+  it still happens, turn off **Settings → Display → WebGL renderer** on
+  that device; the plain renderer has no glyph cache. Per device.
 - **Checking what the terminal shows against tmux**: Settings → Debug →
   Capture snapshot (or Ctrl+Shift+D), then "Send to server log". The
   server compares the page's lines with `tmux capture-pane` and logs a

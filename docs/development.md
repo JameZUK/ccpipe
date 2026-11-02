@@ -195,3 +195,43 @@ math is in `backend/ccpipe/mic.py::MicWriter.estimate_drain_seconds()`.
 The four user-tunable knobs are defined in
 `backend/ccpipe/config.py::MicConfig`. If you're touching any of those,
 read all three.
+
+## Temporary workarounds
+
+Things in the code that exist only to dodge an upstream bug, and how to
+take each one out once the fix ships.
+
+### WebGL glyph-atlas merge guard (added 2026-11-02)
+
+**Bug:** `@xterm/addon-webgl` ≤ 0.19 corrupts glyphs after its texture
+atlas merges four pages into one: the merged page can reuse an index and
+version number, so the GPU copy isn't re-uploaded and glyphs are drawn
+from the old page. Seen on the Firefox Android PWA as garbled or blank
+letters in coloured/bold text while the buffer text was correct. Fixed
+upstream in [xtermjs/xterm.js#5883](https://github.com/xtermjs/xterm.js/pull/5883),
+shipped only in `@xterm/addon-webgl` 0.20 betas (needs `@xterm/xterm`
+6.1).
+
+**Workaround:** `frontend/src/terminal.ts`, the block marked
+`WORKAROUND (temporary): addon-webgl atlas page-merge bug`. After each
+frame it reads the atlas page count (private internals) and, three
+pages short of the merge point, rebuilds the WebGL addon so a fresh
+atlas starts; no merge ever happens. The debug snapshot reports it as
+`terminal.webglAtlas` (`pages`, `limit`, `merged`, `rebuilds`,
+`guardBroken`). `merged > 0` means a merge got through anyway (one frame
+drew more new glyphs than the headroom).
+
+**Roll back when** `@xterm/xterm` 6.1 and `@xterm/addon-webgl` 0.20 are
+released as stable (`npm view @xterm/addon-webgl dist-tags` shows
+`latest` ≥ 0.20):
+
+1. Upgrade `@xterm/xterm` and every `@xterm/addon-*` together, and
+   re-check the private-internals patches in `terminal.ts` (the
+   scroll-up patch reports `suPatchInstalled` in the debug snapshot).
+2. Delete the `WORKAROUND` block and the `webglAtlas` entry in
+   `getDebugState()`.
+3. Delete this section.
+
+Keep **Settings → Display → WebGL renderer** (the per-device off switch):
+it's a useful escape hatch for any future GPU problem, not part of the
+workaround.
