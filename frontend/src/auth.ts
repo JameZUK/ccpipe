@@ -14,6 +14,8 @@
 // This keeps the dedicated "enter your code" surface the operator
 // prefers while preserving the single-call semantics that don't leak
 // the password-correctness oracle.
+import { sparkMark } from "./brand";
+
 
 export interface AuthStatus {
   required: boolean;
@@ -111,29 +113,11 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   // unauthenticated visitors what's behind it.
   //
   // The mark is a four-petal "spark" — two crossed diamond shapes —
-  // that breathes and rotates slowly. Pure SVG + CSS, no extra JS or
-  // requestAnimationFrame loop.
+  // that breathes and rotates slowly (brand.ts; also on the session picker).
   const head = document.createElement("div");
   head.className = "login__head";
 
-  const mark = document.createElement("div");
-  mark.className = "login-mark";
-  mark.setAttribute("aria-hidden", "true");
-  // Each petal uses the SAME path (a vertical diamond centred on the
-  // origin). The per-petal rotation is applied in CSS via a custom
-  // property so it can compose with the breathing scale animation —
-  // a SVG `transform=` attribute would be overridden by CSS transform.
-  mark.innerHTML = `
-    <svg class="login-mark__svg" viewBox="-40 -40 80 80">
-      <g class="login-mark__spark">
-        <path class="login-mark__petal login-mark__petal--a" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
-        <path class="login-mark__petal login-mark__petal--b" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
-        <path class="login-mark__petal login-mark__petal--c" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
-        <path class="login-mark__petal login-mark__petal--d" d="M0 -34 L4 0 L0 34 L-4 0 Z"/>
-      </g>
-      <circle class="login-mark__core" cx="0" cy="0" r="2.4"/>
-    </svg>
-  `;
+  const mark = sparkMark("spark--login");
 
   const word = document.createElement("div");
   word.className = "wordmark small login__wordmark";

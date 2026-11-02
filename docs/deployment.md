@@ -289,6 +289,19 @@ systemctl --user restart ccpipe
 Re-running `scripts/install.sh` does the same (and also re-installs
 the unit files; your `tls.conf` drop-in is left alone).
 
+Open pages pick the new build up by themselves — no reload needed on each
+device. Every build writes `dist/version.json`; pages poll it (every two
+minutes, and whenever the app comes back to the foreground) and reload
+onto a new build at a moment that loses nothing: straight away on the
+session picker, otherwise when the app returns from the background or after
+ten idle minutes — never with a dialog open, mid-dictation, or with the
+terminal scrolled back. A small "new version ready · reload" toast offers
+it sooner, and Settings → About's button reads "Update ready · reload".
+Until then the old page keeps working: the build keeps the last three
+builds' files in `dist/assets` (`dist/.builds.json` records which are
+whose), so its lazily-loaded code is still there. (`frontend/src/update.ts`,
+`frontend/vite.config.ts`.)
+
 ## Production troubleshooting
 
 - **`/voice` says no audio device**: run `pactl list short sources |

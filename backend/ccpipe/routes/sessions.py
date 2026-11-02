@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shlex
+import socket
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -23,7 +24,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .. import drafts, sticky, tmux, tmux_ui, ws
+from .. import drafts, session_meta, sticky, tmux, tmux_ui, ws
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..tmux_control import CONTROL_SESSION_NAME
@@ -68,6 +69,16 @@ class SessionInfo(BaseModel):
     # ordering so a session that's actively producing output bubbles
     # to the top of its sticky / non-sticky group.
     activity: int = 0
+    # When ccpipe first created the session (survives the reboot recreation
+    # of a sticky session, unlike tmux's own created time — see
+    # session_meta.py) and when a terminal last opened it (0 = not known).
+    opened: int = 0
+    # Terminals / tiles attached right now.
+    clients: int = 0
+    # The active pane's working directory and title (Claude Code sets the
+    # title to its current task, with a spinner glyph while it works).
+    cwd: str | None = None
+    title: str | None = None
 
 
 class CreateSessionBody(BaseModel):
@@ -86,24 +97,77 @@ class StickyBody(BaseModel):
     sticky: bool
 
 
-def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str]) -> SessionInfo:
+_HOSTNAME = socket.gethostname()
+
+
+def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
+                     meta: session_meta.Meta | None = None,
+                     panes: dict[str, tuple[str, str]] | None = None) -> SessionInfo:
+    m = (meta or {}).get(s.name, {})
+    cwd, title = (panes or {}).get(s.name, (None, None))
+    if title in (_HOSTNAME, _HOSTNAME.split(".")[0]):
+        title = None                  # tmux's default title: says nothing
     return SessionInfo(
         name=s.name,
         windows=s.windows,
         attached=s.attached,
-        created=s.created,
+        created=m.get("created") or s.created,
         sticky=s.name in sticky_names,
         activity=s.activity,
+        opened=m.get("opened") or s.last_attached,
+        clients=s.clients,
+        cwd=cwd or None,
+        title=title or None,
     )
+
+
+async def _session_infos() -> list[SessionInfo]:
+    sessions, panes = await asyncio.gather(tmux.list_sessions(), tmux.active_panes())
+    sticky_names = sticky.sticky_names()
+    meta = await asyncio.to_thread(
+        session_meta.reconcile, {s.name: s.created for s in sessions}, sticky_names)
+    return [_to_session_info(s, sticky_names, meta, panes) for s in sessions]
+
+
+async def _session_info(name: str) -> SessionInfo | None:
+    return next((i for i in await _session_infos() if i.name == name), None)
 
 
 # ─── tmux session CRUD ────────────────────────────────────────────────────
 
 @router.get("/api/sessions", response_model=list[SessionInfo], dependencies=[AuthDep, SameOriginDep])
 async def list_sessions() -> list[SessionInfo]:
-    sessions = await tmux.list_sessions()
-    sticky_names = sticky.sticky_names()
-    return [_to_session_info(s, sticky_names) for s in sessions]
+    return await _session_infos()
+
+
+_PREVIEW_MAX_SESSIONS = 64
+_PREVIEW_MAX_LINES = 60
+_preview_slots = asyncio.Semaphore(8)
+
+
+@router.get("/api/sessions/previews", dependencies=[AuthDep, SameOriginDep])
+async def session_previews(names: str = "", lines: int = 16) -> dict[str, Any]:
+    """The bottom of each named session's screen as plain text, for the
+    picker's grid view: ``{"previews": {name: [line, ...]}}``. Names are
+    comma-separated; unknown or invalid ones are left out."""
+    lines = max(1, min(lines, _PREVIEW_MAX_LINES))
+    wanted: list[str] = []
+    for raw in names.split(",")[:_PREVIEW_MAX_SESSIONS]:
+        try:
+            n = tmux.safe_name(raw.strip())
+        except ValueError:
+            continue
+        if n != CONTROL_SESSION_NAME and n not in wanted:
+            wanted.append(n)
+    live = {s.name for s in await tmux.list_sessions()}
+
+    async def one(n: str) -> tuple[str, list[str] | None]:
+        async with _preview_slots:
+            screen = await tmux.capture_screen(n)
+        return n, screen[-lines:] if screen is not None else None
+
+    results = await asyncio.gather(*(one(n) for n in wanted if n in live))
+    return {"previews": {n: p for n, p in results if p is not None}}
 
 
 @router.post("/api/sessions", response_model=SessionInfo,
@@ -156,11 +220,11 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
     command = tmux.wrap_in_shell(claude_cmd)
 
     await tmux.create_session(name, command=command, cwd=cwd)
-    sticky_names = sticky.sticky_names()
-    for s in await tmux.list_sessions():
-        if s.name == name:
-            return _to_session_info(s, sticky_names)
-    raise HTTPException(status_code=500, detail="session created but not found in list")
+    await asyncio.to_thread(session_meta.note_created, name)
+    info = await _session_info(name)
+    if info is None:
+        raise HTTPException(status_code=500, detail="session created but not found in list")
+    return info
 
 
 @router.patch("/api/sessions/{name}", response_model=SessionInfo,
@@ -187,15 +251,16 @@ async def rename_session_endpoint(name: str, body: RenameSessionBody) -> Session
         drafts.rename(name, new_name)
         # …and so do saved screen layouts (its own and any tile showing it).
         layouts.rename(name, new_name)
+        # …and its created / last-opened record.
+        session_meta.rename(name, new_name)
         # Drop any cached capture-pane blob under BOTH names so a
         # reconnect can't be served the prior occupant's history.
         ws.invalidate_history_cache(name)
         ws.invalidate_history_cache(new_name)
-    sticky_names = sticky.sticky_names()
-    for s in await tmux.list_sessions():
-        if s.name == new_name:
-            return _to_session_info(s, sticky_names)
-    raise HTTPException(status_code=500, detail="renamed but session vanished")
+    info = await _session_info(new_name)
+    if info is None:
+        raise HTTPException(status_code=500, detail="renamed but session vanished")
+    return info
 
 
 @router.delete("/api/sessions/{name}", dependencies=[AuthDep, CsrfDep])
@@ -218,6 +283,10 @@ async def delete_session_endpoint(name: str) -> dict[str, bool]:
     # A new session reusing this name must not inherit the dead one's
     # cached scrollback.
     ws.invalidate_history_cache(name)
+    # A killed sticky session comes back in place (same session, so it keeps
+    # its record); any other name starts afresh if it's reused.
+    if name not in sticky.sticky_names():
+        session_meta.forget(name)
     return {"deleted": True}
 
 
@@ -245,11 +314,10 @@ async def set_sticky_endpoint(name: str, body: StickyBody) -> SessionInfo:
         sticky.set_sticky(name, cwd)
     else:
         sticky.clear(name)
-    sticky_names = sticky.sticky_names()
-    for s in await tmux.list_sessions():
-        if s.name == name:
-            return _to_session_info(s, sticky_names)
-    raise HTTPException(status_code=500, detail="session vanished")
+    info = await _session_info(name)
+    if info is None:
+        raise HTTPException(status_code=500, detail="session vanished")
+    return info
 
 
 # ─── Claude Code session listing + export ─────────────────────────────────

@@ -22,7 +22,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import drafts, tmux, tmux_ui
+from . import drafts, session_meta, tmux, tmux_ui
 from .auth import is_session_authed
 from .mic import MicWriter
 from .pty_relay import PtyProcess, pump
@@ -421,6 +421,10 @@ class _TerminalConnection:
                 return
         elif not await self._ensure_session():
             return
+        else:
+            # "Last opened" in the session picker (tiles don't count).
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(session_meta.note_opened, self.session)
 
         if self.watch:
             # The tmux client is sized to the session, not the browser: the

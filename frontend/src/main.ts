@@ -11,6 +11,7 @@ import { DOC_SVG, FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "
 import { isMobileLayout, mountMobileUI, type MobileUI } from "./mobile";
 import { capturePendingShare } from "./share";
 import { installTooltips } from "./tooltip";
+import { addBusyCheck, installUpdater, recoverFromStaleBundle } from "./update";
 import * as notifications from "./notifications";
 import { attachOptionSpacePtt } from "./ptt";
 import { mdViewUrl } from "./view-url";
@@ -89,6 +90,9 @@ capturePendingShare();
 // Hover / press-and-hold tooltips for the toolbar icons (see tooltip.ts).
 installTooltips();
 
+// Notice a deploy and reload onto it at a safe moment (see update.ts).
+installUpdater();
+
 /** Socket URL for a tile beside the main terminal (see tile.ts). */
 function tileWsUrl(session: string, mode: "live" | "watch"): string {
   return wsUrlFor(session) + "&tile=1" + (mode === "watch" ? "&mode=watch" : "");
@@ -130,6 +134,26 @@ async function attachTerminal(session: string): Promise<void> {
   // the same session instead of bouncing to the picker.
   saveLastSession(session);
 
+  // Load the terminal's code BEFORE taking down the current view: if a
+  // chunk can't load (a deploy replaced this page's build), the page
+  // reloads into this session, or at worst the picker stays usable — it
+  // used to be wiped first, leaving a blank page.
+  let modules;
+  try {
+    modules = await Promise.all([
+      import("./terminal"),
+      import("./mic"),
+      import("./tts"),
+      import("./waveform"),
+      import("./layout"),
+    ]);
+  } catch (e) {
+    console.warn("terminal code failed to load:", e);
+    if (!recoverFromStaleBundle()) renderBootstrapError(() => location.reload(), "Couldn’t load the app’s code.");
+    return;
+  }
+  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }, { TileLayout }] = modules;
+
   // Fire dispose on whatever is currently mounted (session picker or a
   // prior terminal view) before wiping it, so its timers/listeners
   // (e.g. the picker's health-poll interval + idle callback) tear down
@@ -141,15 +165,6 @@ async function attachTerminal(session: string): Promise<void> {
   app.innerHTML = "";
   const mobile = isMobileLayout();
   document.body.classList.toggle("mobile", mobile);
-
-  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }, { TileLayout }] =
-    await Promise.all([
-      import("./terminal"),
-      import("./mic"),
-      import("./tts"),
-      import("./waveform"),
-      import("./layout"),
-    ]);
 
   const view = document.createElement("div");
   view.className = "terminal-view";
@@ -654,7 +669,9 @@ async function attachTerminal(session: string): Promise<void> {
   // exit path including play() rejection — without that, a failed
   // play() acquired the lock but never released it, leaking refcount
   // for the tab's lifetime.
+  let ttsPlaying = false;
   tts.onPlaybackStart = () => {
+    ttsPlaying = true;
     const an = tts.getAnalyser();
     if (an) {
       ttsWaveCanvas.hidden = false;
@@ -663,6 +680,7 @@ async function attachTerminal(session: string): Promise<void> {
     }
   };
   tts.onPlaybackEnd = () => {
+    ttsPlaying = false;
     ttsWaveform?.stop();
     ttsWaveCanvas.hidden = true;
   };
@@ -1061,8 +1079,16 @@ async function attachTerminal(session: string): Promise<void> {
 
   // Cross-tab pref sync: if another tab changes display settings, mirror them here.
   const unsubPrefs = onDisplayPrefsChange((p) => terminalApi.applyPrefs(p));
+  // Hold the automatic update reload while dictating, while speech plays,
+  // or while the terminal is scrolled back (a reload would lose the place).
+  const unbusy = addBusyCheck(() => {
+    if (recording || ttsPlaying) return true;
+    const buf = terminalApi.term.buffer.active;
+    return buf.viewportY < buf.baseY;
+  });
   view.addEventListener("ccpipe:dispose", () => {
     unsubPrefs();
+    unbusy();
     window.removeEventListener("resize", syncTilesBtn);
     if (tmuxRefreshTimer !== null) clearTimeout(tmuxRefreshTimer);
     tmuxBar?.dispose();
@@ -1229,20 +1255,29 @@ async function bootstrap(): Promise<void> {
   }
 
   if (isStale()) return;
-  const { renderSessionPicker } = await import("./session-picker");
+  let picker;
+  try {
+    picker = await import("./session-picker");
+  } catch (e) {
+    console.warn("session picker failed to load:", e);
+    if (!isStale() && !recoverFromStaleBundle()) {
+      renderBootstrapError(() => location.reload(), "Couldn’t load the app’s code.");
+    }
+    return;
+  }
   if (isStale()) return;
-  renderSessionPicker(app, attachTerminal);
+  picker.renderSessionPicker(app, attachTerminal);
 }
 
 /** Minimal full-screen retry affordance shown when the initial auth
  * probe fails (network down / backend 5xx). Avoids silently proceeding
  * into a half-broken UI. */
-function renderBootstrapError(retry: () => void): void {
+function renderBootstrapError(retry: () => void, message = "Can’t reach the server."): void {
   app.replaceChildren();
   const wrap = document.createElement("div");
   wrap.className = "bootstrap-error";
   const msg = document.createElement("p");
-  msg.textContent = "Can’t reach the server.";
+  msg.textContent = message;
   const btn = document.createElement("button");
   btn.className = "btn";
   btn.textContent = "Retry";

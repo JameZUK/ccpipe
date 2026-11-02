@@ -26,10 +26,14 @@ import { makeHighlight } from "./md-highlight";
 import { setupDocsDrawer } from "./docs-drawer";
 import { bindCloseButton } from "./close-page";
 import { mdViewUrl } from "./view-url";
+import { installChunkRecovery } from "./update";
 
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
 import "./viewer.css";
+
+// A deploy can replace the lazily-loaded Mermaid chunk under an open page.
+installChunkRecovery();
 
 const md = new MarkdownIt({
   html: true,        // raw HTML is allowed through, then DOMPurify-sanitised

@@ -8,6 +8,7 @@ event channel see tmux_control.py. For the attached client see pty_relay.py
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -49,6 +50,11 @@ class TmuxSession:
     # bubbles to the top of its group automatically. Zero when tmux
     # doesn't expose it (older tmux, or libtmux fallback).
     activity: int = 0
+    # Number of tmux clients attached (each ccpipe terminal or tile is one).
+    clients: int = 0
+    # tmux's #{session_last_attached}; 0 if never attached since the tmux
+    # server started. session_meta keeps the record that survives reboots.
+    last_attached: int = 0
 
 
 def tmux_env() -> dict[str, str]:
@@ -80,6 +86,8 @@ def _sync_list_sessions() -> list[TmuxSession]:
             attached=int(s.session_attached or 0) > 0,
             created=int(s.session_created or 0),
             activity=int(getattr(s, "session_activity", 0) or 0),
+            clients=int(s.session_attached or 0),
+            last_attached=int(getattr(s, "session_last_attached", 0) or 0),
         ))
     return result
 
@@ -539,3 +547,62 @@ def safe_name(name: str) -> str:
     if not _SAFE_NAME_RE.fullmatch(name):
         raise ValueError(f"invalid session name: {name!r}")
     return name
+
+
+# ─── Picker details: active pane's cwd + title, screen previews ──────────
+
+_FIELD_SEP = "\x1f"
+# Control characters (C0 + DEL + C1) — never wanted in a title shown in the UI.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+async def _tmux_out(*args: str) -> str | None:
+    """stdout of one tmux command, or None on failure / timeout."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            TMUX_BIN, *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=tmux_env(),
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TMUX_QUERY_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        return None
+    if proc.returncode != 0:
+        return None
+    return out.decode("utf-8", "replace")
+
+
+async def active_panes() -> dict[str, tuple[str, str]]:
+    """session name → (cwd, title) of the active pane of its active window,
+    for every session, in one tmux call. The title is what the program in
+    the pane set (Claude Code puts its task name there)."""
+    fmt = _FIELD_SEP.join([
+        "#{session_name}", "#{window_active}#{pane_active}",
+        "#{pane_current_path}", "#{pane_title}",
+    ])
+    out = await _tmux_out("list-panes", "-a", "-F", fmt)
+    result: dict[str, tuple[str, str]] = {}
+    for line in (out or "").splitlines():
+        parts = line.split(_FIELD_SEP)
+        if len(parts) != 4 or parts[1] != "11" or parts[0] == CONTROL_SESSION_NAME:
+            continue
+        result[parts[0]] = (parts[2], _CTRL_RE.sub("", parts[3])[:200])
+    return result
+
+
+async def capture_screen(name: str) -> list[str] | None:
+    """The visible screen of the session's active pane as plain text (no
+    escapes), trailing spaces and trailing blank rows removed."""
+    out = await _tmux_out("capture-pane", "-p", "-t", pane_target(name))
+    if out is None:
+        return None
+    lines = [line.rstrip() for line in out.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines

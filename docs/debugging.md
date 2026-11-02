@@ -269,7 +269,8 @@ leaves it "connecting" for minutes. The client now handles this
 retried with the normal backoff (capped at 8 s), and resume / `online`
 events replace a dial that has been stuck for more than 3 s. If a user
 still sees it, confirm they are on the current build (Settings → About
-shows the build id; Force-reload refreshes it).
+shows the build id; pages update themselves after a deploy, and the About
+button reloads by hand).
 
 Short-lived connections closing with `close_code=1005` throughout the day
 are normal on a phone — app switches, screen locks and session changes all

@@ -105,3 +105,17 @@ export const ICON_NEXT = icon(`<path d="M5 12h12M13 6l6 6-6 6"/>`);
 export const ICON_EXPAND = icon(`<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>`);
 export const ICON_COPY = icon(`<rect x="9" y="9" width="12" height="12" rx="1"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>`);
 export const ICON_OPEN = icon(`<path d="M14 3h7v7M10 14L21 3M19 14v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/>`);
+export const ICON_SEARCH = icon(`<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>`);
+export const ICON_VIEW_COMPACT = icon(`<path d="M4 6h16M4 10h16M4 14h16M4 18h16"/>`);
+export const ICON_VIEW_DETAILED = icon(`<rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/>`);
+export const ICON_VIEW_GRID = icon(`<rect x="3" y="3" width="7.5" height="7.5" rx="1"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1"/>`);
+export const ICON_DOWNLOAD = icon(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>`);
+export const ICON_REFRESH = icon(`<path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/>`);
+
+/** One of the icon strings above as a DOM node — parsed as SVG, never as
+ * HTML, so new code needn't assign innerHTML to show an icon. */
+export function iconNode(svg: string): Node {
+  const xml = svg.includes("xmlns=") ? svg : svg.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
+  const doc = new DOMParser().parseFromString(xml, "image/svg+xml");
+  return document.importNode(doc.documentElement, true);
+}

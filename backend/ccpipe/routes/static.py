@@ -111,6 +111,15 @@ async def history_view() -> FileResponse:
     return _serve_file("history.html")
 
 
+# The build id of the frontend currently deployed ({"build": "<sha> · <time>"},
+# written by vite.config.ts). An open page compares it with the build it was
+# loaded from and reloads itself when a deploy has replaced it (update.ts).
+# Public like the bundle itself, which carries the same id; no-store via
+# _serve_file so every check sees the current file.
+@router.get("/version.json")
+async def version_json() -> FileResponse: return _serve_file("version.json")
+
+
 @router.get("/manifest.webmanifest")
 async def manifest() -> FileResponse: return _serve_file("manifest.webmanifest")
 

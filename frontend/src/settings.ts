@@ -16,6 +16,7 @@ import { getMicConfig, type MicConfig, setMicConfig } from "./api";
 import { changeCredentials, logout as apiLogout, logoutEverywhere } from "./auth";
 import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
+import { onUpdateChange, pendingUpdate } from "./update";
 import {
   DEFAULT_PREFS,
   DisplayPrefs,
@@ -127,7 +128,9 @@ export function openSettings(opts: SettingsOpts): void {
   activeOverlay = overlay;
 
   const modal = document.createElement("div");
-  modal.className = "modal";
+  // modal--settings: a full-screen sheet on a phone, a wide two-pane dialog
+  // (tabs down the side) on a tablet / desktop — see styles.css.
+  modal.className = "modal modal--settings";
   modal.setAttribute("role", "dialog");
   modal.setAttribute("aria-modal", "true");
   modal.setAttribute("aria-label", "Settings");
@@ -169,11 +172,16 @@ export function openSettings(opts: SettingsOpts): void {
     for (const id of Object.keys(panels) as TabId[]) {
       panels[id].classList.toggle("modal__panel--active", id === next);
     }
+    body.scrollTop = 0;
     saveLastTab(next);
   });
   panels[initial].classList.add("modal__panel--active");
 
-  modal.append(buildHeader(), tabs, displayPanel, voicePanel, accountPanel, debugPanel, buildAboutFooter());
+  // The panels scroll inside .modal__body; header, tabs and footer stay put.
+  const body = document.createElement("div");
+  body.className = "modal__body";
+  body.append(displayPanel, voicePanel, accountPanel, debugPanel);
+  modal.append(buildHeader(), tabs, body, buildAboutFooter());
 
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
@@ -279,9 +287,10 @@ function buildTabs(initial: TabId, onChange: (next: TabId) => void): HTMLElement
   };
   // Arrow-key navigation between tabs for keyboard users.
   bar.addEventListener("keydown", (e) => {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    // Left/Right for the tab row, Up/Down when it's the side list.
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
     const cur = buttons.findIndex((b) => b.getAttribute("aria-selected") === "true");
-    const delta = e.key === "ArrowRight" ? 1 : -1;
+    const delta = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1;
     const next = (cur + delta + buttons.length) % buttons.length;
     const nextId = buttons[next].dataset.tab as TabId;
     activate(nextId);
@@ -1308,6 +1317,19 @@ function buildAboutFooter(): HTMLElement {
     // current hashed bundle — fixing the "installed PWA stuck on old code".
     location.reload();
   });
+  // The page reloads itself onto a new deploy (update.ts); until it has,
+  // say so here.
+  const showPending = (build: string | null): void => {
+    reload.classList.toggle("btn--primary", !!build);
+    reload.textContent = build ? "Update ready · reload" : "Force reload";
+    reload.title = build
+      ? `Build ${build} is deployed; this page is ${__BUILD_ID__}`
+      : "Reload the app to pick up the latest deployed build";
+  };
+  showPending(pendingUpdate());
+  // The dialog is simply removed on close; drop the listener the next time
+  // it fires after that.
+  const unsub = onUpdateChange((b) => { if (f.isConnected) showPending(b); else unsub(); });
 
   right.append(meta, reload);
   f.append(mark, right);
