@@ -516,20 +516,28 @@ class _TerminalConnection:
             await self._teardown()
 
     async def _ensure_session(self) -> bool:
-        """Auto-create the session if it doesn't exist yet. If it's a KNOWN
-        STICKY session (killed, or vanished some time after the startup
-        restore ran), respawn it in its stored cwd with the restore command —
-        otherwise we'd silently recreate it in $HOME, which is the "after a
-        reboot ccpipe lands in /home" bug. Non-sticky names have no stored
-        cwd and keep the default. Returns False if the socket was refused."""
+        """Auto-create the session if it doesn't exist yet. A REMEMBERED one
+        (stopped, not started at boot, or a sticky one that vanished) is
+        resumed in its recorded directory on its Claude conversation —
+        otherwise we'd silently recreate it in $HOME, which was the "after
+        a reboot ccpipe lands in /home" bug. Unknown names get a fresh
+        claude in $HOME. Returns False if the socket was refused."""
         if await tmux.session_exists(self.session):
             return True
-        from . import sticky as _sticky
-        entry = _sticky.load().get(self.session)
-        if entry and entry.get("cwd"):
-            await tmux.create_session(
-                self.session, command=_sticky.build_restore_command(), cwd=entry["cwd"])
-        elif await tmux.at_session_cap():
+        # A remembered session (stopped when idle, not started at boot, or a
+        # sticky one that vanished): resume it in its directory, on the same
+        # Claude conversation — see lifecycle.py.
+        from . import lifecycle
+        if lifecycle.resumable(self.session):
+            try:
+                await lifecycle.resume(self.session)
+                return True
+            except lifecycle.LifecycleError as exc:
+                log.warning("resume of %r on connect failed: %s", self.session, exc.detail)
+                if exc.status == 429:
+                    await self.ws.close(code=1013, reason="session limit reached")
+                    return False
+        if await tmux.at_session_cap():
             await self.ws.close(code=1013, reason="session limit reached")
             return False
         else:

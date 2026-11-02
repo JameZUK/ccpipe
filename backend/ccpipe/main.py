@@ -119,40 +119,6 @@ def _warn_if_tls_with_open_host_validation() -> None:
     log.warning(bar)
 
 
-async def _restore_sticky_sessions() -> None:
-    """Recreate any sticky session whose tmux side has vanished
-    (typically a fresh boot, or `tmux kill-server`). Idempotent —
-    sessions that already exist are skipped. Restore uses
-    ``claude --continue`` so claude itself picks up the most recent
-    conversation for the cwd; on claude exit we drop to an
-    interactive shell, same as freshly-created sessions."""
-    from . import sticky as _sticky
-    from . import tmux as _tmux
-    entries = _sticky.load()
-    if not entries:
-        return
-    restore_cmd = _sticky.build_restore_command()
-
-    async def _restore_one(name: str, cwd: str) -> None:
-        try:
-            if await _tmux.session_exists(name):
-                return
-            await _tmux.create_session(name, command=restore_cmd, cwd=cwd)
-            log.info("sticky: restored session %r in %s", name, cwd)
-        except Exception:
-            log.exception("sticky: failed to restore session %r", name)
-
-    # Restore in parallel — each entry does one tmux subprocess
-    # spawn per check + create. With 8 sticky sessions the serial
-    # version stacked 16 tmux invocations end to end; gather()
-    # collapses that to one event-loop tick of overhead.
-    await asyncio.gather(*(
-        _restore_one(name, cwd)
-        for name, info in entries.items()
-        if (cwd := info.get("cwd"))
-    ))
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Eagerly resolve (or generate + persist) credentials so the operator
@@ -178,8 +144,13 @@ async def lifespan(app: FastAPI):
         patch_settings_safe()
         patch_keybindings_safe()
     await apply_server_defaults()
-    await _restore_sticky_sessions()
+    # At boot, start only the most recently used sessions (Settings →
+    # Sessions); the rest resume when opened. See lifecycle.py.
+    from . import lifecycle, sysstats
+    await lifecycle.boot_restore()
     await control_client.start()
+    # Resource sampling for the picker / session bar, and the idle-stop loop.
+    _background = [asyncio.create_task(sysstats.run()), asyncio.create_task(lifecycle.run())]
     if os.environ.get("CCPIPE_TTS", "off").lower() in ("kokoro", "on", "1", "true"):
         tts_service.set_enabled(True)
         await tts_service.start()
@@ -191,6 +162,12 @@ async def lifespan(app: FastAPI):
         _sidecar_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await _sidecar_task
+        sysstats.stop()
+        for t in _background:
+            t.cancel()
+        for t in _background:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
         await tts_service.stop()
         await control_client.stop()
         # Persist any composer-draft edits still inside the save debounce.
@@ -496,6 +473,7 @@ async def security_txt() -> PlainTextResponse:
 # ─── Route packages ───────────────────────────────────────────────────────
 from .routes.auth import router as _auth_router
 from .routes.debug import router as _debug_router
+from .routes.system import router as _system_router
 from .routes.fs import router as _fs_router
 from .routes.mic import router as _mic_router
 from .routes.sessions import router as _sessions_router
@@ -512,6 +490,7 @@ app.include_router(_prompts_router)
 app.include_router(_layouts_router)
 app.include_router(_fs_router)
 app.include_router(_debug_router)
+app.include_router(_system_router)
 app.include_router(_static_router)
 mount_static(app)
 

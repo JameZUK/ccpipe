@@ -22,9 +22,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .. import drafts, session_meta, sticky, tmux, tmux_ui, ws
+from .. import config as app_config
+from .. import drafts, lifecycle, session_meta, sticky, sysstats, tmux, tmux_ui, ws
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..tmux_control import CONTROL_SESSION_NAME
@@ -79,6 +80,45 @@ class SessionInfo(BaseModel):
     # title to its current task, with a spinner glyph while it works).
     cwd: str | None = None
     title: str | None = None
+    # Resource use (sysstats.py): CPU as % of the whole machine, memory as
+    # bytes (PSS of the session's processes), disk as bytes used by its
+    # directory. None until measured.
+    cpu: float | None = None
+    mem: int | None = None
+    disk: int | None = None
+    # Idle tracking (lifecycle.py): why it counts as in use, when it went
+    # idle, and when it will be stopped if it stays idle (None = it won't).
+    busy: str | None = None
+    idle_since: int | None = None
+    stops_at: int | None = None
+    # Claude Code's own status: "busy" (working on a turn), "shell" (idle
+    # with a background shell task) or "idle"; None = no Claude running.
+    claude: str | None = None
+    claude_since: int | None = None
+
+
+class StoppedSessionInfo(BaseModel):
+    """A remembered session that isn't running; opening it resumes it."""
+    name: str
+    sticky: bool = False
+    created: int = 0
+    opened: int = 0
+    stopped: int = 0
+    # "idle" (auto-stopped), "stopped" (by the user) or "gone" (rebooted,
+    # exited, not started at boot).
+    stop_reason: str = "gone"
+    cwd: str
+    # The Claude conversation it resumes, when known.
+    conversation: bool = False
+    disk: int | None = None
+
+
+class SessionsConfigBody(BaseModel):
+    boot_sticky: int | None = Field(default=None, ge=0, le=app_config.BOOT_MAX)
+    boot_other: int | None = Field(default=None, ge=0, le=app_config.BOOT_MAX)
+    # 0 = never; otherwise 15 min .. 30 days (clamped).
+    idle_stop_sticky_min: int | None = Field(default=None, ge=0, le=app_config.IDLE_MAX_MIN)
+    idle_stop_other_min: int | None = Field(default=None, ge=0, le=app_config.IDLE_MAX_MIN)
 
 
 class CreateSessionBody(BaseModel):
@@ -102,11 +142,15 @@ _HOSTNAME = socket.gethostname()
 
 def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
                      meta: session_meta.Meta | None = None,
-                     panes: dict[str, tuple[str, str]] | None = None) -> SessionInfo:
+                     panes: dict[str, tuple[str, str]] | None = None,
+                     claude: dict[str, tuple[str, int]] | None = None) -> SessionInfo:
     m = (meta or {}).get(s.name, {})
     cwd, title = (panes or {}).get(s.name, (None, None))
     if title in (_HOSTNAME, _HOSTNAME.split(".")[0]):
         title = None                  # tmux's default title: says nothing
+    use = sysstats.session_stats().get(s.name, {})
+    cstate, csince = (claude or {}).get(s.name, (None, None))
+    idle = lifecycle.status().get(s.name, {})
     return SessionInfo(
         name=s.name,
         windows=s.windows,
@@ -118,15 +162,25 @@ def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
         clients=s.clients,
         cwd=cwd or None,
         title=title or None,
+        cpu=use.get("cpu"),
+        mem=use.get("mem"),
+        disk=sysstats.project_size(cwd),
+        busy=idle.get("busy"),
+        idle_since=idle.get("idle_since"),
+        stops_at=idle.get("stops_at"),
+        claude=cstate,
+        claude_since=csince or None,
     )
 
 
 async def _session_infos() -> list[SessionInfo]:
-    sessions, panes = await asyncio.gather(tmux.list_sessions(), tmux.active_panes())
+    sysstats.touch()
+    sessions, panes, claude = await asyncio.gather(
+        tmux.list_sessions(), tmux.active_panes(), tmux.claude_states())
     sticky_names = sticky.sticky_names()
     meta = await asyncio.to_thread(
-        session_meta.reconcile, {s.name: s.created for s in sessions}, sticky_names)
-    return [_to_session_info(s, sticky_names, meta, panes) for s in sessions]
+        session_meta.reconcile, {s.name: (s.created, s.activity) for s in sessions}, sticky_names)
+    return [_to_session_info(s, sticky_names, meta, panes, claude) for s in sessions]
 
 
 async def _session_info(name: str) -> SessionInfo | None:
@@ -220,7 +274,7 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
     command = tmux.wrap_in_shell(claude_cmd)
 
     await tmux.create_session(name, command=command, cwd=cwd)
-    await asyncio.to_thread(session_meta.note_created, name)
+    await asyncio.to_thread(session_meta.note_created, name, None, cwd)
     info = await _session_info(name)
     if info is None:
         raise HTTPException(status_code=500, detail="session created but not found in list")
@@ -272,22 +326,99 @@ async def delete_session_endpoint(name: str) -> dict[str, bool]:
     _reject_control_session(name)
     if not await tmux.session_exists(name):
         raise HTTPException(status_code=404, detail="session not found")
-    if not await tmux.kill_session(name):
-        raise HTTPException(status_code=500, detail="kill failed")
-    # Stickiness is a user-controlled flag: killing the session does NOT clear
-    # it. The sticky entry (with its cwd) is kept so the session is recreated
-    # in the RIGHT directory on the next reboot / reconnect — killing a sticky
-    # session effectively restarts it in place. To forget one, toggle it
-    # ephemeral first. (Previously kill auto-cleared stickiness, which lost the
-    # stored cwd → the session respawned in $HOME after a reboot.)
-    # A new session reusing this name must not inherit the dead one's
-    # cached scrollback.
-    ws.invalidate_history_cache(name)
-    # A killed sticky session comes back in place (same session, so it keeps
-    # its record); any other name starts afresh if it's reused.
-    if name not in sticky.sticky_names():
-        session_meta.forget(name)
+    # "Kill" stops the session but keeps it remembered (and sticky, with its
+    # cwd): it stays in the picker and resumes — same directory, same Claude
+    # conversation — when opened. POST …/forget removes it for good.
+    # lifecycle.stop also drops the cached scrollback, so a session reusing
+    # the name can't inherit it.
+    try:
+        await lifecycle.stop(name, reason="stopped")
+    except lifecycle.LifecycleError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
     return {"deleted": True}
+
+
+def _lifecycle_name(name: str) -> str:
+    try:
+        name = tmux.safe_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _reject_control_session(name)
+    return name
+
+
+@router.get("/api/sessions/remembered", response_model=list[StoppedSessionInfo],
+            dependencies=[AuthDep, SameOriginDep])
+async def remembered_sessions() -> list[StoppedSessionInfo]:
+    """Sessions ccpipe remembers that aren't running, most recently used first."""
+    sysstats.touch()
+    live = {s.name for s in await tmux.list_sessions()}
+    meta = session_meta.load()
+    stick = sticky.load()
+    out: list[StoppedSessionInfo] = []
+    for name in set(meta) | set(stick):
+        if name in live or name == CONTROL_SESSION_NAME:
+            continue
+        m = meta.get(name, {})
+        cwd = m.get("cwd") or stick.get(name, {}).get("cwd")
+        if not cwd:
+            continue
+        out.append(StoppedSessionInfo(
+            name=name, sticky=name in stick, created=m.get("created", 0),
+            opened=m.get("opened", 0), stopped=m.get("stopped", 0),
+            stop_reason=m.get("stop_reason", "gone"), cwd=cwd,
+            conversation=bool(m.get("claude")), disk=sysstats.project_size(cwd)))
+    out.sort(key=lambda i: max(i.opened, i.stopped, i.created), reverse=True)
+    return out
+
+
+@router.post("/api/sessions/{name}/resume", response_model=SessionInfo,
+             dependencies=[AuthDep, CsrfDep])
+async def resume_session(name: str) -> SessionInfo:
+    name = _lifecycle_name(name)
+    try:
+        await lifecycle.resume(name)
+    except lifecycle.LifecycleError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    info = await _session_info(name)
+    if info is None:
+        raise HTTPException(status_code=500, detail="resumed but not found")
+    return info
+
+
+@router.post("/api/sessions/{name}/stop", dependencies=[AuthDep, CsrfDep])
+async def stop_session(name: str) -> dict[str, bool]:
+    name = _lifecycle_name(name)
+    if not await tmux.session_exists(name):
+        raise HTTPException(status_code=404, detail="session not running")
+    try:
+        await lifecycle.stop(name, reason="stopped")
+    except lifecycle.LifecycleError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return {"stopped": True}
+
+
+@router.post("/api/sessions/{name}/forget", dependencies=[AuthDep, CsrfDep])
+async def forget_session(name: str) -> dict[str, bool]:
+    """Stop it if running and drop it from the list (and the sticky set)."""
+    name = _lifecycle_name(name)
+    await lifecycle.forget(name)
+    return {"forgotten": True}
+
+
+@router.get("/api/session-config", dependencies=[AuthDep, SameOriginDep])
+async def session_config_get() -> dict[str, Any]:
+    return dict(app_config.load().to_dict()["sessions"])
+
+
+@router.post("/api/session-config", dependencies=[AuthDep, CsrfDep])
+async def session_config_set(body: SessionsConfigBody) -> dict[str, Any]:
+    cfg = app_config.load()
+    merged = {**app_config.load().to_dict()["sessions"],
+              **{k: v for k, v in body.model_dump().items() if v is not None}}
+    cfg.sessions = app_config.SessionsConfig.from_dict(merged)
+    app_config.save(cfg)
+    return dict(cfg.to_dict()["sessions"])
 
 
 @router.post("/api/sessions/{name}/sticky", response_model=SessionInfo,

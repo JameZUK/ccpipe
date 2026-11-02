@@ -1,33 +1,38 @@
-"""When each session was first created and last opened.
+"""ccpipe's record of every session it has seen — running or stopped.
 
-tmux knows neither across a reboot: a sticky session is recreated by the
-lifespan hook, so its ``session_created`` becomes the boot time, and
-``session_last_attached`` starts out empty. The session picker shows both,
-so ccpipe keeps its own record.
+tmux forgets a session the moment it ends (a reboot, an idle stop, `exit`),
+and its own times reset when a sticky session is recreated. This record
+keeps what the session picker shows and what resuming needs:
+
+    {"<session>": {
+        "created": <unix>,   first created (survives recreation)
+        "opened":  <unix>,   a main terminal last connected (not a tile)
+        "active":  <unix>,   last pane activity seen (minute granularity)
+        "cwd":     "/abs",   the session's directory — needed to resume
+        "claude":  "<uuid>", the Claude conversation it was on — so a resume
+                             picks THAT conversation (`claude --resume`),
+                             not just the newest one in the directory
+        "stopped": <unix>,   set while it isn't running
+        "stop_reason": "idle" | "stopped" | "gone"
+    }, ...}
 
 Storage: ``$XDG_STATE_HOME/ccpipe/session_meta.json`` (override with
-``CCPIPE_SESSION_META_FILE``), 0600, atomic replace — the same shape as
-sticky.py. Schema::
+``CCPIPE_SESSION_META_FILE``), 0600, atomic replace — as sticky.py.
 
-    {"<session>": {"created": <unix>, "opened": <unix>}, ...}
-
-* ``created`` is set when the session is created through the API, and
-  otherwise backfilled from tmux the first time the session is listed.
-  It survives the reboot recreation of a sticky session.
-* ``opened`` is bumped when a main terminal connects (not a tile beside
-  another session), at most once a minute per session so the phone's
-  periodic reconnects don't rewrite the file every few minutes.
-* A name that is neither live nor sticky is dropped at list time, so a
-  later session reusing it starts afresh.
+An entry with no cwd can't be resumed, so once its session is gone it is
+dropped (unless sticky — sticky.py has the cwd). "Forget" removes an entry
+outright. At most MAX_STOPPED stopped entries are kept (oldest dropped).
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from .paths import state_dir
 
@@ -35,16 +40,40 @@ log = logging.getLogger(__name__)
 
 META_FILE_ENV = "CCPIPE_SESSION_META_FILE"
 OPENED_WRITE_INTERVAL_S = 60
+ACTIVE_WRITE_STEP_S = 60
+MAX_STOPPED = 100
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_REASONS = ("idle", "stopped", "gone")
 
 _lock = threading.Lock()
 _opened_written: dict[str, float] = {}
 
-Meta = dict[str, dict[str, int]]
+Meta = dict[str, dict[str, Any]]
 
 
 def path() -> Path:
     override = os.environ.get(META_FILE_ENV)
     return Path(override) if override else state_dir() / "session_meta.json"
+
+
+def _clean(info: Any) -> dict[str, Any]:
+    if not isinstance(info, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for k in ("created", "opened", "active", "stopped"):
+        v = info.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            out[k] = int(v)
+    cwd = info.get("cwd")
+    if isinstance(cwd, str) and cwd.startswith("/") and "\0" not in cwd:
+        out["cwd"] = cwd
+    cid = info.get("claude")
+    if isinstance(cid, str) and _UUID_RE.match(cid):
+        out["claude"] = cid
+    reason = info.get("stop_reason")
+    if reason in _REASONS and "stopped" in out:
+        out["stop_reason"] = reason
+    return out
 
 
 def load() -> Meta:
@@ -60,11 +89,8 @@ def load() -> Meta:
         return {}
     out: Meta = {}
     for name, info in data.items():
-        if not isinstance(name, str) or not isinstance(info, dict):
-            continue
-        entry = {k: int(v) for k, v in info.items()
-                 if k in ("created", "opened") and isinstance(v, (int, float)) and v > 0}
-        if entry:
+        entry = _clean(info)
+        if isinstance(name, str) and entry:
             out[name] = entry
     return out
 
@@ -81,11 +107,21 @@ def _save(data: Meta) -> None:
     os.replace(tmp, p)
 
 
-def note_created(name: str, when: int | None = None) -> None:
+def _try_save(data: Meta) -> None:
+    try:
+        _save(data)
+    except OSError as exc:
+        log.warning("could not save session meta: %s", exc)
+
+
+def note_created(name: str, when: int | None = None, cwd: str | None = None) -> None:
     """A brand-new session: start its record afresh."""
     with _lock:
         data = load()
-        data[name] = {"created": int(when or time.time())}
+        entry: dict[str, Any] = {"created": int(when or time.time())}
+        if cwd:
+            entry["cwd"] = cwd
+        data[name] = _clean(entry)
         _opened_written.pop(name, None)
         _save(data)
 
@@ -99,10 +135,41 @@ def note_opened(name: str, when: float | None = None) -> None:
         _opened_written[name] = now
         data = load()
         data.setdefault(name, {})["opened"] = int(now)
-        try:
-            _save(data)
-        except OSError as exc:
-            log.warning("could not record session open: %s", exc)
+        _try_save(data)
+
+
+def note_details(name: str, cwd: str | None, claude: str | None) -> None:
+    """Record a running session's directory and Claude conversation."""
+    with _lock:
+        data = load()
+        entry = data.setdefault(name, {})
+        new = dict(entry)
+        if cwd and cwd.startswith("/"):
+            new["cwd"] = cwd
+        if claude and _UUID_RE.match(claude):
+            new["claude"] = claude
+        if new != entry:
+            data[name] = new
+            _try_save(data)
+
+
+def mark_stopped(name: str, reason: str, when: float | None = None) -> None:
+    with _lock:
+        data = load()
+        entry = data.setdefault(name, {})
+        entry["stopped"] = int(when or time.time())
+        entry["stop_reason"] = reason if reason in _REASONS else "stopped"
+        _try_save(data)
+
+
+def mark_running(name: str) -> None:
+    with _lock:
+        data = load()
+        entry = data.get(name)
+        if entry and ("stopped" in entry or "stop_reason" in entry):
+            entry.pop("stopped", None)
+            entry.pop("stop_reason", None)
+            _try_save(data)
 
 
 def rename(old: str, new: str) -> None:
@@ -123,25 +190,43 @@ def forget(name: str) -> None:
         _opened_written.pop(name, None)
 
 
-def reconcile(live: dict[str, int], keep: set[str]) -> Meta:
-    """Merge with the live sessions (name → tmux created time): backfill a
-    missing ``created``, keep the older of the two, and drop entries that
-    are neither live nor in ``keep`` (the sticky names). Writes only when
-    something changed. Returns the merged map."""
+def last_used(entry: dict[str, Any]) -> int:
+    """When the session was last in use — its recency for boot ordering."""
+    return max(entry.get("opened", 0), entry.get("active", 0), entry.get("created", 0))
+
+
+def reconcile(live: dict[str, tuple[int, int]], keep: set[str],
+              now: float | None = None) -> Meta:
+    """Merge with the live sessions (name → (tmux created, tmux activity)).
+
+    Running: backfill / keep the older ``created``, advance ``active``, and
+    clear any stopped mark. Not running: mark it stopped ("gone", if nothing
+    recorded why) — or drop it when it can't be resumed (no cwd, not in
+    ``keep``, the sticky names). Writes only when something changed."""
+    now = int(now or time.time())
     with _lock:
         data = load()
-        changed = False
-        for name, tmux_created in live.items():
+        before = json.dumps(data, sort_keys=True)
+        for name, (tmux_created, activity) in live.items():
             entry = data.setdefault(name, {})
             if tmux_created > 0 and (entry.get("created") is None or tmux_created < entry["created"]):
                 entry["created"] = tmux_created
-                changed = True
-        for name in [n for n in data if n not in live and n not in keep]:
+            if activity - entry.get("active", 0) >= ACTIVE_WRITE_STEP_S:
+                entry["active"] = activity
+            entry.pop("stopped", None)
+            entry.pop("stop_reason", None)
+        for name in [n for n in data if n not in live]:
+            entry = data[name]
+            if not entry.get("cwd") and name not in keep:
+                del data[name]
+                continue
+            if "stopped" not in entry:
+                entry["stopped"] = now
+                entry["stop_reason"] = "gone"
+        stopped = sorted((n for n in data if n not in live and n not in keep),
+                         key=lambda n: data[n].get("stopped", 0), reverse=True)
+        for name in stopped[MAX_STOPPED:]:
             del data[name]
-            changed = True
-        if changed:
-            try:
-                _save(data)
-            except OSError as exc:
-                log.warning("could not save session meta: %s", exc)
+        if json.dumps(data, sort_keys=True) != before:
+            _try_save(data)
         return data

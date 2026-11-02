@@ -35,7 +35,9 @@ backend/
     routes/
       auth.py          /api/auth/* (login, logout, TOTP, credentials)
       sessions.py      /api/sessions/*, /api/claude-sessions/*,
-                       /api/sessions/{name}/sticky,
+                       /api/sessions/{name}/sticky|stop|resume|forget,
+                       /api/sessions/remembered, /api/sessions/previews,
+                       /api/session-config,
                        /api/sessions/{name}/history (transcript blocks,
                        before/after paged, for the /history view)
       fs.py            /api/fs/* (list, read, write, upload, download,
@@ -44,6 +46,7 @@ backend/
       layouts.py       /api/layouts/{session} (tile layouts, layouts.json)
       tts.py           /api/tts/* (voices, config, speak, preview)
       mic.py           /api/mic/config (voice-input timing knobs)
+      system.py        /api/system (host + per-session resource use)
       static.py        /, /view (Markdown viewer), /history (conversation
                        view), /manifest.webmanifest, /sw.js, icons
     fs_zip.py          Folder → streamed .zip: fd-based no-symlink walk,
@@ -65,9 +68,15 @@ backend/
     mic.py             Mic pipe writer (PCM → /tmp/ccpipe_mic.pipe);
                        tracks bytes/drops and estimates drain time
     tts.py             JSONL tail + Kokoro client + audio chunk fan-out
-    sticky.py          {name: {cwd}} JSON store for sticky sessions;
-                       lifespan in main.py recreates missing entries
-                       on startup using `claude --continue; exec $SHELL -i`
+    sticky.py          {name: {cwd}} JSON store for sticky sessions
+    session_meta.py    Every remembered session: times, cwd, Claude
+                       conversation id, stopped / why
+    lifecycle.py       Resume / stop / forget, which sessions start at
+                       boot, and the careful idle auto-stop
+    sysstats.py        Host CPU/mem/disk sampler + per-session PSS/CPU,
+                       project sizes (du at idle priority)
+    proctree.py        /proc process-table snapshot (busy detection,
+                       per-session memory)
     settings_patch.py  Idempotently adds voice keys to ~/.claude/settings.json
   tests/               pytest suite
   pyproject.toml

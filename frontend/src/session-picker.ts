@@ -23,6 +23,8 @@ import {
   ICON_VIEW_DETAILED, ICON_VIEW_GRID, ICON_X, KEBAB_SVG, PIN_SVG, iconNode,
 } from "./icons";
 import { loadRecentDirs, pushRecentDir } from "./recent-dirs";
+import { mountSysPanel } from "./syspanel";
+import { bar, fmtBytes, loadStatsPrefs, onStatsPrefs } from "./sysviz";
 // `./settings` is dynamically imported in the gear click handler so it
 // stays out of the session-picker chunk.
 
@@ -43,6 +45,28 @@ type SessionInfo = {
   /** The active pane's directory and title. */
   cwd?: string | null;
   title?: string | null;
+  /** CPU (% of the machine), memory and project disk use (bytes). */
+  cpu?: number | null;
+  mem?: number | null;
+  disk?: number | null;
+  /** Idle tracking: why it counts as in use; when it'll be stopped if idle. */
+  busy?: string | null;
+  stops_at?: number | null;
+  /** Claude Code's own status: "busy" | "shell" (background task) | "idle". */
+  claude?: string | null;
+};
+
+/** A remembered session that isn't running; opening it resumes it. */
+type StoppedInfo = {
+  name: string;
+  sticky: boolean;
+  created: number;
+  opened: number;
+  stopped: number;
+  stop_reason: "idle" | "stopped" | "gone";
+  cwd: string;
+  conversation: boolean;
+  disk: number | null;
 };
 
 type ClaudeSession = {
@@ -53,8 +77,8 @@ type ClaudeSession = {
 };
 
 type View = "compact" | "detailed" | "grid";
-type Sort = "activity" | "opened" | "created" | "name";
-type State = "working" | "open" | "idle";
+type Sort = "activity" | "opened" | "created" | "name" | "memory" | "disk";
+type State = "working" | "task" | "open" | "idle" | "stopped";
 
 const VIEWS: ReadonlyArray<{ id: View; label: string; icon: string }> = [
   { id: "compact", label: "Compact list", icon: ICON_VIEW_COMPACT },
@@ -66,17 +90,23 @@ const SORTS: ReadonlyArray<{ id: Sort; label: string }> = [
   { id: "opened", label: "last opened" },
   { id: "created", label: "newest" },
   { id: "name", label: "name" },
+  { id: "memory", label: "memory" },
+  { id: "disk", label: "disk" },
 ];
 const SORTERS: Record<Sort, (a: SessionInfo, b: SessionInfo) => number> = {
   activity: (a, b) => b.activity - a.activity || b.created - a.created,
   opened: (a, b) => (b.opened ?? 0) - (a.opened ?? 0) || b.activity - a.activity,
   created: (a, b) => b.created - a.created || a.name.localeCompare(b.name),
   name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+  memory: (a, b) => (b.mem ?? -1) - (a.mem ?? -1) || a.name.localeCompare(b.name),
+  disk: (a, b) => (b.disk ?? -1) - (a.disk ?? -1) || a.name.localeCompare(b.name),
 };
 const STATE_LABEL: Record<State, string> = {
   working: "Claude is working",
+  task: "a background task is running",
   open: "open in a terminal",
   idle: "idle",
+  stopped: "stopped — open it to resume",
 };
 
 const VIEW_KEY = "ccpipe.picker.view";
@@ -173,10 +203,28 @@ function taskOf(s: SessionInfo): { text: string | null; working: boolean } {
   return { text, working };
 }
 
+/** Claude Code's own status wins (the pane title shows ✳ even mid-turn);
+ * the title spinner is the fallback for older Claude Code versions. */
 function stateOf(s: SessionInfo): State {
-  if (taskOf(s).working) return "working";
+  if (s.claude === "busy" || taskOf(s).working) return "working";
+  if (s.claude === "shell") return "task";
   return (s.clients ?? (s.attached ? 1 : 0)) > 0 ? "open" : "idle";
 }
+
+/** "45m", "3h 20m", "2d 4h". */
+function fmtIn(seconds: number): string {
+  const m = Math.max(1, Math.round(seconds / 60));
+  if (m < 60) return `${m}m`;
+  const hrs = Math.floor(m / 60);
+  if (hrs < 48) return `${hrs}h${m % 60 ? ` ${m % 60}m` : ""}`;
+  return `${Math.floor(hrs / 24)}d${hrs % 24 ? ` ${hrs % 24}h` : ""}`;
+}
+
+const STOP_REASON: Record<StoppedInfo["stop_reason"], string> = {
+  idle: "stopped when idle",
+  stopped: "stopped",
+  gone: "not running",
+};
 
 function matches(s: SessionInfo, query: string): boolean {
   if (!query) return true;
@@ -217,6 +265,8 @@ export function renderSessionPicker(
   let sort: Sort = stored(SORT_KEY, SORTS.map((s) => s.id), "activity");
   let query = "";
   let sessions: SessionInfo[] = [];
+  let stopped: StoppedInfo[] = [];
+  let statsPrefs = loadStatsPrefs();
   let order: string[] = [];
   let loaded = false;
   let firstPaint = true;
@@ -380,7 +430,12 @@ export function renderSessionPicker(
   thead.setAttribute("aria-hidden", "true");
   const list = h("div", "picker__list");
 
-  inner.append(hero, toolbar, create, errBox, thead, list);
+  // CPU / memory / disk with history (syspanel.ts); can be hidden in Settings.
+  const sysPanel = mountSysPanel();
+  cleanups.push(() => sysPanel.dispose());
+  cleanups.push(onStatsPrefs((p) => { statsPrefs = p; render(false); }));
+
+  inner.append(hero, sysPanel.el, toolbar, create, errBox, thead, list);
   frame.append(inner);
   root.append(frame);
 
@@ -624,7 +679,7 @@ export function renderSessionPicker(
 
   // ─── Session items ──────────────────────────────────────────────────────
   const closeMenus = (except?: HTMLElement): void => {
-    list.querySelectorAll<HTMLElement>(".sess__menu:not([hidden])").forEach((m) => {
+    inner.querySelectorAll<HTMLElement>(".sess__menu:not([hidden])").forEach((m) => {
       if (m !== except) m.hidden = true;
     });
   };
@@ -636,7 +691,7 @@ export function renderSessionPicker(
     return el;
   };
 
-  const buildActions = (s: SessionInfo, nameEl: HTMLElement): HTMLElement => {
+  const buildActions = (s: SessionInfo, nameEl: HTMLElement, stopped?: StoppedInfo): HTMLElement => {
     const actions = h("div", "sess__actions");
     const kebab = iconButton(KEBAB_SVG, `Actions for ${s.name}`, "sess__kebab");
     kebab.setAttribute("aria-haspopup", "menu");
@@ -649,17 +704,79 @@ export function renderSessionPicker(
       b.setAttribute("role", "menuitem");
       return b;
     };
-    const openItem = menuItem("open");
-    const renameItem = menuItem("rename");
-    const stickyItem = menuItem(s.sticky ? "make ephemeral" : "make sticky");
-    stickyItem.title = s.sticky
-      ? "Stop recreating this session after a restart"
-      : "Recreate this session (claude --continue) after a restart";
-    const killItem = menuItem("kill", "danger");
-    menu.append(openItem, renameItem, stickyItem, killItem);
-    actions.append(kebab, menu);
-
     const closeMenu = (): void => { menu.hidden = true; };
+    // A destructive item asks again: the first tap arms it for 5 s.
+    const confirmItem = (label: string, title: string, run: () => Promise<unknown>): HTMLButtonElement => {
+      const b = menuItem(label, "danger");
+      b.title = title;
+      let armed: number | null = null;
+      const disarm = (): void => {
+        b.textContent = label;
+        b.classList.remove("armed");
+        if (armed !== null) { clearTimeout(armed); killTimers.delete(armed); armed = null; }
+      };
+      b.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (armed === null) {
+          b.textContent = `confirm ${label} ${s.name}`;
+          b.classList.add("armed");
+          armed = window.setTimeout(disarm, 5000);
+          killTimers.add(armed);
+          return;
+        }
+        disarm();
+        closeMenu();
+        try {
+          await run();
+        } catch (err) {
+          showError(`${label} ${s.name} failed: ${(err as Error).message}`);
+        }
+        void load("full");
+      });
+      return b;
+    };
+    const enc = encodeURIComponent(s.name);
+    const forgetItem = confirmItem("forget",
+      "Stop it if running and remove it from the list for good",
+      () => apiJson(`/api/sessions/${enc}/forget`, { method: "POST" }));
+
+    if (stopped) {
+      const resumeItem = menuItem("resume");
+      resumeItem.title = stopped.conversation
+        ? "Start it again in its directory, on the conversation it was on"
+        : "Start it again in its directory, on that directory's latest conversation";
+      resumeItem.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); void resumeAndOpen(s.name); });
+      menu.append(resumeItem, forgetItem);
+    } else {
+      const openItem = menuItem("open");
+      const renameItem = menuItem("rename");
+      const stickyItem = menuItem(s.sticky ? "make ephemeral" : "make sticky");
+      stickyItem.title = s.sticky
+        ? "Sticky: may start at boot (Settings → Sessions) and gets the longer idle time"
+        : "Make it sticky: may start at boot and gets the longer idle time before an auto-stop";
+      const stopItem = confirmItem("stop",
+        "Stop its processes to free memory; it stays listed and resumes (same conversation) when opened",
+        () => apiJson(`/api/sessions/${enc}/stop`, { method: "POST" }));
+      menu.append(openItem, renameItem, stickyItem, stopItem, forgetItem);
+      openItem.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); onPick(s.name); });
+      renameItem.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeMenu();
+        startRename(s, nameEl);
+      });
+      stickyItem.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        closeMenu();
+        try {
+          await apiJson<SessionInfo>(`/api/sessions/${enc}/sticky`,
+            { method: "POST", body: JSON.stringify({ sticky: !s.sticky }) });
+          void load("full");
+        } catch (err) {
+          showError(`sticky toggle failed: ${(err as Error).message}`);
+        }
+      });
+    }
+    actions.append(kebab, menu);
     kebab.addEventListener("click", (e) => {
       e.stopPropagation();
       if (!menu.hidden) { closeMenu(); return; }
@@ -672,49 +789,23 @@ export function renderSessionPicker(
         menu.classList.add("sess__menu--up");
       }
     });
-    openItem.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); onPick(s.name); });
-    renameItem.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeMenu();
-      startRename(s, nameEl);
-    });
-    stickyItem.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      closeMenu();
-      try {
-        await apiJson<SessionInfo>(`/api/sessions/${encodeURIComponent(s.name)}/sticky`,
-          { method: "POST", body: JSON.stringify({ sticky: !s.sticky }) });
-        void load("full");
-      } catch (err) {
-        showError(`sticky toggle failed: ${(err as Error).message}`);
-      }
-    });
-    // Kill with an inline confirm: the first tap arms it for 5 s.
-    let armed: number | null = null;
-    const disarm = (): void => {
-      killItem.textContent = "kill";
-      killItem.classList.remove("armed");
-      if (armed !== null) { clearTimeout(armed); killTimers.delete(armed); armed = null; }
-    };
-    killItem.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      if (armed === null) {
-        killItem.textContent = `confirm kill ${s.name}`;
-        killItem.classList.add("armed");
-        armed = window.setTimeout(disarm, 5000);
-        killTimers.add(armed);
-        return;
-      }
-      disarm();
-      closeMenu();
-      try {
-        await apiJson(`/api/sessions/${encodeURIComponent(s.name)}`, { method: "DELETE" });
-        void load("full");
-      } catch (err) {
-        showError(`failed to kill ${s.name}: ${(err as Error).message}`);
-      }
-    });
     return actions;
+  };
+
+  // Resume a stopped session (same directory, same conversation), then open
+  // it. Opening alone would also resume it, but this way a problem (its
+  // directory is gone, the session limit) is shown here.
+  const resumeAndOpen = async (name: string): Promise<void> => {
+    const el = inner.querySelector<HTMLElement>(`.sess[data-name="${CSS.escape(name)}"]`);
+    el?.classList.add("is-resuming");
+    showError("");
+    try {
+      await apiJson(`/api/sessions/${encodeURIComponent(name)}/resume`, { method: "POST" });
+      onPick(name);
+    } catch (err) {
+      el?.classList.remove("is-resuming");
+      showError(`couldn't resume ${name}: ${(err as Error).message}`);
+    }
   };
 
   // Inline rename: the name becomes an input; Enter / blur commit, Escape
@@ -760,26 +851,51 @@ export function renderSessionPicker(
     input.addEventListener("blur", () => { void commit(); });
   };
 
-  const renderItem = (s: SessionInfo, i: number): HTMLElement => {
+  // RAM / disk cell: the number, and a bar relative to the largest shown.
+  const useCell = (kind: "ram" | "disk", bytes: number | null | undefined, max: number): HTMLElement => {
+    const el = h("span", `sess__use sess__use--${kind}`);
+    if (bytes === null || bytes === undefined) {
+      el.append(h("span", "sess__use-k", kind), h("span", "sess__use-v", "—"));
+      return el;
+    }
+    el.append(h("span", "sess__use-k", kind), h("span", "sess__use-v", fmtBytes(bytes)),
+      bar(max > 0 ? (bytes / max) * 100 : 0, "sv-bar--rel"));
+    el.title = kind === "ram"
+      ? `${fmtBytes(bytes)} of memory: Claude, its helpers and anything they started`
+      : `${fmtBytes(bytes)} on disk in its project directory`;
+    return el;
+  };
+
+  const asInfo = (st: StoppedInfo): SessionInfo => ({
+    name: st.name, windows: 1, attached: false, created: st.created, sticky: st.sticky,
+    activity: st.stopped, opened: st.opened, clients: 0, cwd: st.cwd, title: null,
+    disk: st.disk, mem: null,
+  });
+
+  let maxMem = 0;
+  let maxDisk = 0;
+
+  const renderItem = (s: SessionInfo, i: number, stopped?: StoppedInfo): HTMLElement => {
     const item = h("div", `sess sess--${view}`);
-    const state = stateOf(s);
+    const state: State = stopped ? "stopped" : stateOf(s);
     const task = taskOf(s);
+    const now = Date.now() / 1000;
     item.dataset.name = s.name;
     item.dataset.state = state;
     item.tabIndex = 0;
     item.setAttribute("role", "button");
-    item.setAttribute("aria-label", `Open session ${s.name}${task.text ? ` — ${task.text}` : ""}`);
+    item.setAttribute("aria-label", `${stopped ? "Resume" : "Open"} session ${s.name}${task.text ? ` — ${task.text}` : ""}`);
     if (firstPaint) item.style.animation = `frame-in 360ms ${Math.min(i, 14) * 22}ms var(--ease-out) backwards`;
 
     const dot = h("span", "sess__dot");
-    dot.title = STATE_LABEL[state];
+    dot.title = STATE_LABEL[state] + (s.busy && state !== "working" && state !== "task" ? ` — ${s.busy}` : "");
 
     const titleRow = h("div", "sess__title");
     const nameEl = h("span", "sess__name", s.name);
     titleRow.append(nameEl);
     if (s.sticky) {
       const pin = h("span", "sess__pin");
-      pin.title = "Sticky: recreated after a restart";
+      pin.title = "Sticky";
       pin.append(iconNode(PIN_SVG));
       titleRow.append(pin);
     }
@@ -789,60 +905,84 @@ export function renderSessionPicker(
       b.title = `${clients} terminal${clients > 1 ? "s" : ""} attached right now`;
       titleRow.append(b);
     }
-    if (s.windows > 1) {
-      const b = h("span", "sess__badge", `${s.windows} windows`);
-      titleRow.append(b);
-    }
+    if (s.windows > 1) titleRow.append(h("span", "sess__badge", `${s.windows} windows`));
 
     // Never `hidden`: in the list views it holds a grid column even empty.
-    const taskEl = h("div", "sess__task", task.text ?? "");
-    if (task.text) taskEl.title = task.text;
+    const taskText = stopped
+      ? `${STOP_REASON[stopped.stop_reason]} · resumes ${stopped.conversation ? "its conversation" : "the latest conversation"}`
+      : task.text ?? "";
+    const taskEl = h("div", "sess__task", taskText);
+    if (taskText) taskEl.title = taskText;
 
     const activity = h("span", "sess__activity");
-    if (state === "working") {
+    if (state === "working" || state === "task") {
       activity.classList.add("is-working");
-      activity.textContent = "working";
+      activity.textContent = state === "working" ? "working" : "task running";
+    } else if (stopped) {
+      activity.textContent = stopped.stopped ? relativeTime(stopped.stopped) : "stopped";
+      if (stopped.stopped) activity.title = `Stopped ${fullDate(stopped.stopped)}`;
     } else {
       activity.textContent = s.activity ? relativeTime(s.activity) : "—";
     }
-    if (s.activity) activity.title = `Last output ${fullDate(s.activity)}`;
+    if (!stopped && s.activity) activity.title = `Last output ${fullDate(s.activity)}`;
+
+    // Idle auto-stop countdown (lifecycle.py decides; nothing busy may be stopped).
+    let stopEl: HTMLElement | null = null;
+    if (!stopped && s.stops_at) {
+      stopEl = h("div", "sess__stop", s.stops_at > now ? `auto-stop in ${fmtIn(s.stops_at - now)}` : "auto-stop due");
+      stopEl.title = "Idle — no terminal attached, no output, no task running, no CPU use. "
+        + "It stops then, and resumes the same conversation when opened (Settings → Sessions).";
+    }
 
     const cwd = h("span", "sess__cwd", s.cwd ? homeRelative(s.cwd) : "");
     if (s.cwd) cwd.title = s.cwd;
     const dates = h("div", "sess__dates");
     dates.append(dateCell("opened", s.opened || undefined), dateCell("created", s.created || undefined));
+    const ram = useCell("ram", stopped ? undefined : s.mem, maxMem);
+    const disk = useCell("disk", s.disk, maxDisk);
 
-    const actions = buildActions(s, nameEl);
+    const actions = buildActions(s, nameEl, stopped);
 
     if (view === "compact") {
       item.append(dot, titleRow, taskEl, activity, actions);
     } else if (view === "detailed") {
       const main = h("div", "sess__main");
       main.append(titleRow, taskEl);
-      item.append(dot, main, cwd, activity, dates, actions);
+      if (stopEl) main.append(stopEl);
+      item.append(dot, main, cwd, activity, ram, disk, dates, actions);
     } else {
       const head = h("div", "sess__head");
       head.append(dot, titleRow, actions);
       const preview = h("pre", "sess__preview");
-      preview.dataset.name = s.name;
       preview.setAttribute("aria-hidden", "true");
-      paintPreview(preview, previews.get(s.name));
-      previewTargets.set(s.name, preview);
-      observer?.observe(preview);
-      if (!observer) visible.add(s.name);
+      if (stopped) {
+        preview.classList.add("sess__preview--stopped");
+        preview.textContent = "stopped · tap to resume";
+      } else {
+        preview.dataset.name = s.name;
+        paintPreview(preview, previews.get(s.name));
+        previewTargets.set(s.name, preview);
+        observer?.observe(preview);
+        if (!observer) visible.add(s.name);
+      }
       const foot = h("div", "sess__foot");
       foot.append(cwd, activity);
-      item.append(head, taskEl, preview, foot, dates);
+      const use = h("div", "sess__uses");
+      use.append(ram, disk);
+      item.append(head, taskEl, preview, foot, use);
+      if (stopEl) item.append(stopEl);
+      item.append(dates);
     }
 
+    const go = (): void => { if (stopped) void resumeAndOpen(s.name); else onPick(s.name); };
     item.addEventListener("click", (e) => {
       if (actions.contains(e.target as Node)) return;
       if ((e.target as HTMLElement).closest(".sess__rename")) return;
-      onPick(s.name);
+      go();
     });
     item.addEventListener("keydown", (e) => {
       if (e.target !== item) return;
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(s.name); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
     });
     return item;
   };
@@ -850,6 +990,7 @@ export function renderSessionPicker(
   // ─── Rendering the list ─────────────────────────────────────────────────
   const syncControls = (): void => {
     inner.dataset.view = view;
+    inner.dataset.use = statsPrefs.perSession ? "on" : "off";
     for (const b of segButtons) {
       const on = b.dataset.view === view;
       b.setAttribute("aria-checked", on ? "true" : "false");
@@ -860,9 +1001,9 @@ export function renderSessionPicker(
 
   const renderThead = (): void => {
     thead.replaceChildren(h("span"));
-    const col = (label: string, key: Sort | null): HTMLElement => {
-      if (!key) return h("span", "picker__th", label);
-      const b = h("button", "picker__th picker__th--sort", label);
+    const col = (label: string, key: Sort | null, cls = ""): HTMLElement => {
+      if (!key) return h("span", `picker__th ${cls}`.trim(), label);
+      const b = h("button", `picker__th picker__th--sort ${cls}`.trim(), label);
       b.type = "button";
       b.tabIndex = -1;
       b.classList.toggle("is-active", sort === key);
@@ -870,17 +1011,59 @@ export function renderSessionPicker(
       return b;
     };
     thead.append(col("session", "name"), col("directory", null), col("activity", "activity"),
+      col("memory", "memory", "picker__th--use"), col("disk", "disk", "picker__th--use"),
       col("last opened", "opened"), col("created", "created"), h("span"));
   };
 
   const updateCount = (): void => {
-    const working = sessions.filter((s) => stateOf(s) === "working").length;
-    const open = sessions.filter((s) => stateOf(s) === "open").length;
-    const parts = [`${sessions.length} session${sessions.length === 1 ? "" : "s"}`];
+    const count = (st: State): number => sessions.filter((s) => stateOf(s) === st).length;
+    const working = count("working");
+    const tasks = count("task");
+    const open = count("open");
+    const parts = [`${sessions.length} running`];
     if (working) parts.push(`${working} working`);
+    if (tasks) parts.push(`${tasks} with a task`);
     if (open) parts.push(`${open} open`);
+    if (stopped.length) parts.push(`${stopped.length} stopped`);
     statusCount.textContent = loaded ? parts.join(" · ") : "";
   };
+
+  const stoppedWrap = h("section", "picker__stopped");
+  stoppedWrap.hidden = true;
+  const stoppedHead = h("div", "picker__stopped__head");
+  const stoppedTitle = h("span", "picker__stopped__title");
+  const stoppedHint = h("span", "picker__stopped__hint", "not running — tap one to resume it");
+  const forgetAll = h("button", "picker__stopped__forget");
+  forgetAll.type = "button";
+  stoppedHead.append(stoppedTitle, stoppedHint, forgetAll);
+  const stoppedList = h("div", "picker__list");
+  stoppedWrap.append(stoppedHead, stoppedList);
+  let forgetArmed: number | null = null;
+  const disarmForget = (): void => {
+    forgetAll.classList.remove("armed");
+    forgetAll.textContent = "forget all…";
+    if (forgetArmed !== null) { clearTimeout(forgetArmed); forgetArmed = null; }
+  };
+  forgetAll.addEventListener("click", async () => {
+    const shown = stopped.filter((st) => matches(asInfo(st), query));
+    if (forgetArmed === null) {
+      forgetAll.classList.add("armed");
+      forgetAll.textContent = `confirm: forget ${shown.length}`;
+      forgetArmed = window.setTimeout(disarmForget, 5000);
+      return;
+    }
+    disarmForget();
+    for (const st of shown) {
+      try {
+        await apiJson(`/api/sessions/${encodeURIComponent(st.name)}/forget`, { method: "POST" });
+      } catch (err) {
+        showError(`forget ${st.name} failed: ${(err as Error).message}`);
+        break;
+      }
+    }
+    void load("full");
+  });
+  cleanups.push(() => { if (forgetArmed !== null) clearTimeout(forgetArmed); });
 
   const render = (resort: boolean): void => {
     for (const t of killTimers) clearTimeout(t);
@@ -897,18 +1080,27 @@ export function renderSessionPicker(
     }
     const byName = new Map(sessions.map((s) => [s.name, s]));
     const shown = order.map((n) => byName.get(n)!).filter((s) => matches(s, query));
+    const shownStopped = stopped
+      .map((st) => ({ st, info: asInfo(st) }))
+      .filter(({ info }) => matches(info, query))
+      .sort((a, b) => SORTERS[sort](a.info, b.info));
+    maxMem = Math.max(0, ...shown.map((s) => s.mem ?? 0));
+    maxDisk = Math.max(0, ...shown.map((s) => s.disk ?? 0), ...shownStopped.map(({ st }) => st.disk ?? 0));
 
     observer?.disconnect();
     previewTargets.clear();
     visible.clear();
     list.className = `picker__list picker__list--${view}`;
-    thead.hidden = view !== "detailed" || shown.length === 0;
+    stoppedList.className = `picker__list picker__list--${view}`;
+    thead.hidden = view !== "detailed" || (shown.length === 0 && shownStopped.length === 0);
     if (!thead.hidden) renderThead();
     updateCount();
     list.replaceChildren();
+    stoppedList.replaceChildren();
+    stoppedWrap.hidden = true;
 
     if (!loaded) return;
-    if (sessions.length === 0) {
+    if (sessions.length === 0 && stopped.length === 0) {
       const empty = h("div", "picker__empty");
       empty.append(
         sparkMark("spark--empty"),
@@ -923,11 +1115,17 @@ export function renderSessionPicker(
       return;
     }
     if (!shown.length) {
-      const none = h("div", "picker__nomatch", `no session matches “${query}”`);
-      list.append(none);
-      return;
+      list.append(h("div", "picker__nomatch",
+        sessions.length ? `no running session matches “${query}”` : "no sessions running"));
+    } else {
+      shown.forEach((s, i) => list.append(renderItem(s, i)));
     }
-    shown.forEach((s, i) => list.append(renderItem(s, i)));
+    if (shownStopped.length) {
+      stoppedWrap.hidden = false;
+      stoppedTitle.textContent = `stopped · ${shownStopped.length}`;
+      disarmForget();
+      shownStopped.forEach(({ st, info }, i) => stoppedList.append(renderItem(info, shown.length + i, st)));
+    }
     firstPaint = false;
     if (view === "grid") schedulePreviews(60);
   };
@@ -937,14 +1135,20 @@ export function renderSessionPicker(
   const interacting = (): boolean =>
     Date.now() - lastPointer < 1500
     || list.contains(document.activeElement)
-    || !!list.querySelector(".sess__menu:not([hidden]), .sess__rename");
+    || stoppedWrap.contains(document.activeElement)
+    || !!inner.querySelector(".sess__menu:not([hidden]), .sess__rename, .sess.is-resuming");
 
   let loadSeq = 0;
   const load = async (mode: "full" | "soft"): Promise<void> => {
     const mine = ++loadSeq;
     let fresh: SessionInfo[];
+    let rem: StoppedInfo[];
     try {
-      fresh = await apiJson<SessionInfo[]>("/api/sessions");
+      [fresh, rem] = await Promise.all([
+        apiJson<SessionInfo[]>("/api/sessions"),
+        // An older backend has no remembered list.
+        apiJson<StoppedInfo[]>("/api/sessions/remembered").catch(() => [] as StoppedInfo[]),
+      ]);
     } catch (err) {
       if (mode === "full") showError(`failed to list sessions: ${(err as Error).message}`);
       return;
@@ -953,7 +1157,10 @@ export function renderSessionPicker(
     if (mode === "soft" && interacting()) return;
     if (mode === "full" && errBox.textContent?.startsWith("failed to list")) showError("");
     sessions = fresh;
+    stopped = Array.isArray(rem) ? rem : [];
     loaded = true;
+    const mem = sessions.reduce((t, s) => t + (s.mem ?? 0), 0);
+    sysPanel.setSessionsMem(sessions.some((s) => s.mem != null) ? mem : null, sessions.length);
     render(mode === "full");
   };
 
@@ -990,6 +1197,7 @@ export function renderSessionPicker(
 
   // ─── Document-level wiring (removed on teardown) ────────────────────────
   list.addEventListener("pointerdown", () => { lastPointer = Date.now(); });
+  stoppedWrap.addEventListener("pointerdown", () => { lastPointer = Date.now(); });
   listen("click", (e) => {
     const t = e.target as Element | null;
     if (!t?.closest?.(".sess__actions")) closeMenus();
@@ -1023,6 +1231,7 @@ export function renderSessionPicker(
   frame.addEventListener("ccpipe:dispose", teardown, { once: true });
 
   // ─── First render ───────────────────────────────────────────────────────
+  inner.append(stoppedWrap);
   syncControls();
   renderRecent();
   void load("full");

@@ -606,3 +606,69 @@ async def capture_screen(name: str) -> list[str] | None:
     while lines and not lines[-1]:
         lines.pop()
     return lines
+
+
+async def all_panes() -> dict[str, list[int]]:
+    """session name → pane pids of every pane in every window."""
+    out = await _tmux_out("list-panes", "-a", "-F", f"#{{session_name}}{_FIELD_SEP}#{{pane_pid}}")
+    result: dict[str, list[int]] = {}
+    for line in (out or "").splitlines():
+        name, _, pid = line.partition(_FIELD_SEP)
+        if name and name != CONTROL_SESSION_NAME and pid.isdigit():
+            result.setdefault(name, []).append(int(pid))
+    return result
+
+
+# Claude Code (2.1.x) keeps ~/.claude/sessions/<pid>.json per running
+# process, including what it is doing — "status": "busy" (working on a
+# turn), "shell" (idle at the prompt with a background shell task running)
+# or "idle" — and the tmux pane it runs in ("tmux": "name:@4.%4"). This is
+# the reliable "is Claude working" signal: the pane title shows ✳ even mid
+# turn, and a long tool call produces no pane output for minutes.
+_STATUS_RANK = {"busy": 3, "shell": 2, "idle": 1}
+
+
+def _read_claude_states(pane_sessions: dict[str, str]) -> dict[str, tuple[str, int]]:
+    result: dict[str, tuple[str, int]] = {}
+    d = Path.home() / ".claude" / "sessions"
+    try:
+        files = list(d.glob("*.json"))
+    except OSError:
+        return result
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        pid, status, where = data.get("pid"), data.get("status"), data.get("tmux")
+        if not (isinstance(pid, int) and isinstance(status, str) and isinstance(where, str)):
+            continue
+        # Stale files outlive their process (and pids get reused): the file
+        # records the process start time, which must match /proc.
+        start = _proc_start_time(pid)
+        if start is None or str(data.get("procStart", "")) != start:
+            continue
+        name = pane_sessions.get(where.rpartition(".")[2])
+        if not name:
+            continue
+        since = data.get("statusUpdatedAt")
+        since_s = int(since / 1000) if isinstance(since, (int, float)) else 0
+        prev = result.get(name)
+        # Several Claudes in one session (split panes): the busiest wins.
+        if prev is None or _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(prev[0], 0):
+            result[name] = (status, since_s)
+    return result
+
+
+async def claude_states() -> dict[str, tuple[str, int]]:
+    """session name → (Claude's status, since when) for every session with a
+    live Claude in it."""
+    out = await _tmux_out("list-panes", "-a", "-F", f"#{{pane_id}}{_FIELD_SEP}#{{session_name}}")
+    panes: dict[str, str] = {}
+    for line in (out or "").splitlines():
+        pane, _, name = line.partition(_FIELD_SEP)
+        if pane and name and name != CONTROL_SESSION_NAME:
+            panes[pane] = name
+    return await asyncio.to_thread(_read_claude_states, panes)

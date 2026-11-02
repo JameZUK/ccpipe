@@ -75,7 +75,17 @@ async def tts_voices() -> dict[str, list[str]]:
     voices = data.get("voices", []) if isinstance(data, dict) else data
     if not isinstance(voices, list):
         return {"voices": []}
-    return {"voices": [str(v) for v in voices if isinstance(v, str)]}
+    # Kokoro-FastAPI used to list plain names ("af_bella"); newer builds list
+    # objects ({"id": "af_bella", "name": …, "overall_grade": …}). Taking
+    # only strings turned the new format into "no voices — is Kokoro
+    # reachable?" with Kokoro up and speaking fine (2026-11-02).
+    names: list[str] = []
+    for v in voices:
+        if isinstance(v, dict):
+            v = v.get("id") or v.get("name")
+        if isinstance(v, str) and v and v not in names:
+            names.append(v)
+    return {"voices": names}
 
 
 @router.get("/api/tts/config", dependencies=[AuthDep, SameOriginDep])

@@ -182,36 +182,59 @@ auto-created a fresh session in `$HOME`.
 The `--resume <uuid>` path goes through the same wrapper, so resumed
 conversations also leave you at a shell when claude exits.
 
-### Sticky sessions (survive a reboot)
+### Remembered, stopped and sticky sessions
 
-Mark a session "sticky" from its kebab (`⋮`) menu in the picker to
-have ccpipe re-create it automatically at backend startup. Useful
-for long-running project sessions you want available on every login
-without manually re-attaching.
+Every session is remembered (`session_meta.json`): its directory, the
+Claude conversation it was on, and when it was created and last opened.
+A session that isn't running — after a reboot, an idle stop, or
+"stop" from its kebab (`⋮`) menu — stays on the landing page under
+**stopped**, and opening it resumes it: a tmux session of the same name
+in the same directory, running `claude --resume <its conversation>` (or
+`claude --continue` when the conversation isn't known), then
+`exec $SHELL -i`. "Forget" removes it for good.
 
-A pin glyph appears next to the name when the row is sticky.
-Toggling it again ("make ephemeral") removes the persisted entry.
+**Settings → Sessions** (server-side, `config.json` → `sessions`):
 
-What's stored: just the session name and its current cwd, in
-`~/.local/state/ccpipe/sticky_sessions.json` (`0600`). What's
-restored on backend startup: a tmux session of the same name running
-`claude --continue; exec $SHELL -i` in that cwd. `--continue` makes
-claude itself resume the most recent conversation for that cwd (its
-JSONL transcripts under `~/.claude/projects/<encoded>/*.jsonl`), so
-you re-attach to your last chat with no extra clicks. Note that the
-in-memory state of the previous `claude` process is **not**
-preserved — only the conversation history that claude itself
-persists.
+| setting | default | |
+|---|---|---|
+| Start at boot · sticky | 5 | the most recently used sticky sessions started when the machine boots |
+| Start at boot · other | 0 | the same for non-sticky sessions |
+| Stop sticky sessions idle for | 1 day | 0 = never |
+| Stop other sessions idle for | 2 h | 0 = never |
 
-When the user picks `kill` on a sticky session from the picker, the
-sticky flag is auto-cleared so the killed session isn't quietly
-resurrected on the next backend start. Renaming a sticky session
-preserves the flag under the new name.
+"At boot" means the backend found tmux with no sessions; a backend
+restart with tmux running starts nothing, so stopped sessions stay
+stopped.
 
-Limit: if there were multiple parallel conversations in the same
-cwd, `--continue` picks the latest. To resume a specific older
-conversation, use the picker's "start a new session" panel which
-lists transcripts by cwd and lets you pick one.
+**Idle** is deliberately hard to reach (`backend/ccpipe/lifecycle.py`).
+A session counts as in use — and its idle clock restarts — while a
+terminal or tile is attached, its pane produces output or input, Claude
+Code reports itself busy or running a background shell task (its own
+status in `~/.claude/sessions/<pid>.json`), a Claude tool command runs
+(any process carrying `~/.claude/shell-snapshots/`, even a `sleep` loop
+at 0 % CPU), the pane's shell runs anything besides Claude (a server, a
+build, an editor, in any window or pane), its processes use CPU, or a
+question / permission prompt waits on screen. Claude's own helpers (MCP
+servers, the Playwright browser, language servers) don't count. A
+session whose directory isn't known is never stopped, and every
+auto-stop is logged. The landing page shows the countdown ("auto-stop
+in 1h 20m").
+
+Mark a session sticky from its kebab menu; a pin glyph shows it.
+Renaming a session keeps its record, sticky flag, draft and layout. Note
+that a stopped Claude's in-memory state is not kept — only the
+conversation history Claude itself persists.
+
+### System status
+
+The landing page shows CPU and memory with ten minutes of history, the
+root filesystem's free space, how much memory the sessions use, and per
+session its memory (PSS of its whole process tree) and its project
+directory's size. Inside a session the same figures sit beside the ping
+(a three-bar meter on a phone — tap it for details). Per device, Settings
+→ Display → *status & graphs* turns each part off and sets the refresh
+interval. Project sizes are measured with `du` at idle CPU / IO
+priority every 15 minutes, and only while someone is looking.
 
 ## Where state lives
 
@@ -235,8 +258,10 @@ lists transcripts by cwd and lets you pick one.
   reading.**
 - `~/.local/state/ccpipe/config.json` — Settings-modal values.
 - `~/.local/state/ccpipe/sticky_sessions.json` — `{name: {cwd}}` map
-  of sticky sessions; read at backend startup to recreate any
-  missing entries. Override the path with `CCPIPE_STICKY_FILE`.
+  of sticky sessions. Override the path with `CCPIPE_STICKY_FILE`.
+- `~/.local/state/ccpipe/session_meta.json` — every remembered session:
+  created / last-opened times, directory, Claude conversation id, and
+  when and why it stopped. Override with `CCPIPE_SESSION_META_FILE`.
 - `~/.claude/keybindings.json` — ccpipe idempotently adds the meta+k
   voice push-to-talk binding here on startup (see
   `ccpipe/settings_patch.py`).

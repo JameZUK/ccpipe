@@ -17,6 +17,7 @@ import { changeCredentials, logout as apiLogout, logoutEverywhere } from "./auth
 import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
 import { onUpdateChange, pendingUpdate } from "./update";
+import { buildSessionsSection, buildStatsSection } from "./settings-sessions";
 import {
   DEFAULT_PREFS,
   DisplayPrefs,
@@ -58,7 +59,7 @@ function sanitizeSvgTree(el: Element): void {
   walk(el);
 }
 
-type TabId = "display" | "voice" | "account" | "debug";
+type TabId = "display" | "sessions" | "voice" | "account" | "debug";
 const LS_LAST_TAB = "ccpipe.settings.tab";
 const DEFAULT_TAB: TabId = "display";
 
@@ -68,7 +69,7 @@ function loadLastTab(): TabId {
     // L9: include "debug" — buildTabs() renders all four, but a user
     // who selected the debug tab and reopened settings was bounced
     // back to display every time because the validator dropped it.
-    if (v === "display" || v === "voice" || v === "account" || v === "debug") return v;
+    if (v === "display" || v === "sessions" || v === "voice" || v === "account" || v === "debug") return v;
   } catch {}
   return DEFAULT_TAB;
 }
@@ -142,7 +143,12 @@ export function openSettings(opts: SettingsOpts): void {
   const displayPanel = document.createElement("div");
   displayPanel.className = "modal__panel";
   displayPanel.dataset.tab = "display";
-  displayPanel.append(buildDisplaySection(opts));
+  displayPanel.append(buildDisplaySection(opts), buildStatsSection());
+
+  const sessionsPanel = document.createElement("div");
+  sessionsPanel.className = "modal__panel";
+  sessionsPanel.dataset.tab = "sessions";
+  sessionsPanel.append(buildSessionsSection());
 
   const voicePanel = document.createElement("div");
   voicePanel.className = "modal__panel";
@@ -161,6 +167,7 @@ export function openSettings(opts: SettingsOpts): void {
 
   const panels: Record<TabId, HTMLElement> = {
     display: displayPanel,
+    sessions: sessionsPanel,
     voice: voicePanel,
     account: accountPanel,
     debug: debugPanel,
@@ -180,7 +187,7 @@ export function openSettings(opts: SettingsOpts): void {
   // The panels scroll inside .modal__body; header, tabs and footer stay put.
   const body = document.createElement("div");
   body.className = "modal__body";
-  body.append(displayPanel, voicePanel, accountPanel, debugPanel);
+  body.append(displayPanel, sessionsPanel, voicePanel, accountPanel, debugPanel);
   modal.append(buildHeader(), tabs, body, buildAboutFooter());
 
   overlay.appendChild(modal);
@@ -257,6 +264,7 @@ function buildTabs(initial: TabId, onChange: (next: TabId) => void): HTMLElement
   bar.setAttribute("role", "tablist");
   const items: Array<{ id: TabId; label: string }> = [
     { id: "display", label: "display" },
+    { id: "sessions", label: "sessions" },
     { id: "voice",   label: "voice"   },
     { id: "account", label: "account" },
     { id: "debug",   label: "debug"   },

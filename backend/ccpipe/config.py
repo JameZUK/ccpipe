@@ -71,17 +71,68 @@ class MicConfig:
     max_recording_seconds: int = 60
 
 
+BOOT_MAX = 32                       # = tmux.MAX_SESSIONS
+IDLE_MAX_MIN = 30 * 24 * 60         # 30 days
+
+
+def _idle_minutes(v: Any, default: int) -> int:
+    """0 (never) or 15 min .. 30 days."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    return 0 if n <= 0 else max(15, min(IDLE_MAX_MIN, n))
+
+
+@dataclass
+class SessionsConfig:
+    """Session lifecycle, tunable from Settings → Sessions (lifecycle.py).
+
+      - ``boot_sticky`` / ``boot_other``: when the machine boots (tmux has
+        no sessions), start only this many of the most recently used sticky
+        / other sessions. The rest are listed as stopped and resume —
+        same conversation — when opened.
+      - ``idle_stop_other_min`` / ``idle_stop_sticky_min``: stop a session
+        once it has been completely idle this long (0 = never). Idle means
+        no terminal attached, no output or input, Claude not working, no
+        command / task running and no CPU use — see lifecycle.busy_reason.
+        Sticky sessions get the longer default.
+    """
+    boot_sticky: int = 5
+    boot_other: int = 0
+    idle_stop_other_min: int = 120
+    idle_stop_sticky_min: int = 1440
+
+    @classmethod
+    def from_dict(cls, d: Any) -> "SessionsConfig":
+        c = cls()
+        if not isinstance(d, dict):
+            return c
+        for k in ("boot_sticky", "boot_other"):
+            try:
+                setattr(c, k, max(0, min(BOOT_MAX, int(d.get(k, getattr(c, k))))))
+            except (TypeError, ValueError):
+                pass
+        c.idle_stop_other_min = _idle_minutes(d.get("idle_stop_other_min", c.idle_stop_other_min),
+                                              c.idle_stop_other_min)
+        c.idle_stop_sticky_min = _idle_minutes(d.get("idle_stop_sticky_min", c.idle_stop_sticky_min),
+                                               c.idle_stop_sticky_min)
+        return c
+
+
 @dataclass
 class AppConfig:
     tts: TtsConfig = field(default_factory=TtsConfig)
     fs: FsConfig = field(default_factory=FsConfig)
     mic: MicConfig = field(default_factory=MicConfig)
+    sessions: SessionsConfig = field(default_factory=SessionsConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "tts": asdict(self.tts),
             "fs": asdict(self.fs),
             "mic": asdict(self.mic),
+            "sessions": asdict(self.sessions),
         }
 
     @classmethod
@@ -133,7 +184,8 @@ class AppConfig:
                              mic.max_recording_seconds))))
         except (TypeError, ValueError):
             pass
-        return cls(tts=tts, fs=fs, mic=mic)
+        sessions = SessionsConfig.from_dict(data.get("sessions") if isinstance(data, dict) else None)
+        return cls(tts=tts, fs=fs, mic=mic, sessions=sessions)
 
 
 _state_dir = state_dir

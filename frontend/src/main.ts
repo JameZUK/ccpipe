@@ -10,6 +10,7 @@ import {
 import { DOC_SVG, FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI, type MobileUI } from "./mobile";
 import { capturePendingShare } from "./share";
+import { sparkMark } from "./brand";
 import { installTooltips } from "./tooltip";
 import { addBusyCheck, installUpdater, recoverFromStaleBundle } from "./update";
 import * as notifications from "./notifications";
@@ -146,13 +147,14 @@ async function attachTerminal(session: string): Promise<void> {
       import("./tts"),
       import("./waveform"),
       import("./layout"),
+      import("./sysmeter"),
     ]);
   } catch (e) {
     console.warn("terminal code failed to load:", e);
     if (!recoverFromStaleBundle()) renderBootstrapError(() => location.reload(), "Couldn’t load the app’s code.");
     return;
   }
-  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }, { TileLayout }] = modules;
+  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }, { TileLayout }, { mountSysMeter }] = modules;
 
   // Fire dispose on whatever is currently mounted (session picker or a
   // prior terminal view) before wiping it, so its timers/listeners
@@ -177,6 +179,9 @@ async function attachTerminal(session: string): Promise<void> {
   brand.className = "statusbar__brand";
   brand.title = "Back to sessions";
   brand.innerHTML = `<span class="wordmark small">cc<span class="dot"></span>pipe</span>`;
+  // On a phone the wordmark gives way to the spark mark (styles.css), so the
+  // session name has room in the top bar.
+  brand.append(sparkMark("spark--brand"));
   brand.onclick = () => {
     // Manual return to picker — explicitly clear lastSession so a
     // subsequent refresh doesn't bounce back into the current session.
@@ -467,7 +472,10 @@ async function attachTerminal(session: string): Promise<void> {
   tmuxBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M12 4v12"/><path d="M12 10h9"/><path d="M3 16h18"/></svg>`;
 
   controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, tilesBtn, tmuxBtn, historyBtn, docsBtn, filesBtn, settingsBtn);
-  statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sessionLabel, controls);
+  // System status beside the ping (sysmeter.ts): inline on wide screens, a
+  // three-bar meter on the phone; tap for the details.
+  const sysMeter = mountSysMeter(session);
+  statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sysMeter.el, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────
   const terminalContainer = document.createElement("div");
@@ -688,7 +696,11 @@ async function attachTerminal(session: string): Promise<void> {
   const updateTtsBtn = () => {
     const muted = tts.isMuted;
     ttsBtn.setAttribute("aria-pressed", muted ? "false" : "true");
-    ttsBtn.innerHTML = `${muted ? TTS_MUTED_SVG : TTS_SVG} <span>${muted ? "muted" : "voice"}</span>`;
+    // The label is dropped on a phone (styles.css) — the crossed-out
+    // speaker alone says muted — so the session name keeps its room.
+    ttsBtn.innerHTML = `${muted ? TTS_MUTED_SVG : TTS_SVG} <span class="pill__label">${muted ? "muted" : "voice"}</span>`;
+    ttsBtn.title = muted ? "Voice output muted — tap to unmute" : "Voice output on — tap to mute";
+    ttsBtn.setAttribute("aria-label", ttsBtn.title);
   };
   updateTtsBtn();
 
@@ -1089,6 +1101,7 @@ async function attachTerminal(session: string): Promise<void> {
   view.addEventListener("ccpipe:dispose", () => {
     unsubPrefs();
     unbusy();
+    sysMeter.dispose();
     window.removeEventListener("resize", syncTilesBtn);
     if (tmuxRefreshTimer !== null) clearTimeout(tmuxRefreshTimer);
     tmuxBar?.dispose();

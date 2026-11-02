@@ -27,22 +27,36 @@ def test_created_survives_recreation_and_keeps_the_older_time(meta_file):
     session_meta.note_created("a", when=1000)
     # After a reboot tmux recreates the sticky session: its own created time
     # is the boot time, later than ours — ours wins.
-    merged = session_meta.reconcile({"a": 5000}, keep={"a"})
+    merged = session_meta.reconcile({"a": (5000, 5000)}, keep={"a"})
     assert merged["a"]["created"] == 1000
     # A session ccpipe never saw created gets tmux's time, persisted.
-    merged = session_meta.reconcile({"a": 5000, "b": 4000}, keep=set())
-    assert merged["b"]["created"] == 4000
+    merged = session_meta.reconcile({"a": (5000, 5000), "b": (4000, 4100)}, keep=set())
+    assert merged["b"]["created"] == 4000 and merged["b"]["active"] == 4100
     assert session_meta.load()["b"]["created"] == 4000
 
 
-def test_dead_non_sticky_names_are_dropped(meta_file):
-    session_meta.note_created("gone", when=1)
-    session_meta.note_created("pinned", when=2)
-    merged = session_meta.reconcile({}, keep={"pinned"})
-    assert "gone" not in merged and "pinned" in merged
-    # …so a new session reusing the name starts afresh.
-    session_meta.reconcile({"gone": 9000}, keep=set())
-    assert session_meta.load()["gone"]["created"] == 9000
+def test_gone_sessions_are_remembered_only_when_resumable(meta_file):
+    session_meta.note_created("nocwd", when=1)
+    session_meta.note_created("withcwd", when=2, cwd="/srv/p")
+    session_meta.note_created("pinned", when=3)
+    merged = session_meta.reconcile({}, keep={"pinned"}, now=500)
+    assert "nocwd" not in merged                 # nothing to resume it with
+    assert merged["withcwd"]["stopped"] == 500 and merged["withcwd"]["stop_reason"] == "gone"
+    assert "pinned" in merged
+    # Running again clears the stopped mark.
+    merged = session_meta.reconcile({"withcwd": (9000, 9000)}, keep=set())
+    assert "stopped" not in merged["withcwd"] and merged["withcwd"]["created"] == 2
+
+
+def test_stop_reason_and_details(meta_file):
+    session_meta.note_details("s", "/srv/x", "0f0e0d0c-0b0a-4908-8706-050403020100")
+    session_meta.note_details("s", "relative/ignored", "not-a-uuid")
+    session_meta.mark_stopped("s", "idle", when=77)
+    e = session_meta.load()["s"]
+    assert e == {"cwd": "/srv/x", "claude": "0f0e0d0c-0b0a-4908-8706-050403020100",
+                 "stopped": 77, "stop_reason": "idle"}
+    session_meta.mark_running("s")
+    assert "stopped" not in session_meta.load()["s"]
 
 
 def test_opened_is_throttled_but_recorded(meta_file):
@@ -65,7 +79,7 @@ def test_rename_and_forget(meta_file):
 def test_malformed_file_is_ignored(meta_file):
     meta_file.write_text("{not json")
     assert session_meta.load() == {}
-    meta_file.write_text(json.dumps({"x": {"created": "soon", "opened": -1}, "y": 3}))
+    meta_file.write_text(json.dumps({"x": {"created": "soon", "opened": -1, "cwd": "rel"}, "y": 3}))
     assert session_meta.load() == {}
 
 
