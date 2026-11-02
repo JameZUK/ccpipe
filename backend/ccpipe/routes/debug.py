@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import json
 import logging
 import time
@@ -55,7 +56,8 @@ async def _noop_capture() -> list[str] | None:
 
 
 async def _capture_pane_plain(
-    session: str, lines: int, alternate: bool = False,
+    session: str, lines: int, alternate: bool = False, join: bool = False,
+    part: str = "all",
 ) -> list[str] | None:
     """Run `tmux capture-pane -p -t <session> -S -<lines>` and return
     the plain-text lines. No -e flag: we want the *rendered* text so
@@ -94,8 +96,18 @@ async def _capture_pane_plain(
         # No -E: capture extends through visible bottom, so the
         # result is "the last N rendered lines tmux knows about".
     ]
+    # part="history": scrollback only; part="screen": visible rows only.
+    if part == "history":
+        cmd += ["-E", "-1"]
+    elif part == "screen":
+        cmd[cmd.index("-S") + 1] = "0"
+
     if alternate:
         cmd.append("-a")
+    if join:
+        # Logical lines (schema-3 snapshots): join rows tmux wrapped, to
+        # line up with the frontend's soft-wrap-joined dump.
+        cmd.append("-J")
     async with _SNAPSHOT_SUBPROCESS_SEMAPHORE:
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -122,38 +134,103 @@ async def _capture_pane_plain(
             return None
     if proc.returncode != 0 or not out:
         return None
-    # Split into lines; tmux uses LF, no terminator on last line.
-    return out.decode("utf-8", errors="replace").split("\n")
+    # Split into lines. tmux ends the last line with LF too; drop the
+    # empty string that leaves so the bottoms line up.
+    text = out.decode("utf-8", errors="replace")
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n")
+
+
+async def _pane_info(session: str) -> tuple[int, int]:
+    """(status rows at the bottom of the client, pane history size).
+
+    The frontend's xterm holds the whole client screen, status line
+    included; capture-pane holds only the pane. Status rows are 0 when
+    the status line is off, at the top, or can't be read.
+    """
+    try:
+        validated = tmux.safe_name(session)
+    except ValueError:
+        return 0, 0
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            tmux.TMUX_BIN, "display-message", "-p", "-t", tmux.pane_target(validated),
+            "#{status}|#{status-position}|#{history_size}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            env=tmux.tmux_env(),
+        )
+    except FileNotFoundError:
+        return 0, 0
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_DIFF_CAPTURE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        return 0, 0
+    status, position, history = (out.decode(errors="replace").strip().split("|") + ["", "", ""])[:3]
+    rows = 0
+    if position == "bottom":
+        if status == "on":
+            rows = 1
+        elif status.isdigit() and 2 <= int(status) <= 5:
+            rows = int(status)
+    return rows, int(history) if history.isdigit() else 0
+
+
+async def _capture_logical(session: str, lines: int, history_size: int) -> list[str] | None:
+    """Schema-3 backend side: history as LOGICAL lines (-J), then the
+    visible screen as rows. That's the shape xterm holds: the replay is
+    -J lines xterm soft-wraps itself (joined again by the frontend dump),
+    while tmux repaints the screen row by row, so screen rows are never
+    soft-wrapped in xterm even where tmux wrapped them."""
+    screen = await _capture_pane_plain(session, lines, part="screen")
+    if screen is None:
+        return None
+    if history_size <= 0:          # -E -1 with no history returns a stray row
+        return screen
+    history = await _capture_pane_plain(session, lines, join=True, part="history")
+    return (history or []) + screen
 
 
 def _diff_buffers(
     frontend_tail: list[str], backend_tail: list[str],
 ) -> dict[str, Any]:
-    """Align two line lists from the bottom and report how well they
-    agree. Trailing-space-tolerant (xterm pads cells with spaces; tmux
+    """Match two line lists and report how well they agree.
+    Trailing-space-tolerant (xterm pads cells with spaces; tmux
     capture-pane may pad differently).
+
+    Lines are matched as sequences (difflib), not position by position
+    from the bottom: a few extra or missing lines in one place (e.g.
+    rows xterm wrapped itself just above tmux's repainted screen) then
+    count as a few mismatches, instead of shifting every line above
+    them out of step.
 
     Returns a dict with:
       lines_compared, matches, mismatches, mismatch_examples (first
-      N mismatching indices with the divergent lines from each side).
+      N divergent stretches, with the lines from each side).
     """
     n = min(len(frontend_tail), len(backend_tail))
-    # Slice + rstrip only the compared window — previously we rstripped
-    # the entire input on both sides (up to 10K lines × 2) before
-    # discarding all but the last n. On large buffers that's pure waste.
-    front_tail = [(line or "").rstrip() for line in frontend_tail[-n:]] if n else []
-    back_tail = [(line or "").rstrip() for line in backend_tail[-n:]] if n else []
-    matches = 0
+    front = [(line or "").rstrip() for line in frontend_tail[-n:]] if n else []
+    # Give the backend a little extra context above the window so lines
+    # the frontend has near its top can still find their partners.
+    back_n = min(len(backend_tail), n + 64)
+    back = [(line or "").rstrip() for line in backend_tail[-back_n:]] if back_n else []
+    sm = difflib.SequenceMatcher(None, front, back, autojunk=False)
+    matches = sum(block.size for block in sm.get_matching_blocks())
     mismatch_examples: list[dict[str, Any]] = []
-    for i in range(n):
-        if front_tail[i] == back_tail[i]:
-            matches += 1
-        elif len(mismatch_examples) < 5:
-            mismatch_examples.append({
-                "line_from_bottom": n - i,
-                "frontend": front_tail[i],
-                "backend": back_tail[i],
-            })
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal" or len(mismatch_examples) >= 5:
+            continue
+        if tag == "insert" and i1 == 0:
+            continue            # backend context above the frontend's window
+        mismatch_examples.append({
+            "line_from_bottom": n - i1,
+            "frontend": "\n".join(front[i1:i2]),
+            "backend": "\n".join(back[j1:j2]),
+        })
     return {
         "lines_compared": n,
         "frontend_lines": len(frontend_tail),
@@ -269,13 +346,32 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
     # Compare like-to-like against tmux's two screens — alt-screen
     # TUIs (claude code, vim) switch between buffers constantly and
     # comparing across them just produces noise.
+    #
+    # Two alignment details, without which nearly every line "differs":
+    # xterm's active buffer ends with tmux's status row(s), which
+    # capture-pane never includes, so those are dropped first; and
+    # schema-3 dumps are logical lines, compared against capture-pane -J.
     diff: dict[str, Any] | None = None
     if body.session:
-        buffers = body.payload.get("buffers") if isinstance(body.payload, dict) else None
+        payload = body.payload if isinstance(body.payload, dict) else {}
+        schema = payload.get("schema")
+        join = isinstance(schema, int) and schema >= 3
+        status_rows, history_size = await _pane_info(body.session)
+
+        def _drop_status(tail: Any) -> Any:
+            if status_rows and isinstance(tail, list) and len(tail) > status_rows:
+                return tail[:-status_rows]
+            return tail
+
+        buffers = payload.get("buffers")
         if isinstance(buffers, dict):
             active_type = str(buffers.get("activeType", ""))
             normal_tail = buffers.get("normal") or []
             alt_tail = buffers.get("alternate") or []
+            if active_type == "alternate":
+                alt_tail = _drop_status(alt_tail)
+            else:
+                normal_tail = _drop_status(normal_tail)
             # Capture both screens in parallel — sequential awaits
             # doubled the worst-case snapshot-endpoint latency to
             # ~4 s (2 × 2 s timeout). gather() collapses to a single
@@ -286,7 +382,9 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
                         isinstance(alt_tail, list) and bool(alt_tail))
             want_normal = isinstance(normal_tail, list) and bool(normal_tail)
             tasks = []
-            if want_normal:
+            if want_normal and join:
+                tasks.append(_capture_logical(body.session, len(normal_tail), history_size))
+            elif want_normal:
                 tasks.append(_capture_pane_plain(
                     body.session, len(normal_tail), alternate=False))
             else:
@@ -321,8 +419,7 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
             # Schema-1 fallback: legacy snapshots have only ``buffer.tail``
             # which is the active-buffer dump. Compare against whichever
             # screen tmux is currently presenting (the default, no -a).
-            front_tail = (body.payload.get("buffer", {}) or {}).get("tail") \
-                if isinstance(body.payload, dict) else None
+            front_tail = _drop_status((payload.get("buffer", {}) or {}).get("tail"))
             if isinstance(front_tail, list) and front_tail:
                 back_tail = await _capture_pane_plain(body.session, len(front_tail))
                 if back_tail is not None:

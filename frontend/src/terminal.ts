@@ -244,16 +244,37 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   // keyed on the OLD font; without an explicit clear, post-change
   // renders paint old-shape glyphs at the new cell positions, which
   // looks exactly like "the terminal didn't reflow for the new font".
+  //
+  // Settings → Display can switch WebGL off per device (prefs.webgl).
+  // On the phone (Firefox Android, 2026-11-02) colour/bold/dim glyphs
+  // came out garbled or blank in long Claude Code sessions while the
+  // buffer text was intact. That matches the atlas page-merge bug in
+  // @xterm/addon-webgl (xtermjs/xterm.js#5883: after a 4-into-1 page
+  // merge the GPU texture isn't re-uploaded, so glyphs sample the old
+  // page). Merges come early on a high-DPR phone with few texture units;
+  // the fix is only in the 0.20 betas. The DOM renderer has no atlas.
   let webgl: WebglAddon | null = null;
   let webglActive = false;
-  if (opts.webgl !== false) try {
-    webgl = new WebglAddon();
-    webgl.onContextLoss(() => { webgl?.dispose(); webgl = null; webglActive = false; });
-    term.loadAddon(webgl);
-    webglActive = true;
-  } catch (e) {
-    console.warn("xterm webgl renderer unavailable, using DOM:", e);
-  }
+  const enableWebgl = (): void => {
+    if (webglActive) return;
+    try {
+      const addon = new WebglAddon();
+      addon.onContextLoss(() => { addon.dispose(); if (webgl === addon) { webgl = null; webglActive = false; } });
+      term.loadAddon(addon);
+      webgl = addon;
+      webglActive = true;
+    } catch (e) {
+      console.warn("xterm webgl renderer unavailable, using DOM:", e);
+    }
+  };
+  const disableWebgl = (): void => {
+    if (!webgl) return;
+    const addon = webgl;
+    webgl = null;
+    webglActive = false;
+    try { addon.dispose(); } catch {}
+  };
+  if (opts.webgl !== false && initialPrefs.webgl) enableWebgl();
 
   // Rebuild the glyph atlas when the app comes back to the foreground.
   // Mobile browsers (seen on Firefox Android, 2026-10-13) can reclaim or
@@ -354,6 +375,41 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     requestAnimationFrame(() => { if (!disposed) rescaleWatch(); });
   };
 
+  // Soft keyboard: keep the session's size. Opening the keyboard used
+  // to shrink the session to ~half its rows and closing it grew it back
+  // (snapshot 2026-11-02: 43 → 22 → 43 on every session open), and each
+  // resize makes Claude Code redraw — the redraws are what leave the
+  // duplicated / cut-off lines in its history. Instead, while the
+  // keyboard is up the terminal keeps its rows and is shifted up so its
+  // bottom (where the prompt is) stays visible above the keyboard.
+  //
+  // "Keyboard up" = the window is much shorter than the tallest it has
+  // been at this width (with interactive-widget=resizes-content the
+  // keyboard shrinks the layout viewport itself).
+  const tallestAtWidth = new Map<number, number>();
+  let fittedWidth = 0;
+  const holdWidthChanged = (): boolean =>
+    fittedWidth > 0 && Math.abs(container.clientWidth - fittedWidth) > 2;
+  let keyboardHold = false;
+  const softKeyboardUp = (): boolean => {
+    if (!document.body.classList.contains("mobile")) return false;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const tallest = Math.max(tallestAtWidth.get(w) ?? 0, h);
+    tallestAtWidth.set(w, tallest);
+    return h < tallest * 0.8;
+  };
+  const applyKeyboardShift = (): void => {
+    const el = term.element;
+    const screen = container.querySelector(".xterm-screen") as HTMLElement | null;
+    if (!el || !screen) return;
+    const padTop = parseFloat(getComputedStyle(container).paddingTop) || 0;
+    const shift = keyboardHold
+      ? Math.max(0, Math.ceil(padTop + screen.offsetHeight - container.clientHeight))
+      : 0;
+    el.style.transform = shift ? `translateY(${-shift}px)` : "";
+  };
+
   const sendResize = () => {
     if (disposed) return;
     if (opts.watch) {
@@ -365,6 +421,19 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     // numbered comment above for the why.
     if (container.clientWidth < MIN_CONTAINER_PX
         || container.clientHeight < MIN_CONTAINER_PX) return;
+
+    // Keyboard up and the session already sized: hold the rows (only
+    // when the width is unchanged — a rotation still re-fits).
+    const kbUp = softKeyboardUp();
+    if (kbUp && lastRows > 0 && !holdWidthChanged()) {
+      keyboardHold = true;
+      applyKeyboardShift();
+      return;
+    }
+    if (keyboardHold) {
+      keyboardHold = false;
+      applyKeyboardShift();
+    }
 
     // Snapshot "user is at the live tail" BEFORE fit.fit(). If the
     // cols change, xterm's buffer.resize() reflows the scrollback
@@ -410,6 +479,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     lastCols = term.cols;
     lastRows = term.rows;
     socket.send({ type: "resize", cols: term.cols, rows: term.rows });
+    fittedWidth = container.clientWidth;
 
     // Restore the at-bottom state. If the user was tailing live output
     // before the fit, snap back to the bottom regardless of what the
@@ -1158,6 +1228,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       };
       lastAppliedCursorColor = next.cursorColor;
     }
+    // Renderer switch. The DOM renderer gives up one row (see the
+    // safety pad in sendResize), so refresh and re-fit after it.
+    if (opts.webgl !== false && next.webgl !== webglActive) {
+      if (next.webgl) enableWebgl(); else disableWebgl();
+      try { term.refresh(0, term.rows - 1); } catch {}
+    }
     scheduleResize();
 
     const nextFontFamily = resolveTerminalFontFamily(pickFontIdForDevice(next));
@@ -1350,8 +1426,8 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   } => {
     return {
       activeType: term.buffer.active.type,
-      normal: _dumpBuffer(term.buffer.normal, maxLines),
-      alternate: _dumpBuffer(term.buffer.alternate, maxLines),
+      normal: _dumpLogical(term.buffer.normal, maxLines),
+      alternate: _dumpLogical(term.buffer.alternate, maxLines),
     };
   };
 
@@ -1366,6 +1442,24 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       out.push(line ? line.translateToString(true) : "");
     }
     return out;
+  }
+
+  /** The last `maxLines` LOGICAL lines: rows xterm soft-wrapped are
+   * joined back together. This is what the snapshot diff compares
+   * against `tmux capture-pane -J` — row-by-row comparison falls out of
+   * step wherever the two wrapped a line differently (tmux keeps a line
+   * written at 190 columns as one line; xterm reflows it to the phone's
+   * width). */
+  function _dumpLogical(buf: typeof term.buffer.active, maxLines: number): string[] {
+    const out: string[] = [];
+    let cur: string | null = null;
+    for (let i = buf.length - 1; i >= 0 && out.length < maxLines; i--) {
+      const line = buf.getLine(i);
+      const text: string = line ? line.translateToString(cur === null) : "";
+      cur = text + (cur ?? "");
+      if (!line?.isWrapped) { out.push(cur.trimEnd()); cur = null; }
+    }
+    return out.reverse();
   }
 
   return {

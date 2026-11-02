@@ -311,6 +311,17 @@ the unit files; your `tls.conf` drop-in is left alone).
 - **Login throttle keeps you locked out**: rate-limit windows are 60 s.
   Wait, or `systemctl --user restart ccpipe` to reset the in-memory
   buckets immediately.
+- **Letters garbled, blank or replaced by junk shapes** (often in
+  coloured / dim / bold text, while plain text is fine): the WebGL
+  renderer's glyph cache has gone bad — an atlas page-merge bug in
+  `@xterm/addon-webgl` 0.18/0.19, seen most on high-DPI phones. Turn
+  off **Settings → Display → WebGL renderer** on that device; the plain
+  renderer has no glyph cache. The setting is per device.
+- **Checking what the terminal shows against tmux**: Settings → Debug →
+  Capture snapshot (or Ctrl+Shift+D), then "Send to server log". The
+  server compares the page's lines with `tmux capture-pane` and logs a
+  match count. Text that differs means a stream/replay problem; text
+  that matches while the screen looks wrong means a drawing problem.
 - **`open terminal failed: not a terminal` in logs**: used to fire
   during tmux control-client startup; suppressed in current builds. If
   you still see it, you're on an older build.

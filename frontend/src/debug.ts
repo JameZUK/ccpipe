@@ -44,7 +44,7 @@ export interface DebugCaptureOpts {
 }
 
 export interface DebugSnapshot {
-  schema: 2;
+  schema: 3;
   capturedAt: string;          // ISO timestamp
   performanceNow: number;      // monotonic, for cross-frame correlation
   session: string;
@@ -59,7 +59,9 @@ export interface DebugSnapshot {
   buffer: { lineCount: number; tail: string[] };
   /** schema-2: both xterm buffers + which is currently active.
    * Alt-screen apps (claude code's TUI, vim) switch between them
-   * and a diff comparing across them is meaningless. */
+   * and a diff comparing across them is meaningless.
+   * schema-3: these are LOGICAL lines (soft-wrapped rows joined), to
+   * match the server's `capture-pane -J`. */
   buffers?: {
     activeType: string;
     normal: string[];
@@ -74,7 +76,7 @@ export function captureSnapshot(opts: DebugCaptureOpts): DebugSnapshot {
     ? opts.terminal.dumpAllBuffers(maxLines)
     : undefined;
   return {
-    schema: 2,
+    schema: 3,
     capturedAt: new Date().toISOString(),
     performanceNow: performance.now(),
     session: opts.session,

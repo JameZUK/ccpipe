@@ -2623,7 +2623,9 @@ body.file-editor-resizing {
 
 /* ─── Mobile adjustments ───────────────────────────────────────────────── */
 
-body.mobile #terminal { padding: var(--s-2) var(--s-2) 0 var(--s-2); }
+body.mobile #terminal { padding: var(--s-2) var(--s-2) 0 var(--s-2); overflow: hidden; }
+/* While the soft keyboard is up the terminal keeps its rows and is
+   shifted up (terminal.ts applyKeyboardShift); clip the hidden top. */
 /* On mobile, the floating mic FAB is replaced by the in-composer mic
    button (see .composer__mic) so the soft keyboard can't shove it
    out from under the user's finger. */

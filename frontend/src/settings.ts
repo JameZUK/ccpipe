@@ -827,6 +827,10 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
         <span class="row__label">Cursor blink</span>
         <input type="checkbox" name="cursorBlink" class="checkbox"${prefs.cursorBlink ? " checked" : ""}/>
       </label>
+      <label class="row">
+        <span class="row__label">WebGL renderer <span class="row__hint">this device only · turn off if letters come out garbled or blank</span></span>
+        <input type="checkbox" name="webgl" class="checkbox"${prefs.webgl ? " checked" : ""}/>
+      </label>
     </div>
     <div class="modal__row-actions">
       <button type="button" class="btn btn--ghost" data-role="reset">Reset defaults</button>
@@ -871,6 +875,10 @@ function buildDisplaySection(opts: SettingsOpts): HTMLElement {
   sec.querySelector<HTMLInputElement>("input[name=cursorBlink]")!
     .addEventListener("change", (e) => {
       apply({ ...working, cursorBlink: (e.target as HTMLInputElement).checked });
+    });
+  sec.querySelector<HTMLInputElement>("input[name=webgl]")!
+    .addEventListener("change", (e) => {
+      apply({ ...working, webgl: (e.target as HTMLInputElement).checked });
     });
   // Cursor-width slider — wireRange would format as a float but we
   // want integer px display.

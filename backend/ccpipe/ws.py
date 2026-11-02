@@ -10,8 +10,10 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -447,7 +449,9 @@ class _TerminalConnection:
         # screen. With splits, tmux's attach redraw alone paints the panes.
         history_bytes = b""
         if await tmux_ui.window_panes(self.session) <= 1:
-            history_bytes = await _capture_session_history(self.session, rows)
+            history_bytes = await asyncio.to_thread(
+                _trim_wrap_padding,
+                await _capture_session_history(self.session, rows), cols, rows)
 
         # NOTE: the tmux-attach relay (PtyProcess) is spawned LATER, in the
         # no-await "commit zone" (_start_pty) just before the receive loop's
@@ -1203,6 +1207,59 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
         _history_cache.pop(k, None)
     _history_cache[session] = (now, normalised)
     return normalised
+
+
+# Trailing padding in the replay. capture-pane -J keeps each line's
+# trailing spaces, and Claude Code pads its lines to the width it drew at
+# — so history written while the desktop had the window at ~190 columns
+# arrived on a 51-column phone as one line of text plus three or four
+# rows of blank wrap (measured 2026-11-02: 2,287 of 6,103 replayed rows
+# blank; tmux itself held 2,043 lines). Only lines wider than the client
+# are trimmed, so same-width history keeps its padding (and background).
+_TRAILING_PAD = re.compile(rb"(?:[ ]|\x1b\[[0-9;:]*m)+$")
+_ANSI = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+
+
+def _visible_width(line: bytes) -> int:
+    text = _ANSI.sub(b"", line).decode("utf-8", errors="replace")
+    width = 0
+    for ch in text:
+        if unicodedata.combining(ch) or ch == "\u200d":
+            continue
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def _trim_wrap_padding(data: bytes, cols: int, keep_rows: int = 0) -> bytes:
+    """Drop the trailing spaces (keeping any SGR codes among them) from
+    replay lines wider than *cols*, so padding doesn't wrap into blank
+    rows on a narrower client.
+
+    The last *keep_rows* rows (as the client will wrap them) are left
+    alone: tmux's attach redraw paints over exactly that screenful, and
+    the seam-free replay depends on it covering the same rows tmux's own
+    screen does. Trimming there packs more lines into that screenful and
+    the redraw then overwrites lines that belonged in history.
+    """
+    if not data or cols <= 0:
+        return data
+    lines = data.split(b"\r\n")
+    end = len(lines)
+    rows = 0
+    while end > 0 and rows < keep_rows:
+        end -= 1
+        width = _visible_width(lines[end]) if len(lines[end]) > cols else len(lines[end])
+        rows += max(1, -(-width // cols))
+    for i, line in enumerate(lines[:end]):
+        if len(line) <= cols:
+            continue               # bytes >= visible width: can't wrap
+        m = _TRAILING_PAD.search(line)
+        if m is None or b" " not in m.group(0):
+            continue
+        if _visible_width(line) <= cols:
+            continue
+        lines[i] = line[:m.start()] + m.group(0).replace(b" ", b"")
+    return b"\r\n".join(lines)
 
 
 # Raw capture bytes kept beyond _HISTORY_MAX_BYTES while reading: CRLF

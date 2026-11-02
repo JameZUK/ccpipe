@@ -41,6 +41,10 @@ export interface DisplayPrefs {
   // bundled font on mobile.
   terminalFontDesktop: string;
   terminalFontMobile: string;
+  // Draw the terminal with xterm's WebGL renderer (fast) or its plain
+  // DOM renderer. Per device: WebGL's glyph cache gets corrupted on some
+  // phones (see terminal.ts), so it can be switched off just there.
+  webgl: boolean;
 }
 
 export const DEFAULT_PREFS: DisplayPrefs = {
@@ -54,6 +58,7 @@ export const DEFAULT_PREFS: DisplayPrefs = {
   cursorWidth: 1,
   terminalFontDesktop: "system",
   terminalFontMobile: "jetbrains-mono",
+  webgl: true,
 };
 
 // Canonical terminal font-size bounds. Used by BOTH the global clamp in
@@ -94,6 +99,7 @@ function sanitize(p: Partial<DisplayPrefs>): DisplayPrefs {
     terminalFontMobile: isKnownFontId(p.terminalFontMobile as string)
       ? (p.terminalFontMobile as string)
       : DEFAULT_PREFS.terminalFontMobile,
+    webgl: typeof p.webgl === "boolean" ? p.webgl : DEFAULT_PREFS.webgl,
   };
 }
 
