@@ -424,6 +424,10 @@ class _TerminalConnection:
         # The mic_start in flight (voice_ptt.arm): waits for Claude to be
         # ready, presses /voice's key and confirms it took.
         self.arm_task: asyncio.Task[None] | None = None
+        # Relay output held back until the replay has been sent (run()).
+        self.hold_pty = False
+        self.held_pty: list[bytes] = []
+        self.pty_output = asyncio.Event()
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def run(self) -> None:
@@ -457,22 +461,21 @@ class _TerminalConnection:
             # rendering at the fallback 120x40.
             cols, rows, leftover = await _wait_for_initial_resize(self.ws, self.session)
 
-        # Capture tmux's full pane (history + visible) on EVERY connect, not
+        # Replay tmux's full pane (history + visible) on EVERY connect, not
         # just the first one. The frontend `term.reset()`s on `hello` so the
-        # bytes we send below replace the xterm buffer rather than appending
-        # to it. This is what closes the "new output isn't in scrollback
-        # after a reconnect" hole — during a network blip, lines that
-        # scrolled into tmux's history were previously never delivered to
-        # xterm because we skipped this capture on reconnects.
+        # bytes we send replace the xterm buffer rather than appending to it.
+        # This is what closes the "new output isn't in scrollback after a
+        # reconnect" hole — during a network blip, lines that scrolled into
+        # tmux's history were previously never delivered to xterm because we
+        # skipped this capture on reconnects.
         #
         # Only for a single-pane window: the capture is the ACTIVE pane's
         # history, which in a split window would be drawn across the whole
         # screen. With splits, tmux's attach redraw alone paints the panes.
-        history_bytes = b""
-        if await tmux_ui.window_panes(self.session) <= 1:
-            history_bytes = await asyncio.to_thread(
-                _trim_wrap_padding,
-                await _capture_session_history(self.session, rows), cols, rows)
+        #
+        # The capture is taken AFTER our tmux client has attached (and tmux
+        # has resized the window to it), not before: see _send_history.
+        replay = await tmux_ui.window_panes(self.session) <= 1
 
         # NOTE: the tmux-attach relay (PtyProcess) is spawned LATER, in the
         # no-await "commit zone" (_start_pty) just before the receive loop's
@@ -493,32 +496,26 @@ class _TerminalConnection:
         tts_filter = await _build_tts_filter(self.session)
         self._register(tts_filter)
 
-        # Send any captured history before the live pump starts. xterm.js
-        # writes these bytes into its scrollback; tmux attach's incoming
-        # redraw will then paint the current visible pane on top. Prefixed
-        # with FRAME_PTY_OUTPUT so the client dispatches it through the same
-        # PTY pipeline as live output.
-        if history_bytes:
-            async with self.send_lock:
-                try:
-                    await self.ws.send_bytes(bytes([FRAME_PTY_OUTPUT]) + history_bytes)
-                except Exception as exc:
-                    log.debug("history send failed: %s", exc)
-
-        # Tell the client we're past the slow part of setup. Used as the
-        # signal to fire the first latency-measuring ping — pinging any
-        # earlier (e.g. at hello, which is sent BEFORE the history-bytes
-        # blob) means the ping queues server-side behind the history send
-        # and the round-trip reflects setup time, not network RTT. By the
-        # time stream_ready lands the server is one statement away from the
-        # main receive() loop and a ping pongs back at network speed.
-        await self.send_json({"type": "stream_ready"})
-
+        # Hold the relay's output until the replay is on the wire: the
+        # client takes everything between hello and stream_ready as the
+        # replay, and tmux's attach redraw must land after it.
+        self.hold_pty = replay
         await self._start_pty(cols, rows)
         self.pty_task = asyncio.create_task(self._pty_lifecycle())
         if self.watch:
             self.watch_task = asyncio.create_task(self._follow_window_size())
         try:
+            if replay:
+                await self._send_history(cols, rows)
+            # Tell the client we're past the slow part of setup. Used as the
+            # signal to fire the first latency-measuring ping — pinging any
+            # earlier (e.g. at hello, which is sent BEFORE the history-bytes
+            # blob) means the ping queues server-side behind the history send
+            # and the round-trip reflects setup time, not network RTT. By the
+            # time stream_ready lands the server is one statement away from
+            # the main receive() loop and a ping pongs back at network speed.
+            await self.send_json({"type": "stream_ready"})
+            await self._release_pty()
             # Any non-resize messages we drained while waiting for the
             # initial resize are applied now that the relay exists (inside
             # the try so a malformed one can't skip the teardown in finally).
@@ -626,6 +623,55 @@ class _TerminalConnection:
                 _draft_peers.pop(self.session, None)
         self.tmux_sub.cancel()
         self.tts_sub.cancel()
+
+    async def _send_history(self, cols: int, rows: int) -> None:
+        """Send the pane replay, captured once tmux has resized the window to
+        this client. tmux's attach output erases the client's screen and
+        repaints the pane, so the replay's last screenful must be exactly
+        what tmux will repaint, or the rows in between are lost:
+
+        - The capture must follow the resize. Captured before (at the size
+          the last device left the window), a pane that grows after a screen
+          clear is padded at the bottom by tmux (it pulls back only history
+          it scrolled), while the client's copy is bottom-aligned; the erase
+          then wiped one row per row of growth (2026-11-03: 9 lines lost
+          attaching a phone to a 60x24 window).
+        - One CRLF per status-line row ends the replay: the client is the
+          pane's height plus tmux's status line, and tmux repaints only the
+          pane. Without it the screen's top row, the last history line, was
+          erased on every full replay (the status line is on by default).
+        """
+        try:
+            await asyncio.wait_for(self.pty_output.wait(), timeout=1.5)
+        except asyncio.TimeoutError:
+            pass
+        status_rows = 0
+        deadline = time.monotonic() + 1.0
+        while True:
+            layout = await tmux.window_layout(self.session)
+            if layout is None:
+                break
+            width, height, status_rows = layout
+            if self.watch or (width, height) == (cols, max(1, rows - status_rows)):
+                break
+            if time.monotonic() >= deadline:
+                break                    # another client sets the size: capture as is
+            await asyncio.sleep(0.03)
+        invalidate_history_cache(self.session)
+        blob = await asyncio.to_thread(
+            _trim_wrap_padding, await _capture_session_history(self.session, rows),
+            cols, rows)
+        if not blob:
+            return
+        async with self.send_lock:
+            await self.ws.send_bytes(bytes([FRAME_PTY_OUTPUT]) + blob + b"\r\n" * status_rows)
+
+    async def _release_pty(self) -> None:
+        """Forward the relay output held during the replay, in order, then
+        stop holding."""
+        while self.held_pty:
+            await self._send_pty(self.held_pty.pop(0))
+        self.hold_pty = False
 
     async def _start_pty(self, cols: int, rows: int) -> None:
         # ── Commit zone ──────────────────────────────────────────────────
@@ -1035,6 +1081,13 @@ class _TerminalConnection:
         # be in tmux's pane, producing the "gap until I refresh and
         # capture-pane recovers them" symptom. Re-raising trades a warning +
         # a reconnect for guaranteed eventual consistency.
+        if self.hold_pty:
+            self.held_pty.append(data)
+            self.pty_output.set()
+            return
+        await self._send_pty(data)
+
+    async def _send_pty(self, data: bytes) -> None:
         counters = self.counters
         counters.bytes_read_pty += len(data)
         async with self.send_lock:
@@ -1284,6 +1337,10 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
     # The next bytes after this blob are always a cursor-positioning
     # redraw (\x1b[H…), so nothing concatenates onto that last line.
     # Validated headless in frontend/test/dup-seam.mjs.
+    # That holds for the PANE. The client is also tmux's status line tall,
+    # so _send_history appends one CRLF per status row; with none the
+    # last history line was erased on every full replay
+    # (frontend/test/seam-status-row.mjs).
     if normalised.endswith(b"\r\n"):
         normalised = normalised[:-2]
     # Cap the blob size, truncating the OLDEST content from the front so

@@ -221,13 +221,23 @@ Order of likelihood:
    `scrollToBottom` fires. See [`docs/threat-model.md`](threat-model.md)
    for the four xterm scrollback quirks documented in May-2026.
 
-2. **`capture-pane` race during reconnect.** When the WS reconnects,
-   `_capture_session_history()` runs at time `T0`, the new PTY pump
-   starts at `T1 > T0`. If new content arrives between `T0` and `T1`,
-   it lands via the live stream (not the captured history). On
-   shorthand reconnects this is invisible. On a reconnect that
-   coincides with a heavy claude write, content can briefly appear
-   out of order.
+2. **The replay seam.** On a full replay the server sends a
+   `capture-pane` blob, then tmux's attach output erases the client's
+   screen (`ESC[2J`) and repaints the pane. Any row on the client's
+   screen that tmux doesn't repaint is lost, so the blob's last
+   screenful must be exactly what tmux repaints. Two things broke that
+   until 2026-11-03 (`_send_history`):
+   - the capture was taken before tmux resized the window to the new
+     client, and tmux reflows a pane that grows after a screen clear by
+     padding at the bottom, so a phone attaching to a window the desktop
+     had sized lost a row per row of growth (9 lines in one test);
+   - the client is the pane plus tmux's status line, so the blob must
+     end with one CRLF per status row, or the last history line is
+     erased on every full replay (`frontend/test/seam-status-row.mjs`).
+
+   The capture now follows the attach: the relay's output is held until
+   the blob is sent. Output that arrives in the few milliseconds between
+   the attach and the capture can still appear twice.
 
 3. **Lifecycle-driven reconnects on focus.** The client kicks the WS
    on focus events if no data was received recently. The threshold is
@@ -284,7 +294,8 @@ is logged at debug level only (it is routine on network handoffs).
 | Loss visible in `bytes_lost`                 | `backend/ccpipe/ws.py::forward_pty_to_ws`                |
 | Accounting drift / unit-test failure         | `backend/ccpipe/ws.py::WsCounters` + `tests/test_ws_byte_accounting.py` |
 | capture-pane returns wrong content           | `backend/ccpipe/ws.py::_capture_session_history`         |
-| Wrong content after reconnect (`--reconnect` fails) | `backend/ccpipe/ws.py::handle_terminal_ws` (hello → history send → pump start ordering) |
+| Wrong content after reconnect (`--reconnect` fails) | `backend/ccpipe/ws.py::_TerminalConnection.run` (hello → relay start, output held → `_send_history` → stream_ready → `_release_pty`) |
+| Lines missing or doubled at the history/screen seam | `backend/ccpipe/ws.py::_send_history` + `frontend/test/seam-status-row.mjs` |
 | xterm shows stale buffer after reconnect     | `frontend/src/main.ts::onHello` (`resetTerminal` + `bottomOnNextOutput`) |
 | Doctor `--realistic` fails on a specific phase | `scripts/scrollback-doctor.py::assert_phase_*` + the matching block in `scripts/scrollback-test-generator.sh` |
 | Frequent reconnects on focus                 | `frontend/src/ws.ts::kickStaleSocket` (idle-threshold heuristic) |

@@ -581,6 +581,20 @@ async def active_panes() -> dict[str, tuple[str, str]]:
     return result
 
 
+async def window_layout(name: str) -> tuple[int, int, int] | None:
+    """(width, height, status-line rows) of the session's current window.
+    The height excludes the status line, which takes that many rows of each
+    client's terminal (0 when the status line is off)."""
+    out = await _tmux_out("display-message", "-p", "-t", pane_target(name),
+                          f"#{{window_width}}{_FIELD_SEP}#{{window_height}}{_FIELD_SEP}#{{status}}")
+    parts = (out or "").strip().split(_FIELD_SEP)
+    if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+        return None
+    status = parts[2].strip()
+    rows = 0 if status in ("off", "0", "") else (int(status) if status.isdigit() else 1)
+    return int(parts[0]), int(parts[1]), rows
+
+
 async def capture_screen(name: str) -> list[str] | None:
     """The visible screen of the session's active pane as plain text (no
     escapes), trailing spaces and trailing blank rows removed."""
