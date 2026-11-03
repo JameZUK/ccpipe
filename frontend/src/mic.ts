@@ -28,6 +28,23 @@ export const DEFAULT_MIC_CONFIG: MicStreamerConfig = {
   maxRecordingSeconds: 60,
 };
 
+// Firefox for Android puts the phone into call mode while the mic is open
+// with any voice processing on (echo cancellation, noise suppression or
+// auto gain): Gecko then treats the input as "voice", runs the audio graph
+// with CUBEB_DEVICE_PREF_VOICE and calls SetCommunicationAudioModeOn
+// (dom/media/GraphDriver.cpp, the AudioCallbackDriver constructor;
+// AudioInputProcessing::IsVoiceInput). So each recording switched Android
+// into call mode and each stop switched it back, and a start that raced
+// that switch could leave every AudioContext suspended ("MicBlocked: ctx
+// suspended after 5 s (fresh too)" — three of four within 4 s of the last
+// stop, 2026-11-03). Raw input keeps it a plain recording. Claude's
+// speech-to-text doesn't need call processing; the cost is no echo
+// cancellation, so speech playing from the phone while you dictate would
+// be picked up.
+const UA = typeof navigator === "undefined" ? "" : navigator.userAgent;
+const FIREFOX_ANDROID = /Android/i.test(UA) && /Firefox\//.test(UA);
+const VOICE_PROCESSING = !FIREFOX_ANDROID;
+
 export class MicStreamer {
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
@@ -131,6 +148,7 @@ export class MicStreamer {
   private workletReady: Promise<void> | null = null;
   private idleTimer: number | null = null;
   private lastPrimeAt = 0;
+  private lastStopAt = 0;
 
   /** Create or wake the AudioContext. Call synchronously from the user's
    * gesture, before anything async. A no-op while recording. */
@@ -196,9 +214,9 @@ export class MicStreamer {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: VOICE_PROCESSING,
+          noiseSuppression: VOICE_PROCESSING,
+          autoGainControl: VOICE_PROCESSING,
         },
       });
       // The context prime() woke normally runs already. If not, keep asking
@@ -219,6 +237,8 @@ export class MicStreamer {
       };
       const wasState = this.audio?.state ?? "none";
       const sincePrime = this.lastPrimeAt ? Math.round(performance.now() - this.lastPrimeAt) : -1;
+      const sinceStop = this.lastStopAt ? `${Math.round(performance.now() - this.lastStopAt)}ms` : "never";
+      const tail = `last stop ${sinceStop} ago; proc ${VOICE_PROCESSING ? "on" : "off"}`;
       let ctx = this.audio && this.audio.state !== "closed" ? this.audio : this._newAudio();
       let took = await runs(ctx, 3000);
       let fresh = false;
@@ -229,13 +249,13 @@ export class MicStreamer {
         if (took === null) {
           const act = (navigator as Navigator & { userActivation?: { isActive: boolean; hasBeenActive: boolean } }).userActivation;
           const err = new Error(`ctx ${ctx.state} after 5 s (fresh too); was ${wasState}; primed ${sincePrime}ms ago; `
-            + `activation ${act ? `${act.isActive ? 1 : 0}/${act.hasBeenActive ? 1 : 0}` : "?"}; ${document.visibilityState}`);
+            + `activation ${act ? `${act.isActive ? 1 : 0}/${act.hasBeenActive ? 1 : 0}` : "?"}; ${document.visibilityState}; ${tail}`);
           err.name = "MicBlocked";
           throw err;
         }
       }
       if (took > 300 || fresh) {
-        this.onDiag?.("MicSlowStart", `ctx running after ${took}ms${fresh ? " (fresh)" : ""}; was ${wasState}; primed ${sincePrime}ms ago`);
+        this.onDiag?.("MicSlowStart", `ctx running after ${took}ms${fresh ? " (fresh)" : ""}; was ${wasState}; primed ${sincePrime}ms ago; ${tail}`);
       }
       this.ctx = ctx;
       if (this.idleTimer !== null) { clearTimeout(this.idleTimer); this.idleTimer = null; }
@@ -355,6 +375,7 @@ export class MicStreamer {
     this._stopVad();
     this._clearMaxRecordTimer();
     await this._teardown();
+    this.lastStopAt = performance.now();
     this.state = "idle";
   }
 
