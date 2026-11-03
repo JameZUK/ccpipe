@@ -26,6 +26,15 @@
 // Audio the browser refuses isn't dropped: it waits, and the next tap
 // plays it (onBlockedChange lets the page say so). The visualiser's
 // analyser is only made inside a tap; until then audio plays without it.
+//
+// On an iPad or iPhone it is never made. There Safari started the context
+// suspended even inside the tap, played the routed element for 0.0 s
+// (the analyser's loudest sample: 0) and then marked the context
+// "interrupted" — the player's own reports from the user's iPad,
+// 2026-11-03. The bare element plays fine; the visualiser stays hidden.
+const APPLE_TOUCH = typeof navigator !== "undefined"
+  && (/iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
 
 type Queued = { blob: Blob; at: number };
 
@@ -34,25 +43,10 @@ const KEEP_BLOCKED_MS = 3 * 60_000;
 // Events that count as the user's own action for autoplay.
 const GESTURES = ["pointerup", "touchend", "click", "keydown"] as const;
 
-let silentUrl: string | null = null;
-/** 50 ms of silence, played inside a tap to unlock the audio element. */
-function silence(): string {
-  if (silentUrl) return silentUrl;
-  const n = 400;
-  const buf = new ArrayBuffer(44 + n);
-  const v = new DataView(buf);
-  const tag = (o: number, t: string) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
-  tag(0, "RIFF"); v.setUint32(4, 36 + n, true); tag(8, "WAVE");
-  tag(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
-  tag(36, "data"); v.setUint32(40, n, true);
-  new Uint8Array(buf, 44).fill(128);
-  silentUrl = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
-  return silentUrl;
-}
 
 import { loadTtsMuted, saveTtsMuted } from "./display-prefs";
 import * as wakeLock from "./wake-lock";
+import { silence } from "./silence";
 
 export class TtsPlayer {
   // Per-utterance chunk buffer (between onStart and onEnd).
@@ -260,7 +254,7 @@ export class TtsPlayer {
   /** The analyser for the visualiser. Only from unlock(), inside a tap, so
    * the context starts running; made once. */
   private ensureGraph(): void {
-    if (this.audioCtx || !this.audio) return;
+    if (APPLE_TOUCH || this.audioCtx || !this.audio) return;
     this.debug(`graph: made (element already played: ${this.unlocked})`);
     try {
       this.audioCtx = new AudioContext();

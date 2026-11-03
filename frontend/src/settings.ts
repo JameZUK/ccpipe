@@ -17,6 +17,7 @@ import { changeCredentials, logout as apiLogout, logoutEverywhere } from "./auth
 import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
 import { onUpdateChange, pendingUpdate } from "./update";
+import { silence } from "./silence";
 import { buildSessionsSection, buildStatsSection } from "./settings-sessions";
 import { deviceClass, isIPad, isMobileLayout, isStandalone, safeAreaInsets, titlebarArea } from "./mobile";
 import {
@@ -456,29 +457,46 @@ function buildVoiceSection(): HTMLElement {
   // Test button: plays a sample with the currently-selected voice
   // through the browser audio element (no Web Audio routing — simple
   // playback so it can't break if AudioContext quirks bite).
+  //
+  // Fetched and played from memory, not from the URL: Safari plays a media
+  // URL only from a server that answers byte-range requests, and the
+  // streamed sample doesn't — on the iPad that was "preview failed: The
+  // operation was aborted" (2026-11-03). The element is started inside the
+  // tap (a moment of silence) so Safari still lets it play after the fetch.
   let preview: HTMLAudioElement | null = null;
+  let previewUrl: string | null = null;
   const disposePreview = () => {
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
     if (!preview) return;
     preview.pause();
-    // L12: clear src so the in-flight fetch is cancelled and the
-    // element becomes eligible for GC even if a playback callback
-    // still holds a transient reference. Without this, closing the
-    // modal mid-preview kept the request + element alive until the
-    // network roundtrip completed.
+    // L12: clear src so the element becomes eligible for GC even if a
+    // playback callback still holds a transient reference.
     preview.src = "";
     preview = null;
   };
-  testBtn.addEventListener("click", () => {
+  testBtn.addEventListener("click", async () => {
     const voice = select.value;
     if (!voice) return;
     disposePreview();
+    const el = new Audio();
+    preview = el;
+    el.src = silence();
+    el.play().catch(() => {});
     const text = encodeURIComponent("Voice test, one two three.");
     const url = `/api/tts/preview?voice=${encodeURIComponent(voice)}&text=${text}`;
-    preview = new Audio(url);
-    preview.play().catch((err) => {
-      status.textContent = `preview failed: ${err.message ?? err}`;
+    try {
+      const res = await fetch(url, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const blob = await res.blob();
+      if (preview !== el) return;          // closed, or tested again
+      previewUrl = URL.createObjectURL(blob);
+      el.src = previewUrl;
+      await el.play();
+    } catch (err) {
+      if (preview !== el) return;
+      status.textContent = `preview failed: ${(err as Error).message ?? err}`;
       status.classList.add("modal__status--error");
-    });
+    }
   });
   // L12: hook the existing close-cleanup channel so a settings close
   // mid-preview tears the <audio> down rather than letting it run.

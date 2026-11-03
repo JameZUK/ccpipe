@@ -342,6 +342,8 @@ On an iPad or iPhone, Safari plays sound only after you've tapped the
 page, and again after the app has been in the background. Speech that
 arrives before then isn't lost. The speaker button pulses, a note says
 *Tap anywhere to hear Claude*, and your next tap or key press plays it.
+On those devices the small playback visualiser isn't shown, because
+routing the sound through it made Safari cut the audio off.
 
 **When Claude asks you something.** When Claude stops on a question
 (its multiple-choice dialog) or a permission prompt, ccpipe reads it out:

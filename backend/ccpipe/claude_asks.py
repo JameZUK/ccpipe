@@ -21,7 +21,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,10 @@ from . import tmux
 log = logging.getLogger(__name__)
 
 POLL_S = 1.0          # how often the session file is looked at (a stat)
+# While Claude waits, how often the screen is read for a new dialog: two
+# questions asked back to back leave the status at "waiting" throughout
+# (seen 2026-11-03), so the status alone misses the second.
+REREAD_S = 2.0
 PID_EVERY_S = 10.0    # how often Claude's pid is re-resolved (it can restart)
 # The status flips as the dialog is drawn: give the screen a moment, and look
 # again if the dialog isn't there yet.
@@ -42,6 +46,9 @@ class Ask:
     kind: str     # "question" | "permission"
     title: str    # for the notification: "Claude has a question"
     body: str     # the question and its options, or what needs permission
+    # Which dialog this is: the same while you move between the questions
+    # of one dialog, different for the next dialog.
+    key: str = field(default="", compare=False)
 
     @property
     def spoken(self) -> str:
@@ -127,7 +134,8 @@ def describe(lines: list[str], waiting_for: str | None) -> Ask:
             detail = next((ln for ln in block[1:]
                            if not ln.startswith("Tip:") and ln != question), "")
             body = _clip(f"{title}: {detail}." if title and detail else title)
-        return Ask("permission", "Claude needs your permission", body)
+        return Ask("permission", "Claude needs your permission", body,
+                   key=f"permission|{body}")
 
     labels: list[str] = []
     for ln in lines[first:]:
@@ -137,12 +145,17 @@ def describe(lines: list[str], waiting_for: str | None) -> Ask:
         label = _COLUMN_RE.split(m.group(2).strip())[0].strip()
         if label and not label.startswith(_BUILTIN):
             labels.append(_clip(label))
-    tabs = next((len(_TAB_RE.findall(ln)) for ln in block if _TAB_RE.search(ln)), 0)
+    tab_line = next((ln for ln in block if _TAB_RE.search(ln)), "")
+    tabs = len(_TAB_RE.findall(tab_line))
     title = f"Claude has {tabs} questions" if tabs > 1 else "Claude has a question"
     body = question
     if labels:
         body = f"{body} {_or_list(labels[:6])}".strip()
-    return Ask("question", title, body)
+    # Tab names without the answered/unanswered marks; with one question,
+    # the question itself too.
+    names = " ".join(re.sub(r"[☐☒✔✓←→]|\bSubmit\b", " ", tab_line).split())
+    return Ask("question", title, body,
+               key=f"question|{names}|{question if tabs <= 1 else ''}")
 
 
 # ─── Watching Claude's status ─────────────────────────────────────────────
@@ -193,14 +206,22 @@ async def _read_dialog(session: str, pid: int, state: dict[str, Any]) -> Ask | N
     return ask
 
 
+async def _read_now(session: str, state: dict[str, Any]) -> Ask | None:
+    """The dialog on screen right now (no waiting for it to settle)."""
+    out = await tmux._tmux_out("capture-pane", "-p", "-t", await _pane_of(session, state))
+    ask = describe([ln.rstrip() for ln in (out or "").split("\n")], state.get("waitingFor"))
+    return ask if ask.body else None
+
+
 async def watch(session: str, on_ask: Callable[[Ask], Awaitable[None]]) -> None:
-    """Call ``on_ask`` each time Claude in ``session`` starts waiting on you.
-    Runs until cancelled."""
+    """Call ``on_ask`` each time Claude in ``session`` starts waiting on you,
+    and for each new dialog while it waits. Runs until cancelled."""
     pid: int | None = None
     pid_at = float("-inf")
     was_waiting: bool | None = None      # None: not read yet
     last_since: Any = None
-    last_said = ""
+    last_key: str | None = None          # the dialog last reported (or seen)
+    read_at = float("-inf")
     while True:
         try:
             now = time.monotonic()
@@ -210,17 +231,27 @@ async def watch(session: str, on_ask: Callable[[Ask], Awaitable[None]]) -> None:
             state = await asyncio.to_thread(_read_state, pid) if pid else None
             waiting = bool(state) and state.get("status") == "waiting"
             since = state.get("statusUpdatedAt") if state else None
+            first = was_waiting is None
             # A new wait: from not waiting, or a fresh status stamp (a second
             # prompt right after the first, between two looks).
             fresh = waiting and (was_waiting is False
                                  or (was_waiting and since != last_since))
             was_waiting, last_since = waiting, since
             if not waiting:
-                last_said = ""
-            if fresh and pid and state:
-                ask = await _read_dialog(session, pid, state)
-                if ask is not None and ask.spoken != last_said:
-                    last_said = ask.spoken
+                last_key = None
+            elif pid and state:
+                ask: Ask | None = None
+                if fresh:
+                    ask = await _read_dialog(session, pid, state)
+                    read_at = time.monotonic()
+                elif first or time.monotonic() - read_at >= REREAD_S:
+                    ask = await _read_now(session, state)
+                    read_at = time.monotonic()
+                    if first and ask is not None:
+                        last_key = ask.key   # already up when you attached
+                        ask = None
+                if ask is not None and ask.key != last_key:
+                    last_key = ask.key
                     log.info("claude asks in %s: %s", session, ask.title)
                     await on_ask(ask)
         except asyncio.CancelledError:

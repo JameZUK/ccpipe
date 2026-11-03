@@ -203,3 +203,45 @@ async def test_a_stale_file_for_a_reused_pid_is_ignored(monkeypatch, tmp_path):
     fake = FakeClaude(monkeypatch, tmp_path)
     monkeypatch.setattr(claude_asks.tmux, "_proc_start_time", lambda p: "12345")
     assert await _run(fake, [{"status": "waiting", "statusUpdatedAt": 2}]) == []
+
+
+def _two_tab_screen(current: str, done: str = "☐") -> list[str]:
+    return [RULE, f"←  {done} Fruit  ☐ Season  ✔ Submit  →", "", current, "",
+            "❯ 1. Yes", "  2. No", "  3. Type something.", RULE, "  4. Chat about this"]
+
+
+async def _run_screens(fake, monkeypatch, screens):
+    """Claude keeps waiting (one status stamp) while the dialog changes."""
+    monkeypatch.setattr(claude_asks, "REREAD_S", 0.02)
+    asks: list[Ask] = []
+
+    async def on_ask(ask):
+        asks.append(ask)
+    task = asyncio.create_task(claude_asks.watch("work", on_ask))
+    try:
+        await asyncio.sleep(0.06)
+        fake.write(status="waiting", waitingFor="input needed", statusUpdatedAt=2)
+        for screen in screens:
+            fake.screen = screen
+            await asyncio.sleep(0.12)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    return asks
+
+
+async def test_back_to_back_dialogs_while_still_waiting(monkeypatch, tmp_path):
+    # Two questions asked at once: the status never leaves "waiting".
+    fake = FakeClaude(monkeypatch, tmp_path)
+    second = [ln.replace("Colour", "Size").replace("Which colour do you prefer, red or blue?",
+                                                  "Which size?") for ln in QUESTION_SCREEN]
+    asks = await _run_screens(fake, monkeypatch, [QUESTION_SCREEN, second])
+    assert [a.body.split("?")[0] for a in asks] == ["Which colour do you prefer, red or blue", "Which size"]
+
+
+async def test_moving_between_the_questions_of_one_dialog_is_not_new(monkeypatch, tmp_path):
+    fake = FakeClaude(monkeypatch, tmp_path)
+    asks = await _run_screens(fake, monkeypatch, [
+        _two_tab_screen("Apple?"), _two_tab_screen("Summer?", done="☒")])
+    assert [a.body.split("?")[0] for a in asks] == ["Apple"]
