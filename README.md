@@ -344,8 +344,7 @@ arrives before then isn't lost. The speaker button pulses, a note says
 *Tap anywhere to hear Claude*, and your next tap or key press plays it.
 On those devices the small playback visualiser isn't shown, because
 routing the sound through it made Safari cut the audio off. If voice
-stays silent, Settings → Voice → **Sound check** shows what the browser
-does with each way of playing (see [deployment](docs/deployment.md)).
+stays silent, see [deployment](docs/deployment.md).
 
 **When Claude asks you something.** When Claude stops on a question
 (its multiple-choice dialog) or a permission prompt, ccpipe reads it out:

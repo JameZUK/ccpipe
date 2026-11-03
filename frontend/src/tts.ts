@@ -124,12 +124,7 @@ export class TtsPlayer {
   private peak = -1;
   private peakTimer: number | null = null;
 
-  // Taps on the Settings sound check are its own (it tests playback).
-  private readonly onGesture = (e: Event) => {
-    const t = e.target as Element | null;
-    if (t && typeof t.closest === "function" && t.closest("[data-tts-own]")) return;
-    this.unlock();
-  };
+  private readonly onGesture = () => this.unlock();
 
   constructor(session?: string) {
     this.session = session;
@@ -327,10 +322,10 @@ export class TtsPlayer {
       this.debug(`played ${secs.toFixed(1)} s to t=${this.audio?.currentTime.toFixed(1) ?? "?"}, `
         + `peak ${this.peak < 0 ? "n/a (no graph)" : this.peak}, context ${this.audioCtx?.state ?? "none"}`);
     }
-    if (this.playingUrl) {
-      URL.revokeObjectURL(this.playingUrl);
-      this.playingUrl = null;
-    }
+    // The clip's URL is NOT revoked here: the element may still be loading
+    // it (a refused play that will be retried), and a URL revoked mid-load
+    // is "media error 4". It goes when the next clip replaces it, or on
+    // dispose().
     void this._releaseWakeLock();
     try { this.onPlaybackEnd?.(); } catch (e) { console.warn(e); }
   }
@@ -392,9 +387,11 @@ export class TtsPlayer {
                         settle?: { resolve: () => void; reject: (e: unknown) => void }): void {
     const audio = this.audio;
     if (!audio) return;
-    if (this.playingUrl) URL.revokeObjectURL(this.playingUrl);
+    // New source first, then let the old URL go (the element has dropped it).
+    const old = this.playingUrl;
     this.playingUrl = URL.createObjectURL(item.blob);
     audio.src = this.playingUrl;
+    if (old) URL.revokeObjectURL(old);
     // Acquire BEFORE play() so the screen doesn't dim during a long
     // sentence; release on every failure / end path below.
     void this._acquireWakeLock();

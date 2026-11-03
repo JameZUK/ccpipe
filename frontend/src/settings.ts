@@ -122,8 +122,6 @@ export interface SettingsOpts {
    * (on Safari only one element plays at a time). Absent on the landing
    * page, where there's no player. */
   playSample?: (blob: Blob) => Promise<void>;
-  /** Send a line to the server log (the sound check's results). */
-  logSound?: (msg: string) => void;
 }
 
 let activeOverlay: HTMLDivElement | null = null;
@@ -167,7 +165,7 @@ export function openSettings(opts: SettingsOpts): void {
   const voicePanel = document.createElement("div");
   voicePanel.className = "modal__panel";
   voicePanel.dataset.tab = "voice";
-  voicePanel.append(buildVoiceSection(opts.playSample, opts.logSound), buildVoiceInputSection(opts));
+  voicePanel.append(buildVoiceSection(opts.playSample), buildVoiceInputSection(opts));
 
   const accountPanel = document.createElement("div");
   accountPanel.className = "modal__panel";
@@ -324,116 +322,7 @@ function buildTabs(initial: TabId, onChange: (next: TabId) => void): HTMLElement
 
 // ─── Voice section ──────────────────────────────────────────────────────
 
-/** Sound check: plays the voice sample four ways and shows which worked.
- * Safari on the iPad aborted every play() (2026-11-03) and the cause could
- * only be found on the device. 1: an <audio> element started inside the
- * tap. 2: Web Audio, its context made and resumed inside the tap and the
- * sample decoded and started from a buffer. 3 and 4: the same two again
- * seconds later, outside the tap. The session's player ignores taps on
- * this button (data-tts-own), so it can't interfere. */
-function buildSoundCheck(voice: () => string, logSound?: (msg: string) => void): HTMLElement {
-  const wrap = document.createElement("div");
-  wrap.className = "modal__rows";
-  const row = document.createElement("div");
-  row.className = "row";
-  const label = document.createElement("span");
-  label.className = "row__label";
-  label.textContent = "Sound check";
-  const hint = document.createElement("span");
-  hint.className = "row__hint";
-  hint.textContent = "plays the sample up to four ways; for when voice is silent";
-  label.append(" ", hint);
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "btn btn--ghost";
-  btn.dataset.ttsOwn = "1";
-  btn.textContent = "prepare";
-  row.append(label, btn);
-  const out = document.createElement("pre");
-  out.className = "modal__soundcheck";
-  out.hidden = true;
-  wrap.append(row, out);
-
-  let sample: ArrayBuffer | null = null;
-  const lines: string[] = [];
-  const note = (m: string) => {
-    lines.push(m);
-    out.hidden = false;
-    out.textContent = lines.join("\n");
-    try { logSound?.(`sound check: ${m}`); } catch {}
-  };
-  const errText = (e: unknown) => {
-    const d = e as DOMException;
-    return `${d?.name ?? "error"}: ${d?.message ?? e}`;
-  };
-
-  btn.addEventListener("click", async () => {
-    if (!sample) {
-      btn.disabled = true;
-      btn.textContent = "fetching…";
-      try {
-        const res = await fetch(`/api/tts/preview?voice=${encodeURIComponent(voice())}`
-          + `&text=${encodeURIComponent("Voice test, one two three.")}`, { credentials: "same-origin" });
-        if (!res.ok) throw new Error(`status ${res.status}`);
-        sample = await res.arrayBuffer();
-        btn.textContent = "run";
-      } catch (e) {
-        btn.textContent = "prepare";
-        note(`fetch failed: ${errText(e)}`);
-      } finally {
-        btn.disabled = false;
-      }
-      return;
-    }
-    // Everything up to the first await runs inside the tap.
-    lines.length = 0;
-    note(`run: ${navigator.userAgent.slice(0, 90)}`);
-    const data = sample;
-    const url = URL.createObjectURL(new Blob([data], { type: "audio/mpeg" }));
-    const el = new Audio(url);
-    el.addEventListener("error", () => note(`element error ${el.error?.code ?? "?"} ${el.error?.message ?? ""}`));
-    el.addEventListener("playing", () => note("element: playing"));
-    el.play().then(() => note("1 element, in the tap: play() ok"), (e) => note(`1 element, in the tap: ${errText(e)}`));
-    const AC = window.AudioContext
-      ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    const ctx = AC ? new AC() : null;
-    if (ctx) {
-      note(`2 web audio: context made ${ctx.state}`);
-      ctx.resume().then(() => note(`2 web audio: resumed, ${ctx.state}`), (e) => note(`2 web audio resume: ${errText(e)}`));
-    }
-    const playBuffer = async (what: string) => {
-      if (!ctx) { note(`${what}: no Web Audio`); return; }
-      try {
-        const buf = await ctx.decodeAudioData(data.slice(0));
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        src.start();
-        note(`${what}: started, context ${ctx.state}`);
-      } catch (e) {
-        note(`${what}: ${errText(e)}`);
-      }
-    };
-    btn.disabled = true;
-    window.setTimeout(() => void playBuffer("2 web audio, from the tap"), 2600);
-    window.setTimeout(() => {
-      el.currentTime = 0;
-      el.play().then(() => note("3 element, 5 s later: play() ok"), (e) => note(`3 element, 5 s later: ${errText(e)}`));
-    }, 5200);
-    window.setTimeout(() => void playBuffer("4 web audio, 8 s later"), 7800);
-    window.setTimeout(() => {
-      void ctx?.close();
-      el.pause();
-      URL.revokeObjectURL(url);
-      note("done");
-      btn.disabled = false;
-    }, 10500);
-  });
-  return wrap;
-}
-
-function buildVoiceSection(playSample?: (blob: Blob) => Promise<void>,
-                           logSound?: (msg: string) => void): HTMLElement {
+function buildVoiceSection(playSample?: (blob: Blob) => Promise<void>): HTMLElement {
   const sec = document.createElement("section");
   sec.className = "modal__section";
   sec.innerHTML = `
@@ -484,7 +373,6 @@ function buildVoiceSection(playSample?: (blob: Blob) => Promise<void>,
   const testBtn = sec.querySelector<HTMLButtonElement>("[data-role=test]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
   const status = sec.querySelector<HTMLElement>("[data-role=voice-status]")!;
-  sec.append(buildSoundCheck(() => select.value, logSound));
 
   // Notification toggle: pure client-side preference, so wire it
   // independently of the Save voice button. Requesting permission must
