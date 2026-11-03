@@ -232,6 +232,29 @@ inserts the one you pick at the cursor. Saved prompts are shared by every
 session and every device. On desktop, keystrokes still go straight to the
 terminal until you click into the box.
 
+**Dictation.** Tap the mic and talk; tap it again, or just stop
+talking, to send. A waveform shows it's hearing you. The audio goes to Claude Code's own `/voice`
+through the software mic, and Claude transcribes it into the prompt.
+ccpipe starts and stops Claude's recording itself and checks Claude's
+screen each time, so the two stay in step:
+
+- **Start again straight away** and both recordings go through. If
+  Claude is still transcribing the last one, the mic waits for it
+  (*Waiting for Claude to finish the last recording…*).
+- **Claude recording on its own** (you pressed Alt+K in the terminal,
+  say) shows *Claude is listening · tap to talk*; tap it and talk into
+  that recording.
+- **One device at a time:** while one device dictates, the mic on
+  another says it's in use.
+- **If the mic can't start,** a message says why: access refused, no
+  microphone, or *tap the mic to try again*.
+
+On Firefox for Android, voice processing (echo cancellation, noise
+suppression, auto gain) puts the phone into call mode for each
+recording, which looks to be why the mic occasionally failed to start
+there. It's on by default, because Claude hears you better with it; a
+switch in Settings → Voice turns it off on one device alone.
+
 **Phones and tablets.** Installed to the home screen, ccpipe runs full
 screen:
 
@@ -319,7 +342,7 @@ the last three builds.
 |---|---|
 | **Display** | Text size and spacing; the terminal font (per device); the cursor's style, colour and blink; the WebGL renderer switch; and *status & graphs*. Applies as you change it. |
 | **Sessions** | How many sessions start at boot, and the idle stop times (above). |
-| **Voice** | Text-to-speech: voice, speed, what to read aloud, and a notification when the app is in the background. Voice input: when dictation stops and is sent. |
+| **Voice** | Text-to-speech: voice, speed, what to read aloud, and a notification when the app is in the background. Voice input: when dictation stops and is sent, and voice processing on this device. |
 | **Account** | Change the username or password, sign out, sign out everywhere, set up two-factor (TOTP). |
 | **Debug** | A diagnostic snapshot (Ctrl+Shift+D) for terminal display bugs. |
 
@@ -482,8 +505,9 @@ proxy host.
 ## More
 
 - [`docs/configuration.md`](docs/configuration.md) — env-var reference,
-  voice setup, voice-input timing knobs, the session lifecycle (start at
-  boot, idle stop, resume), system status, where state lives.
+  voice setup, voice-input settings and dictation logs, the session
+  lifecycle (start at boot, idle stop, resume), system status, where
+  state lives.
 - [`docs/deployment.md`](docs/deployment.md) — reverse proxy, TLS, the
   systemd drop-in, troubleshooting.
 - [`docs/development.md`](docs/development.md) — dev workflow, layout,

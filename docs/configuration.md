@@ -147,11 +147,13 @@ backend then waits for the in-flight audio to drain through Pulse and
 adds a configurable safety pad before writing the release keystroke
 itself.
 
-Four knobs in Settings → Voice → "voice input":
+Five settings in Settings → Voice → "voice input":
 
 - **Auto-stop on silence** — when on, the client-side VAD ends the
   recording after sustained silence. When off, the mic is strictly
-  tap-to-stop.
+  tap-to-stop. (Claude Code also ends a recording by itself after
+  15 s without new words, and caps one at 2 minutes; the mic button
+  doesn't follow that yet, so it shows recording until you tap it.)
 - **Silence before stop** (200-15000 ms, default 2500) — how long
   silence must run before the VAD trips. Only matters when auto-stop is
   on.
@@ -162,9 +164,47 @@ Four knobs in Settings → Voice → "voice input":
   bump it 500 ms at a time.
 - **Max recording length** (5-600 s, default 60) — safety cap. The mic
   force-stops after this many seconds even with continuous voice.
+- **Voice processing on this device** (default on) — echo
+  cancellation, noise suppression and auto gain on the browser's mic.
+  On Firefox for Android any of them makes Firefox treat the mic as a
+  phone call, so Android switches into call mode for each recording
+  and back after it; a start that races the switch can leave the mic
+  silent (`MicBlocked` below). Off avoids call mode, but without auto
+  gain Claude may miss quiet speech. Stored in the browser, so it
+  applies to that device only, from its next recording.
 
-Settings persist in `~/.local/state/ccpipe/config.json` under the `mic`
-key.
+The first four persist in `~/.local/state/ccpipe/config.json` under the
+`mic` key.
+
+### How ccpipe drives `/voice`
+
+ccpipe runs `/voice` in tap mode and presses its key (Alt+K) on the
+server, never blind. Claude ignores the key while it's transcribing,
+and while idle with text in its prompt box, so every press is checked
+against Claude's footer: **REC · tap to send** while recording,
+**processing…** while transcribing, nothing when idle.
+
+- **Start:** wait out *processing…*, press only if Claude isn't
+  already recording, then wait for *tap to send* before the browser
+  streams any audio. If Claude won't start, the mic says why.
+- **Stop:** after the drain and the submit pad (above), press only if
+  Claude is still recording.
+- After each of its own presses, ccpipe waits (up to 1 s) for Claude
+  to redraw before trusting the screen again. Without that, a start
+  right after a stop read the old **REC** as "already recording" and
+  the new recording was lost.
+
+### Dictation in the journal
+
+`journalctl --user -u ccpipe | grep -E 'mic_|ptt'` shows each
+recording:
+
+| Line | Meaning |
+|---|---|
+| `mic_start: armed` | Claude started recording. `already recording` means it was recording already; anything else is the reason it didn't start. |
+| `mic_stop: bytes=… drops=… level speech=… floor=… peak=… dBFS` | The recording: bytes sent (32000 per second), audio lost because the pipe was full, and how loud it was. *speech* is the loudest tenth of the recording, *floor* the quietest. Speech around -15 dBFS is healthy. |
+| `ptt-release skipped: Claude isn't recording` | Claude had already stopped by itself, so no stop key was sent. |
+| `mic_error from client: <name>: …` | The browser's mic failed. `NotAllowedError`: access refused. `MicBlocked`: the browser's audio engine never started. `MicSlowStart`: it started, but took over 0.3 s. These also give the time since the last recording stopped, and whether voice processing was on. |
 
 ## Session lifecycle
 
