@@ -59,11 +59,11 @@ Desktop:
 <td align="center"><sub>Sessions — start at boot, idle stop</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/screenshots/Desktop-Voice-Settings.png" width="380" alt="Voice and voice-input settings"></td>
+<td align="center"><img src="docs/screenshots/Desktop-Voice-Settings.png" width="380" alt="Voice settings: voice, speed, what to read aloud, read progress notes too, background notification; voice input: auto-stop, timings and voice processing on this device"></td>
 <td align="center"><img src="docs/screenshots/Desktop-Account-Settings.png" width="380" alt="Account settings: change password or username, sign out, sign out everywhere, and two-factor setup"></td>
 </tr>
 <tr>
-<td align="center"><sub>Voice (TTS) + voice-input timings</sub></td>
+<td align="center"><sub>Voice (TTS): what to read aloud + voice input</sub></td>
 <td align="center"><sub>Account, sign out everywhere, two-factor (TOTP)</sub></td>
 </tr>
 </table>
