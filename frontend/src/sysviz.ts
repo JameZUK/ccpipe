@@ -17,7 +17,47 @@ export interface SysSnapshot {
   } | null;
   disk: { path: string; total?: number; used?: number; free?: number } | null;
   history: { cpu: (number | null)[]; mem: (number | null)[] };
-  session?: { name: string; cpu: number | null; mem: number | null; cwd: string | null; disk: number | null };
+  session?: {
+    name: string; cpu: number | null; mem: number | null; cwd: string | null; disk: number | null;
+    /** The context window's fill, from the session's last status-line reading. */
+    context?: { percent: number; window: number | null; model: string | null; at: number } | null;
+  };
+  /** The Claude subscription's usage limits (backend plan_usage.py); null when off. */
+  plan?: PlanUsage | null;
+}
+
+/** One usage meter, as the server reports it (weekly all models, weekly per
+ * model, the 5-hour session window on plans that have one). */
+export interface PlanMeter {
+  kind: string;
+  group: string;
+  label: string;
+  percent: number;
+  /** Unix seconds. */
+  resets_at: number | null;
+  /** The window's length in seconds, for the pace marker; null if unknown. */
+  window: number | null;
+  severity: string;
+  /** The server's pick for a single-number readout. */
+  active: boolean;
+  source: "usage" | "statusline";
+  at: number;
+  /** Its reset time has passed since the reading. */
+  reset?: boolean;
+}
+
+export interface PlanUsage {
+  meters: PlanMeter[];
+  /** Usage credits; amounts in minor units (pence, cents). */
+  credits: { enabled: boolean; limit: number | null; used: number | null; pct: number | null;
+    currency: string | null } | null;
+  at: number | null;
+  usage_at: number | null;
+  statusline_at: number | null;
+  checking: boolean;
+  error: string | null;
+  /** The server's clock, for the times above. */
+  now: number;
 }
 
 // ─── preferences (per device) ─────────────────────────────────────────────
@@ -29,12 +69,14 @@ export interface StatsPrefs {
   sessionBar: boolean;
   /** RAM / disk per session on the landing page. */
   perSession: boolean;
+  /** Claude plan usage in the top bar, its pop-up and the landing page. */
+  plan: boolean;
   /** Seconds between refreshes. */
   interval: number;
 }
 const PREFS_KEY = "ccpipe.stats";
 export const STATS_INTERVALS = [2, 5, 10, 30] as const;
-const DEFAULT_PREFS: StatsPrefs = { landing: true, sessionBar: true, perSession: true, interval: 5 };
+const DEFAULT_PREFS: StatsPrefs = { landing: true, sessionBar: true, perSession: true, plan: true, interval: 5 };
 
 export function loadStatsPrefs(): StatsPrefs {
   try {
@@ -43,6 +85,7 @@ export function loadStatsPrefs(): StatsPrefs {
       landing: typeof raw.landing === "boolean" ? raw.landing : DEFAULT_PREFS.landing,
       sessionBar: typeof raw.sessionBar === "boolean" ? raw.sessionBar : DEFAULT_PREFS.sessionBar,
       perSession: typeof raw.perSession === "boolean" ? raw.perSession : DEFAULT_PREFS.perSession,
+      plan: typeof raw.plan === "boolean" ? raw.plan : DEFAULT_PREFS.plan,
       interval: (STATS_INTERVALS as readonly number[]).includes(raw.interval as number)
         ? (raw.interval as number) : DEFAULT_PREFS.interval,
     };
@@ -80,6 +123,80 @@ export const fmtPct = (p: number | null | undefined): string =>
 export function level(pct: number | null | undefined): "ok" | "warn" | "hot" {
   if (pct === null || pct === undefined) return "ok";
   return pct >= 90 ? "hot" : pct >= 70 ? "warn" : "ok";
+}
+
+// ─── Claude plan usage ────────────────────────────────────────────────────
+
+/** The meter to show as one number: the server's pick, else the first. */
+export function planHeadline(p: PlanUsage | null | undefined): PlanMeter | null {
+  if (!p?.meters.length) return null;
+  return p.meters.find((m) => m.active) ?? p.meters[0];
+}
+
+const LEVEL_RANK = { ok: 0, warn: 1, hot: 2 } as const;
+
+/** The meter's colour: its percentage's level, or the server's severity
+ * when that's worse. */
+export function planLevel(m: PlanMeter): "ok" | "warn" | "hot" {
+  const own = level(m.percent);
+  const sev = m.severity === "critical" ? "hot" : m.severity === "warning" ? "warn" : "ok";
+  return LEVEL_RANK[sev] > LEVEL_RANK[own] ? sev : own;
+}
+
+/** How much of the meter's window has gone by (0–100), or null. Usage
+ * ahead of it is on course to run out before the reset. */
+export function planPace(m: PlanMeter, now: number): number | null {
+  if (!m.window || !m.resets_at || m.reset) return null;
+  const left = m.resets_at - now;
+  if (left <= 0 || left > m.window) return null;
+  return (1 - left / m.window) * 100;
+}
+
+const DAY_FMT = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+const TIME_FMT = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+
+/** "16:40", "tomorrow 06:00", "Fri 06:00" — local time. */
+export function fmtWhen(at: number, now: number): string {
+  const d = new Date(at * 1000);
+  const today = new Date(now * 1000);
+  const days = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date(today).setHours(0, 0, 0, 0)) / 86_400_000);
+  const time = TIME_FMT.format(d);
+  if (days === 0) return time;
+  if (days === 1) return `tomorrow ${time}`;
+  return `${DAY_FMT.format(d)} ${time}`;
+}
+
+/** "2 d 14 h", "3 h 20 m", "12 m". */
+export function fmtSpan(seconds: number): string {
+  const m = Math.max(0, Math.round(seconds / 60));
+  if (m < 60) return `${m} m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return m % 60 && h < 10 ? `${h} h ${m % 60} m` : `${h} h`;
+  return `${Math.floor(h / 24)} d ${h % 24} h`;
+}
+
+/** "just now", "4 min ago", "2 h ago". */
+export function fmtAgo(seconds: number): string {
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 48 * 3600) return `${Math.round(seconds / 3600)} h ago`;
+  return `${Math.round(seconds / 86400)} days ago`;
+}
+
+export function fmtMoney(minor: number | null, currency: string | null): string {
+  if (minor === null) return "—";
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(minor / 100);
+  } catch {
+    return `${(minor / 100).toFixed(2)} ${currency ?? ""}`.trim();
+  }
+}
+
+/** When the meter resets: "resets Fri 06:00 · in 2 d 14 h". */
+export function planResets(m: PlanMeter, now: number): string {
+  if (m.reset) return "reset since the last reading";
+  if (!m.resets_at) return "";
+  return `resets ${fmtWhen(m.resets_at, now)} · in ${fmtSpan(m.resets_at - now)}`;
 }
 
 // ─── visuals ──────────────────────────────────────────────────────────────
@@ -128,9 +245,11 @@ export function sparkline(values: (number | null)[], cls = "", capacity = 120): 
   return el;
 }
 
-/** A ring filled to pct. */
-export function ring(pct: number | null, cls = ""): SVGSVGElement {
-  const el = svg("svg", { class: `sv-ring sv--${level(pct)} ${cls}`.trim(), viewBox: "0 0 36 36" });
+/** A ring filled to pct, with a tick at `pace` (0–100) when given. Its
+ * colour is `lvl`, or pct's level. */
+export function ring(pct: number | null, cls = "", pace: number | null = null,
+  lvl: "ok" | "warn" | "hot" = level(pct)): SVGSVGElement {
+  const el = svg("svg", { class: `sv-ring sv--${lvl} ${cls}`.trim(), viewBox: "0 0 36 36" });
   el.setAttribute("aria-hidden", "true");
   const r = 15.5;
   const c = 2 * Math.PI * r;
@@ -138,19 +257,56 @@ export function ring(pct: number | null, cls = ""): SVGSVGElement {
   const arc = svg("circle", { class: "sv-ring__fill", cx: "18", cy: "18", r: String(r),
     "stroke-dasharray": `${((Math.max(0, Math.min(100, pct ?? 0)) / 100) * c).toFixed(2)} ${c.toFixed(2)}` });
   el.append(arc);
+  if (pace !== null) {
+    const a = (Math.max(0, Math.min(100, pace)) / 100) * 2 * Math.PI;
+    const at = (k: number): [string, string] => [(18 + k * Math.cos(a)).toFixed(2), (18 + k * Math.sin(a)).toFixed(2)];
+    const [x1, y1] = at(r - 3.6);
+    const [x2, y2] = at(r + 3.6);
+    el.append(svg("line", { class: "sv-ring__pace", x1, y1, x2, y2 }));
+  }
   return el;
 }
 
-/** A horizontal bar filled to pct (0–100). */
-export function bar(pct: number | null, cls = ""): HTMLElement {
+/** A horizontal bar filled to pct (0–100), coloured `lvl` (default: pct's level). */
+export function bar(pct: number | null, cls = "", lvl: "ok" | "warn" | "hot" = level(pct)): HTMLElement {
   const el = document.createElement("span");
-  el.className = `sv-bar sv--${level(pct)} ${cls}`.trim();
+  el.className = `sv-bar sv--${lvl} ${cls}`.trim();
   el.setAttribute("aria-hidden", "true");
   const fill = document.createElement("span");
   fill.className = "sv-bar__fill";
   fill.style.width = `${Math.max(0, Math.min(100, pct ?? 0))}%`;
   el.append(fill);
   return el;
+}
+
+/** A plan meter's bar, with a tick where the window's elapsed share is:
+ * a fill past the tick is using the plan faster than an even pace. */
+export function paceBar(m: PlanMeter, now: number, cls = ""): HTMLElement {
+  const wrap = document.createElement("span");
+  wrap.className = `sv-pbar ${cls}`.trim();
+  wrap.append(bar(m.percent, "", planLevel(m)));
+  const pace = planPace(m, now);
+  if (pace !== null) {
+    const tick = document.createElement("span");
+    tick.className = "sv-pbar__pace";
+    tick.style.left = `${pace.toFixed(1)}%`;
+    wrap.append(tick);
+  }
+  wrap.setAttribute("aria-hidden", "true");
+  return wrap;
+}
+
+/** Ask the server to check the plan figures again (the pop-up opened).
+ * Resolves to its answer, or null. */
+export async function refreshPlan(): Promise<{ checking: boolean; plan: PlanUsage | null } | null> {
+  try {
+    const res = await fetch("/api/plan-usage/refresh", {
+      method: "POST", credentials: "same-origin", headers: { "X-Requested-By": "ccpipe" },
+    });
+    return res.ok ? await res.json() as { checking: boolean; plan: PlanUsage | null } : null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── poller ───────────────────────────────────────────────────────────────

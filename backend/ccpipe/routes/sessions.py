@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import config as app_config
-from .. import drafts, lifecycle, session_meta, sticky, sysstats, tmux, tmux_ui
+from .. import drafts, lifecycle, plan_usage, session_meta, sticky, sysstats, tmux, tmux_ui
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..paths import claude_project_dir
@@ -268,9 +268,9 @@ async def create_session(body: CreateSessionBody) -> SessionInfo:
         # shlex.quote is belt-and-braces: the UUID regex already bounds
         # the value to [0-9a-fA-F-], but libtmux passes window_command
         # to a shell and we want zero ambiguity.
-        claude_cmd = f"claude --resume {shlex.quote(body.resumeSessionId)}"
+        claude_cmd = plan_usage.claude_command(f"--resume {shlex.quote(body.resumeSessionId)}")
     else:
-        claude_cmd = "claude"
+        claude_cmd = plan_usage.claude_command()
 
     # Wrap in $SHELL -i so the tmux session survives claude exit and
     # drops to a prompt in the original cwd. Without this the only-pane

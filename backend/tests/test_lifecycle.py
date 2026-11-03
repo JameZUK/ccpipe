@@ -273,12 +273,15 @@ def test_tick_decides_nothing_when_tmux_does_not_answer(state, monkeypatch):
 def test_resume_command_prefers_the_recorded_conversation(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     cid = "0f0e0d0c-0b0a-4908-8706-050403020100"
-    assert "claude --continue" in lifecycle.resume_command("/p/x", cid)   # no transcript
+    # (Claude starts with the status-line recorder's --settings first:
+    # plan_usage.claude_command.)
+    assert lifecycle.resume_command("/p/x", cid).startswith("claude ")
+    assert " --continue;" in lifecycle.resume_command("/p/x", cid)   # no transcript
     d = tmp_path / ".claude" / "projects" / "-p-x"
     d.mkdir(parents=True)
     (d / f"{cid}.jsonl").write_text("{}\n")
-    assert f"claude --resume {cid}" in lifecycle.resume_command("/p/x", cid)
-    assert "claude --continue" in lifecycle.resume_command("/p/x", "not-a-uuid")
+    assert f" --resume {cid};" in lifecycle.resume_command("/p/x", cid)
+    assert " --continue;" in lifecycle.resume_command("/p/x", "not-a-uuid")
 
 
 def test_transcript_lookup_uses_claude_codes_directory_encoding(tmp_path, monkeypatch):
@@ -290,7 +293,7 @@ def test_transcript_lookup_uses_claude_codes_directory_encoding(tmp_path, monkey
     d = tmp_path / ".claude" / "projects" / "-p-my-site-x-y"
     d.mkdir(parents=True)
     (d / f"{cid}.jsonl").write_text("{}\n")
-    assert f"claude --resume {cid}" in lifecycle.resume_command("/p/my.site_x y", cid)
+    assert f" --resume {cid};" in lifecycle.resume_command("/p/my.site_x y", cid)
 
 
 def test_a_session_that_never_ran_claude_resumes_as_a_shell(state, monkeypatch):
@@ -307,7 +310,8 @@ def test_a_session_that_never_ran_claude_resumes_as_a_shell(state, monkeypatch):
     session_meta.note_details("ssh", "/p/ssh", None, has_claude=False)
     r = lifecycle.resumable("ssh")
     assert r.shell is False and r.claude == cid
-    assert "claude --continue; exec '/opt/weird shell/zsh' -i" == lifecycle.resume_command(r.cwd, None)
+    cmd = lifecycle.resume_command(r.cwd, None)
+    assert cmd.startswith("claude ") and cmd.endswith(" --continue; exec '/opt/weird shell/zsh' -i")
 
 
 @pytest.fixture

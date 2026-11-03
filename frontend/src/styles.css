@@ -3979,6 +3979,10 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
 }
 .sp-card__viz { min-width: 0; height: 28px; }
 .sp-card--disk .sp-card__viz { justify-self: end; width: 28px; }
+.sp--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.sp-card[hidden] { display: none; }
+/* The pace tick: how much of the plan window has gone. */
+.sv-ring__pace { stroke: var(--fg-dim); stroke-width: 1.4; stroke-linecap: round; }
 @media (max-width: 600px) {
   .sp-card { gap: var(--s-2); padding: var(--s-2); }
   .sp-card__text { flex-direction: column; align-items: flex-start; }
@@ -4027,6 +4031,25 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
   color: var(--accent-soft);
 }
 .sysmeter__proj:empty { display: none; }
+.sysmeter__plan[hidden] { display: none; }
+.sysmeter__v[data-level="warn"], .sysmeter-pop__v[data-level="warn"] { color: var(--level-warn); }
+.sysmeter__v[data-level="hot"], .sysmeter-pop__v[data-level="hot"] { color: var(--critical); }
+.sysmeter__col[hidden] { display: none; }
+/* The plan's bar in the bar meter: set apart from cpu / mem / disk. */
+.sysmeter__col--plan { margin-left: 2px; }
+/* A plan meter's bar with its pace tick (sysviz.paceBar). */
+.sv-pbar { position: relative; display: inline-flex; width: 100%; }
+.sv-pbar .sv-bar { width: 100%; }
+.sv-pbar__pace {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--fg-dim);
+  border-radius: 1px;
+  pointer-events: none;
+}
 .sysmeter__compact { display: none; align-items: flex-end; gap: 2px; height: 0.95rem; }
 .sysmeter__col {
   position: relative;
@@ -4068,8 +4091,10 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
   animation: frame-in var(--dur-med) var(--ease-out);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
-/* Key for the three-bar meter, top of the pop-up (compact layout only). */
+/* Key for the bar meter, top of the pop-up (compact layout only). */
 .sysmeter-key {
   display: flex;
   align-items: center;
@@ -4113,6 +4138,12 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
   white-space: nowrap;
 }
 .sysmeter-pop__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); }
+.sysmeter-pop__grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.sysmeter-pop__plan { display: flex; flex-direction: column; gap: var(--s-3); border-top: 1px solid var(--border); padding-top: var(--s-3); }
+.sysmeter-pop__plan > .sysmeter-pop__title { margin-bottom: calc(-1 * var(--s-1)); }
+.sysmeter-pop__pbar { margin-top: var(--s-2); }
+.sysmeter-pop__pbar .sv-bar { height: 6px; }
+.sysmeter-pop__credits, .sysmeter-pop__asof { margin-top: 0; }
 .sysmeter-pop__cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sysmeter-pop__cell .sysmeter-pop__v { font-size: var(--t-sm); }
 .sysmeter-pop__cwd { word-break: break-all; margin-top: var(--s-2); }

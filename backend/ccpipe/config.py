@@ -122,11 +122,46 @@ class SessionsConfig:
 
 
 @dataclass
+class PlanUsageConfig:
+    """The Claude subscription readout (plan_usage.py).
+
+      - ``enabled``: show it, and check ``/usage`` in the background.
+      - ``statusline``: start ccpipe's sessions with the status-line
+        recorder (``claude --settings``), for figures after every reply and
+        each session's context fill. It runs your own status-line command,
+        so Claude's footer is unchanged; with no status line of your own,
+        Claude draws no status row but, as with any status line, hides
+        most of its footer's key hints. Applies to sessions started after
+        the change.
+      - ``poll_minutes``: how often to check ``/usage`` while someone has
+        ccpipe open (5 .. 240). Its endpoint is rate limited; don't go low.
+    """
+    enabled: bool = True
+    statusline: bool = True
+    poll_minutes: int = 15
+
+    @classmethod
+    def from_dict(cls, d: Any) -> "PlanUsageConfig":
+        c = cls()
+        if not isinstance(d, dict):
+            return c
+        for k in ("enabled", "statusline"):
+            if isinstance(d.get(k), bool):
+                setattr(c, k, d[k])
+        try:
+            c.poll_minutes = max(5, min(240, int(d.get("poll_minutes", c.poll_minutes))))
+        except (TypeError, ValueError):
+            pass
+        return c
+
+
+@dataclass
 class AppConfig:
     tts: TtsConfig = field(default_factory=TtsConfig)
     fs: FsConfig = field(default_factory=FsConfig)
     mic: MicConfig = field(default_factory=MicConfig)
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
+    plan_usage: PlanUsageConfig = field(default_factory=PlanUsageConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +169,7 @@ class AppConfig:
             "fs": asdict(self.fs),
             "mic": asdict(self.mic),
             "sessions": asdict(self.sessions),
+            "plan_usage": asdict(self.plan_usage),
         }
 
     @classmethod
@@ -186,7 +222,8 @@ class AppConfig:
         except (TypeError, ValueError):
             pass
         sessions = SessionsConfig.from_dict(data.get("sessions") if isinstance(data, dict) else None)
-        return cls(tts=tts, fs=fs, mic=mic, sessions=sessions)
+        plan_usage = PlanUsageConfig.from_dict(data.get("plan_usage") if isinstance(data, dict) else None)
+        return cls(tts=tts, fs=fs, mic=mic, sessions=sessions, plan_usage=plan_usage)
 
 
 _state_dir = state_dir

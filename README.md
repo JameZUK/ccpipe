@@ -72,7 +72,9 @@ Desktop:
 stopped. The header shows whether the server is online, the round-trip
 time, and a summary such as *8 running · 1 working · 1 with a task ·
 3 stopped*. Below it are the machine's CPU and memory, each with ten
-minutes of history, and its free disk space. Each session shows:
+minutes of history, its free disk space, and how much of your Claude
+plan's usage limits you've used (see *Claude plan usage* below). Each
+session shows:
 
 - what Claude is working on: the task Claude Code puts in the pane
   title;
@@ -157,6 +159,38 @@ A part that's switched off stops asking the server too.
 <p align="center">
   <img src="docs/screenshots/Desktop-Status.png" width="620" alt="A session's top bar on a desktop: the inline CPU graph, memory and disk bars and project size, with the status pop-up open below showing CPU and memory graphs, disk use and this session's memory, CPU and project size">
 </p>
+
+**Claude plan usage.** The top bar, its pop-up and the landing page also
+show how much of your Claude subscription's usage limits you've used:
+
+- **The top bar and the landing page** show one figure: the meter
+  Anthropic picks for a single readout, usually the week across all
+  models. On a phone it's a fourth bar in the meter.
+- **The pop-up** lists every meter Anthropic reports for your plan. That
+  can be the weekly limit for all models, a weekly limit for one model,
+  or the 5-hour window on plans that have one. Each shows when it resets.
+  A tick on its bar marks how much of its window has gone, so a bar that
+  reaches past its tick is using the plan faster than an even pace. Below
+  them are your usage credits and how old the figures are.
+- **This session** in the pop-up adds how full its context window is.
+
+The figures come from Claude Code itself, so ccpipe never touches your
+login:
+
+- **After each reply.** ccpipe starts Claude with a status-line command
+  (`claude --settings`) that saves what Claude gives status lines, then
+  runs your own status-line command. Claude's footer doesn't change.
+  Sessions already running when you update ccpipe start reporting once
+  they're restarted or resumed.
+- **Every 15 minutes while ccpipe is open**, and when you open the pop-up
+  on figures more than 5 minutes old, ccpipe runs `claude -p /usage`. That
+  makes no model call and uses no tokens, and it also sees use from
+  claude.ai, the apps and other machines. One run takes about 13 s of
+  one CPU core and up to 400 MB of memory.
+
+Settings → Display → *status & graphs* → *Claude plan usage* hides it on
+that device. To turn it off altogether, or change how often it checks,
+see `plan_usage` in [`docs/configuration.md`](docs/configuration.md).
 
 **Starting a session.** **+ new** opens a panel: pick a working
 directory (type it or **browse…**) and a session name, which is filled
@@ -565,6 +599,10 @@ proxy host.
   use **only** because the unmodified `claude` binary makes the API
   calls — ccpipe never originates a request to `api.anthropic.com`.
   See https://code.claude.com/docs/en/legal-and-compliance.
+- **Plan usage without the token.** ccpipe never reads
+  `~/.claude/.credentials.json` or calls Anthropic's usage endpoint. The
+  plan figures come from `claude` itself: what it gives a status line,
+  and its own `/usage` command run headless, which makes no model call.
 - **Always-on auth.** Passwords are argon2id-hashed on disk; the
   plaintext only ever exists in the read-once `initial_password.txt`
   sidecar (`0400`). Optional TOTP under Settings → Account. Login is a

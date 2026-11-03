@@ -290,6 +290,64 @@ memory is re-read at most once a minute per process; project sizes are
 measured with `du` at idle CPU / IO priority every 15 minutes. Both only
 while someone is looking.
 
+### Claude plan usage
+
+How much of the Claude subscription's usage limits is used, in the top
+bar, its pop-up and the landing page (`ccpipe/plan_usage.py`). Two
+sources, both `claude` reporting on itself; ccpipe never reads the login
+token:
+
+- **The status line.** ccpipe starts Claude as `claude --settings
+  '{"statusLine": …}'`, naming `ccpipe/statusline_record.py` as the
+  status-line command. After each reply Claude hands it JSON with
+  `rate_limits` (the 5-hour and weekly windows' used % and reset time)
+  and the context window's fill. The recorder saves that to
+  `~/.local/state/ccpipe/statusline/<tmux server pid>_<pane>.json`, then
+  runs your own status-line command with the same input. It looks in the
+  project's `.claude/settings.local.json`, then its `.claude/settings.json`,
+  then `~/.claude/settings.json`, the order Claude reads them. Your
+  `padding` and `refreshInterval` carry over. With no status line of your
+  own it prints nothing, and Claude draws no status row. Claude's docs say
+  any configured status line hides most of the footer's key hints, such
+  as *esc to interrupt*. Sessions started before the change, and a
+  `claude` you type yourself in a session's shell, don't report.
+- **`/usage`, headless.** `claude -p /usage --output-format stream-json`
+  with MCP servers and hooks off and no saved session, run in
+  `~/.local/state/ccpipe/plan-usage/`. Its answer carries every meter
+  the server reports, including per-model weekly limits, plus the usage
+  credits. It makes no model call and uses no tokens. Measured
+  2026-11-03: 13 s, 13.6 s of CPU, 391 MB peak. It runs every
+  `poll_minutes` while someone has ccpipe open, when the pop-up opens on
+  figures more than 5 minutes old, and never twice within 2 minutes. The
+  endpoint behind `/usage` is itself rate limited, and `/usage` in your
+  own sessions then shows *rate limited until …*, so don't set the
+  interval low. After a failure (including that rate limit) it waits the
+  interval, then doubles the wait up to an hour. The last reading is
+  kept in `plan-usage/usage.json`, so a restart doesn't start from
+  nothing.
+
+The readout is the latest `/usage` report, with the status line's
+figures laid over the meters they cover when they're newer. A window
+whose reset time has passed reads 0 % until the next reading.
+
+In `config.json` (restart to apply, like the rest of the file):
+
+```json
+"plan_usage": {
+  "enabled": true,
+  "statusline": true,
+  "poll_minutes": 15
+}
+```
+
+- `enabled`: `false` turns the readout and the background check off.
+- `statusline`: `false` starts new sessions without the recorder. You
+  then get the `/usage` figures only, and no context fill per session.
+- `poll_minutes`: 5 to 240.
+
+Each check logs one line, such as `plan usage: week · all models 40%,
+week · Fable 5% (13.2 s)`, or why it failed and when it tries again.
+
 ## Where state lives
 
 - `~/.local/state/ccpipe/credentials` — argon2id hash, TOTP secret,
@@ -311,6 +369,11 @@ while someone is looking.
   with the auto-generated password on first run. **Delete after
   reading.**
 - `~/.local/state/ccpipe/config.json` — Settings-modal values.
+- `~/.local/state/ccpipe/statusline/` — each session's last status-line
+  reading from Claude (plan limits, context fill), one file per tmux
+  pane; files untouched for 8 days are removed. `0700`.
+- `~/.local/state/ccpipe/plan-usage/` — where `claude -p /usage` runs,
+  and `usage.json`, its last reading and the retry state. `0700`.
 - `~/.local/state/ccpipe/sticky_sessions.json` — `{name: {cwd}}` map
   of sticky sessions. Override the path with `CCPIPE_STICKY_FILE`.
 - `~/.local/state/ccpipe/session_meta.json` — every remembered session:

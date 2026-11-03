@@ -72,22 +72,25 @@ export function buildStatsSection(): HTMLElement {
   const landing = checkbox(p.landing);
   const bar = checkbox(p.sessionBar);
   const per = checkbox(p.perSession);
+  const plan = checkbox(p.plan);
   const every = select(STATS_INTERVALS.map((s) => [String(s), `${s} s`]), String(p.interval));
   const only = `this ${deviceClass()} only`;
   rows.append(
     row("System panel on the landing page", `${only} · CPU, memory and disk graphs`, landing),
     row("Status in a session's top bar", `${only} · beside the ping; tap it for details`, bar),
     row("Memory & disk per session", `${only} · on the landing page`, per),
+    row("Claude plan usage", `${only} · how much of your subscription's limits is used, `
+      + "and each session's context fill", plan),
     row("Refresh every", "", every),
   );
   const save = (): void => {
     const next: StatsPrefs = {
-      landing: landing.checked, sessionBar: bar.checked, perSession: per.checked,
+      landing: landing.checked, sessionBar: bar.checked, perSession: per.checked, plan: plan.checked,
       interval: parseInt(every.value, 10) || 5,
     };
     saveStatsPrefs(next);
   };
-  for (const c of [landing, bar, per, every]) c.addEventListener("change", save);
+  for (const c of [landing, bar, per, plan, every]) c.addEventListener("change", save);
   return sec;
 }
 

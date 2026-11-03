@@ -68,6 +68,11 @@ def _demanded() -> bool:
     return time.monotonic() - _demanded_at <= DEMAND_S
 
 
+def demanded() -> bool:
+    """Someone has had ccpipe's stats on screen within DEMAND_S."""
+    return _demanded()
+
+
 # ─── host ─────────────────────────────────────────────────────────────────
 
 def _read_cpu() -> tuple[int, int] | None:

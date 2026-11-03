@@ -1,13 +1,14 @@
 // The landing page's system panel: CPU and memory with ten minutes of
-// history, and the root filesystem as a ring — plus how much of the memory
-// ccpipe's sessions are using. A compact strip: each card is the number on
-// the left and its graph on the right. Hidden with Settings → Display →
-// "system panel on the landing page".
+// history, the root filesystem as a ring, and how much of the Claude plan's
+// usage limits is used (a ring, with a tick for how much of the window has
+// gone) — plus how much of the memory ccpipe's sessions are using. A
+// compact strip: each card is the number on the left and its graph on the
+// right. Hidden with Settings → Display → "system panel on the landing page".
 
 import { h } from "./dom";
 import {
-  SysPoller, type StatsPrefs, type SysSnapshot, fmtBytes, fmtPct, level, loadStatsPrefs, onStatsPrefs, ring,
-  sparkline,
+  SysPoller, type StatsPrefs, type SysSnapshot, fmtAgo, fmtBytes, fmtPct, fmtWhen, level, loadStatsPrefs,
+  onStatsPrefs, planHeadline, planLevel, planPace, planResets, ring, sparkline,
 } from "./sysviz";
 
 export interface SysPanel {
@@ -37,7 +38,9 @@ export function mountSysPanel(): SysPanel {
   const cpu = card("cpu");
   const mem = card("mem");
   const disk = card("disk", "sp-card--disk");
-  el.append(cpu.el, mem.el, disk.el);
+  const plan = card("plan", "sp-card--disk sp-card--plan");
+  el.append(cpu.el, mem.el, disk.el, plan.el);
+  let prefs = loadStatsPrefs();
 
   let sessionsMem: number | null = null;
   let sessionsCount = 0;
@@ -76,10 +79,36 @@ export function mountSysPanel(): SysPanel {
     disk.sub.textContent = d?.total ? `free of ${fmtBytes(d.total)} · ${fmtPct(dpct)} used` : "";
     disk.viz.replaceChildren(ring(dpct));
     el.title = s.at ? `updated ${new Date(s.at * 1000).toLocaleTimeString()}` : "";
+    paintPlan();
+  };
+
+  // The headline meter (the server's pick: on this account the all-models
+  // week); the others are in a session's top-bar pop-up and the tooltip.
+  const paintPlan = (): void => {
+    const p = prefs.plan ? last?.plan : null;
+    const m = planHeadline(p);
+    plan.el.hidden = !m;
+    el.classList.toggle("sp--4", !!m);
+    if (!p || !m) return;
+    const now = p.now;
+    const lvl = planLevel(m);
+    plan.value.textContent = fmtPct(m.percent);
+    plan.value.dataset.level = lvl;
+    plan.sub.textContent = m.resets_at && !m.reset ? `${m.label} · resets ${fmtWhen(m.resets_at, now)}` : m.label;
+    plan.viz.replaceChildren(ring(m.percent, "", planPace(m, now), lvl));
+    const lines = p.meters.map((x) => {
+      const pace = planPace(x, now);
+      return `${x.label}: ${fmtPct(x.percent)} · ${planResets(x, now)}`
+        + (pace !== null ? ` · ${Math.round(pace)}% of the window gone (the tick)` : "");
+    });
+    if (p.at) lines.push(`as of ${fmtAgo(Math.max(0, now - p.at))}`);
+    plan.el.title = `Claude plan usage\n${lines.join("\n")}`;
   };
 
   const poller = new SysPoller(null, loadStatsPrefs().interval, paint);
   const apply = (p: StatsPrefs): void => {
+    prefs = p;
+    paintPlan();
     el.hidden = !p.landing;
     poller.setInterval(p.interval);
     poller.setActive(p.landing);

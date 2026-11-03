@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import config as app_config
-from . import proctree, session_meta, sticky, tmux
+from . import plan_usage, proctree, session_meta, sticky, tmux
 from .paths import claude_project_dir
 
 log = logging.getLogger(__name__)
@@ -216,8 +216,8 @@ def resume_command(cwd: str, claude_id: str | None, shell: bool = False) -> str:
     if shell:
         return f"exec {shlex.quote(os.environ.get('SHELL') or '/bin/bash')} -i"
     if claude_id and session_meta.UUID_RE.match(claude_id) and _transcript_exists(cwd, claude_id):
-        return tmux.wrap_in_shell(f"claude --resume {shlex.quote(claude_id)}")
-    return tmux.wrap_in_shell("claude --continue")
+        return tmux.wrap_in_shell(plan_usage.claude_command(f"--resume {shlex.quote(claude_id)}"))
+    return tmux.wrap_in_shell(plan_usage.claude_command("--continue"))
 
 
 class Resumable(NamedTuple):

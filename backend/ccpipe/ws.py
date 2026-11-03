@@ -22,7 +22,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import drafts, session_meta, tmux, tmux_ui, voice_ptt
+from . import drafts, plan_usage, session_meta, tmux, tmux_ui, voice_ptt
 from .auth import is_session_authed
 from .mic import MicWriter
 from .pty_relay import PtyProcess, pump
@@ -578,7 +578,8 @@ class _TerminalConnection:
         else:
             # Same $SHELL -i wrapper as POST /api/sessions, so the session
             # survives claude exiting instead of vanishing with it.
-            await tmux.create_session(self.session, command=tmux.wrap_in_shell("claude"))
+            await tmux.create_session(self.session,
+                                       command=tmux.wrap_in_shell(plan_usage.claude_command()))
         return True
 
     async def _session_gone(self, note: str) -> None:
