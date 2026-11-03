@@ -2,6 +2,7 @@ import { Terminal, type IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { openSelectView } from "./select-view";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 
@@ -131,6 +132,8 @@ export interface TerminalOptions {
    *  one WebGL glyph atlas between terminals, and disposing one terminal
    *  (closing a tile, switching its mode) corrupted the others' glyphs. */
   webgl?: boolean;
+  /** Long-press opens the select-text view (default true). */
+  selectView?: boolean;
 }
 
 export function createTerminal(container: HTMLElement, socket: TerminalSocket,
@@ -1221,6 +1224,16 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       return { col, row };
     };
 
+    // Long-press (held still) opens the select-text view (select-view.ts):
+    // the canvas can't be selected, and a drag here scrolls.
+    const LONG_PRESS_MS = 450;
+    const LONG_PRESS_SLOP_PX = 10;
+    let pressTimer: number | null = null;
+    let pressX = 0;
+    let pressY = 0;
+    const clearPress = (): void => {
+      if (pressTimer !== null) { clearTimeout(pressTimer); pressTimer = null; }
+    };
     const onDown = (e: PointerEvent) => {
       if (e.pointerType !== "touch") return;
       if (activeId !== -1) return;
@@ -1228,9 +1241,30 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       lastY = e.clientY;
       dragging = false;
       wheelAccum = 0;
+      clearPress();
+      if (opts.selectView === false) return;
+      pressX = e.clientX;
+      pressY = e.clientY;
+      const cell = cellAt(e);
+      pressTimer = window.setTimeout(() => {
+        pressTimer = null;
+        if (activeId === -1 || dragging || disposed) return;
+        activeId = -1;                       // the gesture ends here
+        // Hide the soft keyboard while reading.
+        const focused = document.activeElement as HTMLElement | null;
+        focused?.blur?.();
+        openSelectView({
+          term,
+          row: term.buffer.active.viewportY + cell.row - 1,
+          col: cell.col - 1,
+          copy: writeClipboard,
+          openLink: openTerminalLink,
+        });
+      }, LONG_PRESS_MS);
     };
     const onMove = (e: PointerEvent) => {
       if (e.pointerId !== activeId) return;
+      if (pressTimer !== null && Math.hypot(e.clientX - pressX, e.clientY - pressY) > LONG_PRESS_SLOP_PX) clearPress();
       const dy = lastY - e.clientY;
       if (!dragging && Math.abs(dy) < DRAG_THRESHOLD_PX) return;
       dragging = true;
@@ -1263,8 +1297,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       }
     };
     const onUp = (e: PointerEvent) => {
+      clearPress();
       if (e.pointerId === activeId) { activeId = -1; dragging = false; wheelAccum = 0; }
     };
+    // The browser's own long-press menu would land on the canvas.
+    const onContextMenu = (e: Event): void => { if (pressTimer !== null || activeId !== -1) e.preventDefault(); };
+    container.addEventListener("contextmenu", onContextMenu);
 
     container.addEventListener("pointerdown",   onDown, { capture: true });
     container.addEventListener("pointermove",   onMove, { capture: true });
@@ -1275,6 +1313,8 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       container.removeEventListener("pointermove",   onMove, true);
       container.removeEventListener("pointerup",     onUp,   true);
       container.removeEventListener("pointercancel", onUp,   true);
+      container.removeEventListener("contextmenu", onContextMenu);
+      clearPress();
     };
   };
   wireScrollAffordances();

@@ -4290,3 +4290,92 @@ html.window-buttons .statusbar__brand { align-self: stretch; padding-right: var(
   .picker-shell[data-use="on"] .sess--detailed .sess__use-k,
   .picker-shell[data-use="on"] .sess--detailed .sess__date-k { display: inline; }
 }
+
+/* ─── Select-text view (select-view.ts): long-press the terminal ─────────
+   Full screen above everything; 100dvh + min-height: 0 on the scrolling
+   body so it fits under a phone's URL bar in both orientations. */
+.select-view {
+  position: fixed;
+  inset: 0;
+  height: 100dvh;
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+}
+.select-view__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: calc(env(safe-area-inset-top, 0px) + var(--s-2)) var(--s-3) var(--s-2);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.select-view__title {
+  flex: 1;
+  min-width: 6rem;
+  color: var(--fg-muted);
+  font-size: var(--t-xs);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.select-view__btn { font-size: var(--t-xs); padding: var(--s-1) var(--s-3); white-space: nowrap; }
+.select-view__close { font-size: var(--t-sm); padding: var(--s-1) var(--s-3); }
+.select-view__links {
+  max-height: 40dvh;
+  overflow-y: auto;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.select-view__link {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-top: 1px solid var(--border);
+}
+.select-view__link-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--accent-soft);
+}
+.select-view__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--s-3) var(--s-3) calc(env(safe-area-inset-bottom, 0px) + var(--s-5));
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.45;
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+.select-view__line { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.45em; }
+.select-view__line::selection, .select-view__line *::selection { background: rgba(245, 165, 36, 0.35); }
+.select-view__note { color: var(--fg-faint); font-size: var(--t-xs); margin-bottom: var(--s-2); }
+.select-view__toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--s-5));
+  transform: translateX(-50%);
+  padding: 0.28rem 0.75rem;
+  background: rgba(13, 12, 8, 0.96);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  pointer-events: none;
+}
+.select-view__toast--err { color: var(--critical); border-color: var(--critical); }

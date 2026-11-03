@@ -39,7 +39,7 @@ const CHUNK_GUARD_KEY = "ccpipe.update.chunkReload";
 const BUSY_SELECTOR = [
   ".modal-overlay", ".file-panel-shell", ".md-drawer", ".docs-menu",
   ".prompt-menu", ".tiles-menu__list", ".sess__menu:not([hidden])",
-  ".sess__rename",
+  ".sess__rename", ".select-view",
 ].join(",");
 
 type BusyCheck = () => boolean;
