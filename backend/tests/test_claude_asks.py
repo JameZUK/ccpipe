@@ -109,6 +109,26 @@ def test_question_in_a_frame():
         "anything at all, including this question? Heard this one, Heard it twice, or Nothing at all.")
 
 
+MULTI_CHOICE = [RULE, " ☐ Repeat test", "",
+                "│ Tick some. Did you hear this more than once?", "",
+                "❯ 1. [ ] Heard it once", "         Read out a single time.",
+                "  2. [✔] Apple", "  3. [ ] Type something", "     Submit", RULE, "  4. Chat about this"]
+REVIEW = [RULE, "←  ☒ Repeat test  ✔ Submit  →", "", "Review your answers", "",
+          " │ ● Tick some. Did you hear this more than once?", "   → Apple", "",
+          "Ready to submit your answers?", "", "❯ 1. Submit answers", "  2. Cancel"]
+
+
+def test_multiple_choice_labels_lose_their_tick_boxes():
+    assert describe(MULTI_CHOICE, "input needed").body == (
+        "Tick some. Did you hear this more than once? Heard it once, or Apple.")
+
+
+def test_the_review_screen_is_the_same_dialog():
+    # Seen live: ticking options moved the dialog to its review, which was
+    # announced as a second question.
+    assert describe(REVIEW, "input needed").key == describe(MULTI_CHOICE, "input needed").key
+
+
 def test_no_dialog_found():
     assert describe(["just text"], "input needed") == Ask("question", "Claude has a question", "")
     ask = describe([], "permission prompt")

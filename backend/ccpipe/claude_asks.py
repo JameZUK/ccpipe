@@ -82,6 +82,8 @@ _BUILTIN = ("Type something", "Chat about this", "Other")
 _GENERIC_Q_RE = re.compile(r"(?:Do you want|Would you like) to proceed\??", re.I)
 # A preview pane beside the options, or wide padding: cut the label there.
 _COLUMN_RE = re.compile(r"\s{3,}|│")
+# A multiple-choice option's tick box: "[ ] Apple", "[✔] Pear".
+_TICK_RE = re.compile(r"^\[[ xX✔✓]\]\s*")
 
 
 def _text(line: str) -> str:
@@ -142,7 +144,7 @@ def describe(lines: list[str], waiting_for: str | None) -> Ask:
         m = _OPTION_RE.match(ln)
         if not m:
             continue
-        label = _COLUMN_RE.split(m.group(2).strip())[0].strip()
+        label = _TICK_RE.sub("", _COLUMN_RE.split(m.group(2).strip())[0].strip())
         if label and not label.startswith(_BUILTIN):
             labels.append(_clip(label))
     tab_line = next((ln for ln in block if _TAB_RE.search(ln)), "")
@@ -151,11 +153,13 @@ def describe(lines: list[str], waiting_for: str | None) -> Ask:
     body = question
     if labels:
         body = f"{body} {_or_list(labels[:6])}".strip()
-    # Tab names without the answered/unanswered marks; with one question,
-    # the question itself too.
+    # The dialog is named by its tabs (without the answered/unanswered
+    # marks), so moving between its questions, or on to its "Ready to
+    # submit your answers?" review, isn't a new dialog. Without tabs, by
+    # its question.
     names = " ".join(re.sub(r"[☐☒✔✓←→]|\bSubmit\b", " ", tab_line).split())
     return Ask("question", title, body,
-               key=f"question|{names}|{question if tabs <= 1 else ''}")
+               key=f"question|{names}" if names else f"question||{question}")
 
 
 # ─── Watching Claude's status ─────────────────────────────────────────────
