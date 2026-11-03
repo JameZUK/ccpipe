@@ -118,6 +118,10 @@ export interface SettingsOpts {
    * here just renders a button that invokes it. The same affordance
    * is also bound to Ctrl+Shift+D in main.ts. */
   onCaptureDebugSnapshot?: () => void;
+  /** Play the voice test's sample through the session's own audio player
+   * (on Safari only one element plays at a time). Absent on the landing
+   * page, where there's no player. */
+  playSample?: (blob: Blob) => Promise<void>;
 }
 
 let activeOverlay: HTMLDivElement | null = null;
@@ -161,7 +165,7 @@ export function openSettings(opts: SettingsOpts): void {
   const voicePanel = document.createElement("div");
   voicePanel.className = "modal__panel";
   voicePanel.dataset.tab = "voice";
-  voicePanel.append(buildVoiceSection(), buildVoiceInputSection(opts));
+  voicePanel.append(buildVoiceSection(opts.playSample), buildVoiceInputSection(opts));
 
   const accountPanel = document.createElement("div");
   accountPanel.className = "modal__panel";
@@ -318,7 +322,7 @@ function buildTabs(initial: TabId, onChange: (next: TabId) => void): HTMLElement
 
 // ─── Voice section ──────────────────────────────────────────────────────
 
-function buildVoiceSection(): HTMLElement {
+function buildVoiceSection(playSample?: (blob: Blob) => Promise<void>): HTMLElement {
   const sec = document.createElement("section");
   sec.className = "modal__section";
   sec.innerHTML = `
@@ -478,23 +482,36 @@ function buildVoiceSection(): HTMLElement {
     const voice = select.value;
     if (!voice) return;
     disposePreview();
-    const el = new Audio();
+    status.classList.remove("modal__status--error");
+    status.textContent = "";
+    // In a session: its player plays it (it unlocked on this very tap).
+    // On the landing page: our own element, started inside the tap.
+    const el = playSample ? null : new Audio();
     preview = el;
-    el.src = silence();
-    el.play().catch(() => {});
+    if (el) {
+      el.src = silence();
+      el.play().catch(() => {});
+    }
     const text = encodeURIComponent("Voice test, one two three.");
     const url = `/api/tts/preview?voice=${encodeURIComponent(voice)}&text=${text}`;
+    let step = "fetch";
     try {
       const res = await fetch(url, { credentials: "same-origin" });
       if (!res.ok) throw new Error(`status ${res.status}`);
       const blob = await res.blob();
       if (preview !== el) return;          // closed, or tested again
-      previewUrl = URL.createObjectURL(blob);
-      el.src = previewUrl;
-      await el.play();
+      step = "play";
+      if (playSample) {
+        await playSample(blob);
+      } else if (el) {
+        previewUrl = URL.createObjectURL(blob);
+        el.src = previewUrl;
+        await el.play();
+      }
     } catch (err) {
       if (preview !== el) return;
-      status.textContent = `preview failed: ${(err as Error).message ?? err}`;
+      const e = err as DOMException;
+      status.textContent = `preview failed (${step}): ${e?.name ? e.name + ": " : ""}${e?.message ?? err}`;
       status.classList.add("modal__status--error");
     }
   });

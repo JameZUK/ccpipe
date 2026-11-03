@@ -61,6 +61,13 @@ export class TtsPlayer {
   private starting = false;
   // The browser refused to play; the head of the queue waits for a tap.
   private blocked = false;
+  // A play() not yet settled. One tap fires pointerup, touchend and click;
+  // without this a second of them could start another play over the
+  // first, and Safari aborts the first.
+  private playPending = false;
+  // Numbers each play(); the outcome of one superseded by a newer play
+  // (its src replaced) is ignored.
+  private playSeq = 0;
 
   private audio: HTMLAudioElement | null = null;
   private audioCtx: AudioContext | null = null;
@@ -91,6 +98,8 @@ export class TtsPlayer {
   };
   private readonly onAudioError = () => {
     if (this.priming) return;
+    const e = this.audio?.error;
+    this.debug(`media error ${e?.code ?? "?"} ${e?.message ?? ""}`);
     this.handlePlaybackEnd();
     this.pumpQueue();
   };
@@ -186,7 +195,7 @@ export class TtsPlayer {
   }
 
   private pumpQueue(): void {
-    if (this.muted || this.blocked || this.starting || this.priming) return;
+    if (this.muted || this.blocked || this.starting || this.priming || this.playPending) return;
     if (this.audio && !this.audio.paused) return;
     if (this.queue.length === 0) return;
     this.playBlob(this.queue.shift()!);
@@ -223,7 +232,7 @@ export class TtsPlayer {
     if (this.unlocked && !this.blocked) return;
     this.debug(`tap: unlocking (${this.blocked ? "audio waiting" : "first tap"})`);
     const a = this.audio;
-    if (!a || !a.paused || this.starting || this.priming) return;
+    if (!a || !a.paused || this.starting || this.priming || this.playPending) return;
     if (this.blocked) {
       this.setBlocked(false);
       const now = Date.now();
@@ -233,9 +242,10 @@ export class TtsPlayer {
     }
     this.priming = true;
     a.src = silence();
+    const seq = ++this.playSeq;
     a.play().then(() => {
       this.unlocked = true;
-      try { a.pause(); } catch {}
+      if (seq === this.playSeq) { try { a.pause(); } catch {} }
     }).catch(() => {}).finally(() => {
       this.priming = false;
       this.pumpQueue();
@@ -351,7 +361,22 @@ export class TtsPlayer {
     this.startPlayback(item);
   }
 
-  private startPlayback(item: Queued): void {
+  /** Play `blob` now, ahead of anything queued, muted or not: the voice
+   * test in Settings. On Safari only one audio element plays at a time,
+   * so the test must use this one, not its own. Settles with play(). */
+  playNow(blob: Blob): Promise<void> {
+    this.ensureWebAudio();
+    const a = this.audio;
+    if (!a) return Promise.reject(new Error("no audio element"));
+    if (!a.paused) { try { a.pause(); } catch {} }
+    this.setBlocked(false);
+    return new Promise((resolve, reject) => {
+      this.startPlayback({ blob, at: Date.now() }, { resolve, reject });
+    });
+  }
+
+  private startPlayback(item: Queued,
+                        settle?: { resolve: () => void; reject: (e: unknown) => void }): void {
     const audio = this.audio;
     if (!audio) return;
     if (this.playingUrl) URL.revokeObjectURL(this.playingUrl);
@@ -361,7 +386,24 @@ export class TtsPlayer {
     // sentence; release on every failure / end path below.
     void this._acquireWakeLock();
     this.debug(`play: ${item.blob.size} B, context ${this.audioCtx?.state ?? "none"}, unlocked ${this.unlocked}`);
-    audio.play().then(() => { this.unlocked = true; }).catch((err) => {
+    this.playPending = true;
+    const seq = ++this.playSeq;
+    audio.play().then(() => {
+      if (seq !== this.playSeq) return;
+      this.playPending = false;
+      this.unlocked = true;
+      settle?.resolve();
+    }).catch((err) => {
+      if (seq !== this.playSeq) { settle?.reject(err); return; }
+      this.playPending = false;
+      const e = err as DOMException;
+      this.debug(`play failed: ${e?.name}: ${e?.message}`);
+      if (settle) {
+        void this._releaseWakeLock();
+        this.handlePlaybackEnd();
+        settle.reject(err);
+        return;
+      }
       // play() rejection means "playing" will never fire, so
       // handlePlaybackStart was never called and the wake-lock would
       // otherwise leak. Force-release symmetrically.

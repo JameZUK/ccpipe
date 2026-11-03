@@ -442,6 +442,7 @@ async function attachTerminal(session: string): Promise<void> {
       onDisplayPrefsChange: (p) => terminalApi?.applyPrefs(p),
       onSessionInvalidated: () => { socket.close(); bootstrap(); },
       onMicConfigChange: (cfg) => { applyMicConfig(cfg); },
+      playSample: (blob) => tts.playNow(blob),
       onCaptureDebugSnapshot: () => {
         if (!terminalApi) return;
         // Lazy import keeps the debug module out of the main bundle —
