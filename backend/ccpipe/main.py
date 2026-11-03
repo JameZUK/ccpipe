@@ -497,7 +497,7 @@ mount_static(app)
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket, session: str, skip_history: int = 0,
-             mode: str = "", tile: int = 0) -> None:
+             mode: str = "", tile: int = 0, reattach: int = 0) -> None:
     # ``skip_history`` is accepted but ignored — we always replay tmux's
     # current pane on every (re)connect so xterm's scrollback can't drift
     # from tmux's during a disconnect window. The frontend ``term.reset()``s
@@ -518,7 +518,9 @@ async def ws(websocket: WebSocket, session: str, skip_history: int = 0,
         await websocket.close(code=1008, reason="reserved session name")
         return
     # mode=watch: a read-only tile that never resizes the session;
-    # tile=1: a secondary tile (no TTS / mic, never creates the session).
-    await handle_terminal_ws(websocket, name, watch=(mode == "watch"), tile=bool(tile))
+    # tile=1: a secondary tile (no TTS / mic, never creates the session);
+    # reattach=1: a reconnect — never creates or resumes the session.
+    await handle_terminal_ws(websocket, name, watch=(mode == "watch"), tile=bool(tile),
+                             reattach=bool(reattach))
 
 

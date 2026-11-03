@@ -1,11 +1,10 @@
 """Sticky-session persistence.
 
-A "sticky" tmux session survives backend restart / reboot: its name and
-cwd are stored in a small JSON file, and the lifespan hook recreates
-any missing sticky session on startup. On restore we launch
-``claude --continue`` so claude itself picks up the most recent
-conversation for that cwd, then drop to an interactive shell when it
-exits (same wrapper as freshly-created sessions).
+A "sticky" session is one the user pinned: its name and cwd are stored in
+a small JSON file, so it is remembered even with no other record of it,
+it gets the longer idle-stop limit, and the most recently used few start
+at boot (lifecycle.py — which also resumes it on its own conversation,
+via session_meta.py).
 
 Storage: ``$XDG_STATE_HOME/ccpipe/sticky_sessions.json`` (default
 ``~/.local/state/ccpipe/sticky_sessions.json``). 0600 perms, atomic
@@ -18,17 +17,15 @@ Schema:
       ...
     }
 
-We store only the cwd; the command used at restore time is a constant
-(see ``build_restore_command()``) so we don't accidentally pin the
-restore behaviour to whatever the original command was — improvements
-to the wrapper benefit existing sticky sessions on the next restart.
+We store only the cwd; how a session is started again is decided at
+resume time (lifecycle.resume_command), so improvements there benefit
+existing sticky sessions too.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import shlex
 import threading
 from pathlib import Path
 
@@ -137,17 +134,3 @@ def sticky_names() -> set[str]:
     """Read-only snapshot of currently-sticky names. Cheap to call
     per-request; the file is small."""
     return set(load().keys())
-
-
-def build_restore_command(shell: str | None = None) -> str:
-    """Return the shell command used when restoring a sticky session.
-
-    ``claude --continue`` picks up the most recent conversation for the
-    pane's cwd (claude indexes conversations by cwd under
-    ``~/.claude/projects/<encoded>/*.jsonl``), then ``exec $SHELL -i``
-    replaces the shell process so the pane drops to an interactive
-    prompt when claude exits instead of dying.
-    """
-    if shell is None:
-        shell = os.environ.get("SHELL") or "/bin/bash"
-    return f"claude --continue; exec {shlex.quote(shell)} -i"

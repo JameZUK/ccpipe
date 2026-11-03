@@ -8,7 +8,6 @@ event channel see tmux_control.py. For the attached client see pty_relay.py
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -21,6 +20,8 @@ from pathlib import Path
 
 import libtmux
 from libtmux.exc import LibTmuxException
+
+from . import proctree
 
 log = logging.getLogger(__name__)
 
@@ -71,11 +72,16 @@ def _server() -> libtmux.Server:
     return libtmux.Server()
 
 
-def _sync_list_sessions() -> list[TmuxSession]:
+def _sync_list_sessions() -> tuple[list[TmuxSession], bool]:
+    """(user sessions, complete). ``complete`` is False when the listing
+    can't be trusted to be the whole truth: the query failed, or tmux
+    reported no sessions at all — while ccpipe runs its hidden anchor
+    session always exists, so an empty answer means the server was
+    unreachable (libtmux returns [] rather than raising for that)."""
     try:
         sessions = _server().sessions
     except LibTmuxException:
-        return []
+        return [], False
     result: list[TmuxSession] = []
     for s in sessions:
         if s.session_name == CONTROL_SESSION_NAME:
@@ -89,7 +95,7 @@ def _sync_list_sessions() -> list[TmuxSession]:
             clients=int(s.session_attached or 0),
             last_attached=int(getattr(s, "session_last_attached", 0) or 0),
         ))
-    return result
+    return result, bool(sessions)
 
 
 def _sync_session_exists(name: str) -> bool:
@@ -163,26 +169,43 @@ def _sync_rename_session(old: str, new: str) -> bool:
 # after every create / rename / kill / sticky-toggle). 250 ms is well
 # below human-perceivable staleness for the session list.
 _LIST_SESSIONS_CACHE_TTL_S = 0.25
-_list_sessions_cache: tuple[float, list[TmuxSession]] | None = None
+_list_sessions_cache: tuple[float, list[TmuxSession], bool] | None = None
 _list_sessions_lock = asyncio.Lock()
 
 
-async def list_sessions() -> list[TmuxSession]:
+async def list_sessions_checked() -> tuple[list[TmuxSession], bool]:
+    """The user sessions, and whether that list is complete (see
+    _sync_list_sessions). Anything that concludes a session has ENDED from
+    its absence must check the flag: a failed query looks like "every
+    session is gone"."""
     global _list_sessions_cache
     now = asyncio.get_event_loop().time()
     cached = _list_sessions_cache
     if cached is not None and now - cached[0] < _LIST_SESSIONS_CACHE_TTL_S:
-        return cached[1]
+        return cached[1], cached[2]
     async with _list_sessions_lock:
         # Re-check inside the lock: a concurrent caller may have just
         # populated the cache while we were queued.
         cached = _list_sessions_cache
         now = asyncio.get_event_loop().time()
         if cached is not None and now - cached[0] < _LIST_SESSIONS_CACHE_TTL_S:
-            return cached[1]
-        fresh = await asyncio.to_thread(_sync_list_sessions)
-        _list_sessions_cache = (now, fresh)
-        return fresh
+            return cached[1], cached[2]
+        fresh, complete = await asyncio.to_thread(_sync_list_sessions)
+        _list_sessions_cache = (now, fresh, complete)
+        return fresh, complete
+
+
+async def list_sessions() -> list[TmuxSession]:
+    return (await list_sessions_checked())[0]
+
+
+async def server_started_at() -> int | None:
+    """When the tmux server started (unix), or None if it isn't reachable."""
+    out = await _tmux_out("display-message", "-p", "#{start_time}")
+    try:
+        return int(out.strip()) if out else None
+    except ValueError:
+        return None
 
 
 def invalidate_list_sessions_cache() -> None:
@@ -197,33 +220,11 @@ _TMUX_QUERY_TIMEOUT_S = 5.0
 
 
 async def _pane_pid(name: str) -> int | None:
-    """Active-pane PID for a tmux session, or None if the lookup failed."""
+    """Active-pane PID for a tmux session, or None if the lookup failed (a
+    hung tmux server times out rather than pinning the WS attach)."""
+    out = await _tmux_out("display-message", "-t", pane_target(name), "-p", "#{pane_pid}")
     try:
-        proc = await asyncio.create_subprocess_exec(
-            TMUX_BIN, "display-message", "-t", pane_target(name), "-p", "#{pane_pid}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=tmux_env(),
-        )
-    except FileNotFoundError:
-        return None
-    # Wrap communicate in a timeout — a hung tmux server would otherwise
-    # pin the WS attach indefinitely. 5s is generous; display-message
-    # against a healthy tmux is a single-digit-ms operation.
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(),
-                                         timeout=_TMUX_QUERY_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        log.warning("tmux display-message for %r timed out", name)
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        return int(out.decode().strip())
+        return int(out.strip()) if out else None
     except ValueError:
         return None
 
@@ -558,24 +559,8 @@ _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 async def _tmux_out(*args: str) -> str | None:
     """stdout of one tmux command, or None on failure / timeout."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            TMUX_BIN, *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=tmux_env(),
-        )
-    except FileNotFoundError:
-        return None
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TMUX_QUERY_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        return None
-    if proc.returncode != 0:
-        return None
-    return out.decode("utf-8", "replace")
+    return await proctree.run_argv([TMUX_BIN, *args], _TMUX_QUERY_TIMEOUT_S,
+                                   env=tmux_env(), check=True)
 
 
 async def active_panes() -> dict[str, tuple[str, str]]:

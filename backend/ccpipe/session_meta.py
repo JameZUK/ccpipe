@@ -12,6 +12,8 @@ keeps what the session picker shows and what resuming needs:
         "claude":  "<uuid>", the Claude conversation it was on — so a resume
                              picks THAT conversation (`claude --resume`),
                              not just the newest one in the directory
+        "shell":   true,     never seen running Claude (a plain shell session,
+                             e.g. one started over ssh): resumes as a shell
         "stopped": <unix>,   set while it isn't running
         "stop_reason": "idle" | "stopped" | "gone"
     }, ...}
@@ -42,7 +44,9 @@ META_FILE_ENV = "CCPIPE_SESSION_META_FILE"
 OPENED_WRITE_INTERVAL_S = 60
 ACTIVE_WRITE_STEP_S = 60
 MAX_STOPPED = 100
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+# A Claude Code conversation id (the transcript's file name). The one copy:
+# lifecycle.py and routes/sessions.py validate ids with it too.
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _REASONS = ("idle", "stopped", "gone")
 
 _lock = threading.Lock()
@@ -68,8 +72,10 @@ def _clean(info: Any) -> dict[str, Any]:
     if isinstance(cwd, str) and cwd.startswith("/") and "\0" not in cwd:
         out["cwd"] = cwd
     cid = info.get("claude")
-    if isinstance(cid, str) and _UUID_RE.match(cid):
+    if isinstance(cid, str) and UUID_RE.match(cid):
         out["claude"] = cid
+    elif info.get("shell") is True:
+        out["shell"] = True
     reason = info.get("stop_reason")
     if reason in _REASONS and "stopped" in out:
         out["stop_reason"] = reason
@@ -138,16 +144,28 @@ def note_opened(name: str, when: float | None = None) -> None:
         _try_save(data)
 
 
-def note_details(name: str, cwd: str | None, claude: str | None) -> None:
-    """Record a running session's directory and Claude conversation."""
+def note_details(name: str, cwd: str | None, claude: str | None,
+                 has_claude: bool | None = None) -> None:
+    """Record a running session's directory and Claude conversation.
+
+    ``has_claude`` is whether a Claude process is in the session right now
+    (None = not checked). A session never seen with Claude is marked
+    ``shell`` so it resumes as a shell, not as `claude --continue`; once a
+    conversation has been seen it stays a Claude session (Claude may just
+    have exited to the shell for a while)."""
     with _lock:
         data = load()
         entry = data.setdefault(name, {})
         new = dict(entry)
         if cwd and cwd.startswith("/"):
             new["cwd"] = cwd
-        if claude and _UUID_RE.match(claude):
+        if claude and UUID_RE.match(claude):
             new["claude"] = claude
+            new.pop("shell", None)
+        elif has_claude:
+            new.pop("shell", None)
+        elif has_claude is False and "claude" not in new:
+            new["shell"] = True
         if new != entry:
             data[name] = new
             _try_save(data)

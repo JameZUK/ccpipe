@@ -190,8 +190,17 @@ A session that isn't running — after a reboot, an idle stop, or
 "stop" from its kebab (`⋮`) menu — stays on the landing page under
 **stopped**, and opening it resumes it: a tmux session of the same name
 in the same directory, running `claude --resume <its conversation>` (or
-`claude --continue` when the conversation isn't known), then
-`exec $SHELL -i`. "Forget" removes it for good.
+`claude --continue` when the conversation or its transcript isn't
+there), then `exec $SHELL -i`. A session that was never seen running
+Claude (a plain shell started over ssh, say) comes back as a shell in
+its directory instead. "Forget" removes it for good.
+
+If it can't be resumed — its directory was deleted or moved outside the
+allowed root — opening it says why and leaves its record alone; it is
+not replaced by a fresh Claude in `$HOME`. A terminal that was open on
+a session when it was stopped, forgotten or `exit`ed goes back to the
+landing page with a note saying so: its reconnect never starts the
+session again (the WebSocket's `reattach=1`).
 
 **Settings → Sessions** (server-side, `config.json` → `sessions`):
 
@@ -202,9 +211,11 @@ in the same directory, running `claude --resume <its conversation>` (or
 | Stop sticky sessions idle for | 1 day | 0 = never |
 | Stop other sessions idle for | 2 h | 0 = never |
 
-"At boot" means the backend found tmux with no sessions; a backend
-restart with tmux running starts nothing, so stopped sessions stay
-stopped.
+"At boot" means the tmux server started with the backend — every session
+died since ccpipe last ran (a reboot, or tmux itself was killed). A
+backend restart (a deploy) finds the tmux server older than itself and
+starts nothing, even when every session is stopped, so stopped sessions
+stay stopped.
 
 **Idle** is deliberately hard to reach (`backend/ccpipe/lifecycle.py`).
 A session counts as in use — and its idle clock restarts — while a
@@ -215,9 +226,10 @@ status in `~/.claude/sessions/<pid>.json`), a Claude tool command runs
 at 0 % CPU), the pane's shell runs anything besides Claude (a server, a
 build, an editor, in any window or pane), its processes use CPU, or a
 question / permission prompt waits on screen. Claude's own helpers (MCP
-servers, the Playwright browser, language servers) don't count. A
-session whose directory isn't known is never stopped, and every
-auto-stop is logged. The landing page shows the countdown ("auto-stop
+servers, the Playwright browser, language servers) don't count. Only
+sessions with Claude running in them are idle-stopped: a plain shell
+costs next to nothing and is left alone. A session whose directory
+isn't known is never stopped, and every auto-stop is logged. The landing page shows the countdown ("auto-stop
 in 1h 20m").
 
 Mark a session sticky from its kebab menu; a pin glyph shows it.
@@ -233,8 +245,10 @@ session its memory (PSS of its whole process tree) and its project
 directory's size. Inside a session the same figures sit beside the ping
 (a three-bar meter on a phone — tap it for details). Per device, Settings
 → Display → *status & graphs* turns each part off and sets the refresh
-interval. Project sizes are measured with `du` at idle CPU / IO
-priority every 15 minutes, and only while someone is looking.
+interval — switched off, a part stops asking the server too. Session
+memory is re-read at most once a minute per process; project sizes are
+measured with `du` at idle CPU / IO priority every 15 minutes. Both only
+while someone is looking.
 
 ## Where state lives
 

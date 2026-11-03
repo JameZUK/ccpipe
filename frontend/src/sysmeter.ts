@@ -4,8 +4,10 @@
 // tap opens a drop-down with the graphs, the numbers, and this session's
 // own CPU, memory and project size. Off with Settings → Display.
 
+import { h } from "./dom";
 import {
-  SysPoller, type SysSnapshot, bar, fmtBytes, fmtPct, level, loadStatsPrefs, onStatsPrefs, sparkline,
+  SysPoller, type StatsPrefs, type SysSnapshot, bar, fmtBytes, fmtPct, level, loadStatsPrefs, onStatsPrefs,
+  sparkline,
 } from "./sysviz";
 
 export interface SysMeter {
@@ -13,12 +15,6 @@ export interface SysMeter {
   dispose(): void;
 }
 
-function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  if (cls) el.className = cls;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
 
 const diskPct = (s: SysSnapshot): number | null =>
   s.disk?.total ? ((s.disk.used ?? 0) / s.disk.total) * 100 : null;
@@ -30,8 +26,14 @@ export function mountSysMeter(session: string): SysMeter {
   el.setAttribute("aria-label", "System status");
   el.setAttribute("aria-haspopup", "dialog");
   el.setAttribute("aria-expanded", "false");
-  // Keep the terminal's focus (and the soft keyboard) where it was.
+  // Keep the terminal's focus (and the soft keyboard) where it was. On a
+  // touch screen it's touchstart's default that moves focus (and hides the
+  // keyboard) — mousedown alone isn't enough (mobile.ts, the key strip).
+  // Cancelling touchstart also cancels the click, so a touch opens the
+  // pop-up on pointerup instead.
   el.addEventListener("mousedown", (e) => e.preventDefault());
+  el.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+  el.addEventListener("contextmenu", (e) => e.preventDefault());
 
   // Inline (wide) readout.
   const inline = h("span", "sysmeter__inline");
@@ -144,8 +146,18 @@ export function mountSysMeter(session: string): SysMeter {
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Escape") closePop();
   }
+  let touchedAt = 0;
+  el.addEventListener("pointerup", (e) => {
+    if (e.pointerType !== "touch") return;
+    touchedAt = Date.now();
+    toggle();
+  });
   el.addEventListener("click", (e) => {
     e.stopPropagation();
+    if (Date.now() - touchedAt < 700) return;      // already handled on pointerup
+    toggle();
+  });
+  function toggle(): void {
     if (pop) { closePop(); return; }
     pop = h("div", "sysmeter-pop");
     pop.setAttribute("role", "dialog");
@@ -161,19 +173,17 @@ export function mountSysMeter(session: string): SysMeter {
     if (!last) pop.append(h("div", "sysmeter-pop__sub", "loading…"));
     document.addEventListener("pointerdown", onAway, true);
     document.addEventListener("keydown", onKey, true);
-  });
+  }
 
-  let prefs = loadStatsPrefs();
-  const poller = new SysPoller(session, prefs.interval, paint);
-  let running = false;
-  const apply = (): void => {
-    el.hidden = !prefs.sessionBar;
-    if (prefs.sessionBar && !running) { running = true; poller.start(); }
-    if (!prefs.sessionBar) closePop();
-    poller.setInterval(prefs.interval);
+  const poller = new SysPoller(session, loadStatsPrefs().interval, paint);
+  const apply = (p: StatsPrefs): void => {
+    el.hidden = !p.sessionBar;
+    if (!p.sessionBar) closePop();
+    poller.setInterval(p.interval);
+    poller.setActive(p.sessionBar);
   };
-  apply();
-  const unsub = onStatsPrefs((p) => { prefs = p; apply(); });
+  apply(loadStatsPrefs());
+  const unsub = onStatsPrefs(apply);
 
   return {
     el,

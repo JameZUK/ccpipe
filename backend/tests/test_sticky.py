@@ -104,26 +104,3 @@ def test_parent_dir_created_with_0700_perms(tmp_path, monkeypatch):
     assert nested.exists()
     mode = stat.S_IMODE(os.stat(nested.parent).st_mode)
     assert mode == 0o700, f"expected dir 0o700, got {oct(mode)}"
-
-
-def test_build_restore_command_uses_provided_shell():
-    cmd = sticky.build_restore_command(shell="/usr/bin/zsh")
-    assert "claude --continue" in cmd
-    assert "/usr/bin/zsh" in cmd
-    assert "exec " in cmd
-    # The interactive flag matters — without -i the shell would exit
-    # immediately on EOF, defeating the "drop to prompt" intent.
-    assert " -i" in cmd
-
-
-def test_build_restore_command_falls_back_to_env_shell(monkeypatch):
-    monkeypatch.setenv("SHELL", "/bin/bash")
-    cmd = sticky.build_restore_command()
-    assert "/bin/bash" in cmd
-
-
-def test_build_restore_command_quotes_unusual_shell_paths():
-    # Defence in depth — a shell path with a space would otherwise
-    # break shell parsing of the wrapped command.
-    cmd = sticky.build_restore_command(shell="/opt/weird shell/bash")
-    assert "'/opt/weird shell/bash'" in cmd

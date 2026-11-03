@@ -16,8 +16,10 @@
 
 import { apiJson, getFsConfig } from "./api";
 import { sparkMark } from "./brand";
+import { h } from "./dom";
+import { addBusyCheck } from "./update";
 import { openDirectoryBrowser } from "./directory-browser";
-import { clearLastSession } from "./display-prefs";
+import { clearLastSession, takePickerNotice } from "./display-prefs";
 import {
   FOLDER_SVG, GEAR_SVG, ICON_DOWNLOAD, ICON_PLUS, ICON_SEARCH, ICON_VIEW_COMPACT,
   ICON_VIEW_DETAILED, ICON_VIEW_GRID, ICON_X, KEBAB_SVG, PIN_SVG, iconNode,
@@ -66,6 +68,8 @@ type StoppedInfo = {
   stop_reason: "idle" | "stopped" | "gone";
   cwd: string;
   conversation: boolean;
+  /** Never ran Claude: it resumes as a plain shell. */
+  shell?: boolean;
   disk: number | null;
 };
 
@@ -121,14 +125,6 @@ const HEALTH_TIMEOUT_MS = 4000;
 
 // ─── small helpers ────────────────────────────────────────────────────────
 
-function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K, cls?: string, text?: string,
-): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  if (cls) el.className = cls;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
 
 function iconButton(svg: string, label: string, cls: string): HTMLButtonElement {
   const b = h("button", cls);
@@ -271,6 +267,7 @@ export function renderSessionPicker(
   let loaded = false;
   let firstPaint = true;
   let lastPointer = 0;
+  let lastKey = 0;
   const previews = new Map<string, string[]>();
   const previewTargets = new Map<string, HTMLElement>();
   const visible = new Set<string>();
@@ -435,12 +432,32 @@ export function renderSessionPicker(
   cleanups.push(() => sysPanel.dispose());
   cleanups.push(onStatsPrefs((p) => { statsPrefs = p; render(false); }));
 
-  inner.append(hero, sysPanel.el, toolbar, create, errBox, thead, list);
+  // Why the terminal we came from closed (main.ts onSessionGone), shown
+  // once. Its own line: the error box is cleared by the create panel.
+  const noticeBox = h("div", "picker__notice");
+  noticeBox.setAttribute("role", "status");
+  const notice = takePickerNotice();
+  noticeBox.hidden = !notice;
+  if (notice) {
+    const close = h("button", "picker__notice__close", "✕");
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss");
+    close.addEventListener("click", () => { noticeBox.hidden = true; });
+    noticeBox.append(h("span", "picker__notice__text", notice), close);
+  }
+
+  inner.append(hero, sysPanel.el, toolbar, noticeBox, create, errBox, thead, list);
   frame.append(inner);
   root.append(frame);
 
   const showError = (msg: string): void => { errBox.textContent = msg; };
 
+  // Typed into since it opened: a self-update reload would lose that, so it
+  // holds the reload off (update.ts). Merely open — it opens by itself when
+  // there are no sessions, prefilled — doesn't.
+  let createEdited = false;
+  create.addEventListener("input", () => { createEdited = true; });
+  cleanups.push(addBusyCheck(() => create.dataset.expanded === "true" && createEdited));
   const openCreate = (focus: boolean): void => {
     create.dataset.expanded = "true";
     newBtn.setAttribute("aria-expanded", "true");
@@ -448,6 +465,7 @@ export function renderSessionPicker(
     setTimeout(() => create.scrollIntoView({ block: "nearest", behavior: "smooth" }), 60);
   };
   const closeCreate = (): void => {
+    createEdited = false;
     create.dataset.expanded = "false";
     newBtn.setAttribute("aria-expanded", "false");
   };
@@ -742,9 +760,11 @@ export function renderSessionPicker(
 
     if (stopped) {
       const resumeItem = menuItem("resume");
-      resumeItem.title = stopped.conversation
-        ? "Start it again in its directory, on the conversation it was on"
-        : "Start it again in its directory, on that directory's latest conversation";
+      resumeItem.title = stopped.shell
+        ? "Start its shell again in its directory"
+        : stopped.conversation
+          ? "Start it again in its directory, on the conversation it was on"
+          : "Start it again in its directory, on that directory's latest conversation";
       resumeItem.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); void resumeAndOpen(s.name); });
       menu.append(resumeItem, forgetItem);
     } else {
@@ -909,7 +929,8 @@ export function renderSessionPicker(
 
     // Never `hidden`: in the list views it holds a grid column even empty.
     const taskText = stopped
-      ? `${STOP_REASON[stopped.stop_reason]} · resumes ${stopped.conversation ? "its conversation" : "the latest conversation"}`
+      ? `${STOP_REASON[stopped.stop_reason]} · resumes ${
+        stopped.shell ? "as a shell" : stopped.conversation ? "its conversation" : "the latest conversation"}`
       : task.text ?? "";
     const taskEl = h("div", "sess__task", taskText);
     if (taskText) taskEl.title = taskText;
@@ -1136,10 +1157,18 @@ export function renderSessionPicker(
 
   // A soft refresh doesn't rebuild the list while the user is in the middle
   // of something on it.
+  // Keyboard focus on a row holds the refresh while the keyboard is in use
+  // (a rebuild would drop the focus). A click leaves focus on whatever it
+  // hit for as long as nothing else is clicked — that alone must not
+  // freeze the list, so it doesn't count (not :focus-visible).
+  const keyboardInList = (): boolean => {
+    const a = document.activeElement as HTMLElement | null;
+    if (!a || !(list.contains(a) || stoppedWrap.contains(a))) return false;
+    return a.matches(":focus-visible") && Date.now() - lastKey < 30_000;
+  };
   const interacting = (): boolean =>
     Date.now() - lastPointer < 1500
-    || list.contains(document.activeElement)
-    || stoppedWrap.contains(document.activeElement)
+    || keyboardInList()
     || !!inner.querySelector(".sess__menu:not([hidden]), .sess__rename, .sess.is-resuming");
 
   let loadSeq = 0;
@@ -1207,6 +1236,7 @@ export function renderSessionPicker(
     if (!t?.closest?.(".sess__actions")) closeMenus();
   });
   listen("keydown", (e) => {
+    lastKey = Date.now();
     if (e.key === "Escape") { closeMenus(); return; }
     if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
     const a = document.activeElement as HTMLElement | null;

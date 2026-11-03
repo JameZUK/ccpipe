@@ -4,8 +4,10 @@
 // the left and its graph on the right. Hidden with Settings → Display →
 // "system panel on the landing page".
 
+import { h } from "./dom";
 import {
-  SysPoller, type SysSnapshot, fmtBytes, fmtPct, level, loadStatsPrefs, onStatsPrefs, ring, sparkline,
+  SysPoller, type StatsPrefs, type SysSnapshot, fmtBytes, fmtPct, level, loadStatsPrefs, onStatsPrefs, ring,
+  sparkline,
 } from "./sysviz";
 
 export interface SysPanel {
@@ -15,12 +17,6 @@ export interface SysPanel {
   dispose(): void;
 }
 
-function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  if (cls) el.className = cls;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
 
 interface Card { el: HTMLElement; value: HTMLElement; sub: HTMLElement; viz: HTMLElement }
 
@@ -82,17 +78,14 @@ export function mountSysPanel(): SysPanel {
     el.title = s.at ? `updated ${new Date(s.at * 1000).toLocaleTimeString()}` : "";
   };
 
-  let prefs = loadStatsPrefs();
-  el.hidden = !prefs.landing;
-  const poller = new SysPoller(null, prefs.interval, paint);
-  if (prefs.landing) poller.start();
-  let started = prefs.landing;
-  const unsub = onStatsPrefs((p) => {
-    prefs = p;
+  const poller = new SysPoller(null, loadStatsPrefs().interval, paint);
+  const apply = (p: StatsPrefs): void => {
     el.hidden = !p.landing;
     poller.setInterval(p.interval);
-    if (p.landing && !started) { started = true; poller.start(); }
-  });
+    poller.setActive(p.landing);
+  };
+  apply(loadStatsPrefs());
+  const unsub = onStatsPrefs(apply);
 
   return {
     el,

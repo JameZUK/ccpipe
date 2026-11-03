@@ -4,9 +4,12 @@ session bar.
 * Host: CPU %, memory, swap, load and the root filesystem, sampled every
   SAMPLE_S with HISTORY samples kept for the graphs. Cheap (three small
   /proc reads and a statvfs), so it always runs.
-* Per session: CPU (share of the whole machine) and memory (PSS of the
-  session's process tree — every pane, Claude, its MCP helpers and
-  anything they started), every SESSION_S.
+* Per session: CPU (share of the whole machine) every SESSION_S, and
+  memory (PSS of the session's process tree — every pane, Claude, its MCP
+  helpers and anything they started). A process's PSS is re-read at most
+  every PSS_S: smaps_rollup walks the whole address space under the
+  process's mmap lock, which is the expensive part of a pass (hundreds of
+  processes, several with multi-GB maps), and memory moves slowly.
 * Per project: the disk space its directory takes (`du -x`), refreshed
   every DU_REFRESH_S one directory at a time at idle CPU / IO priority.
   All 23 project dirs measured 2026-11-02: 70 GB in 4.6 s.
@@ -32,6 +35,7 @@ log = logging.getLogger(__name__)
 SAMPLE_S = 5
 HISTORY = 120                 # ten minutes of samples
 SESSION_S = 15
+PSS_S = 60
 DEMAND_S = 300
 DU_REFRESH_S = 15 * 60
 DU_TIMEOUT_S = 180
@@ -43,6 +47,7 @@ _last_cpu: tuple[int, int] | None = None
 _sessions: dict[str, dict[str, Any]] = {}
 _session_cwds: dict[str, str] = {}
 _tree_cpu: dict[str, tuple[float, float]] = {}
+_pss: dict[int, tuple[float, int, float]] = {}   # pid → (start, bytes, measured at)
 _sessions_at = -1e9
 _sizes: dict[str, tuple[int | None, float]] = {}
 _demanded_at = -1e9
@@ -134,9 +139,20 @@ def sample_host() -> None:
 
 # ─── per session ──────────────────────────────────────────────────────────
 
+def _pss_of(proc: proctree.Proc, now: float) -> int:
+    hit = _pss.get(proc.pid)
+    if hit and hit[0] == proc.start and now - hit[2] < PSS_S:
+        return hit[1]
+    val = proctree.pss_bytes(proc.pid)
+    _pss[proc.pid] = (proc.start, val, now)
+    return val
+
+
 def _measure_sessions(panes: dict[str, list[int]]) -> dict[str, dict[str, Any]]:
     table = proctree.snapshot()
     now = time.monotonic()
+    for gone in set(_pss) - set(table.procs):
+        _pss.pop(gone, None)
     cores = os.cpu_count() or 1
     out: dict[str, dict[str, Any]] = {}
     for name, roots in panes.items():
@@ -149,7 +165,7 @@ def _measure_sessions(panes: dict[str, list[int]]) -> dict[str, dict[str, Any]]:
         if prev and now > prev[0]:
             pct = round(max(0.0, (cpu_s - prev[1]) / (now - prev[0]) * 100.0 / cores), 1)
         _tree_cpu[name] = (now, cpu_s)
-        out[name] = {"cpu": pct, "mem": sum(proctree.pss_bytes(p) for p in pids)}
+        out[name] = {"cpu": pct, "mem": sum(_pss_of(table.procs[p], now) for p in pids)}
     for gone in set(_tree_cpu) - set(panes):
         _tree_cpu.pop(gone, None)
     return out

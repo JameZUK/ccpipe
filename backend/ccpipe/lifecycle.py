@@ -28,21 +28,29 @@ Helpers Claude starts by itself (MCP servers, the Playwright browser,
 language servers) are NOT tasks: on 2026-11-02 19 of 23 idle sessions had
 exactly those running and nothing else.
 
-A session is only stopped when its directory is known (so it can resume),
-and every auto-stop is logged with how long it had been idle.
+Only CLAUDE sessions are idle-stopped — a Claude process must be running
+in the session — and only when the directory is known (so it can resume).
+A plain shell (one started over ssh, say) costs next to nothing and is
+never touched. Every auto-stop is logged with how long it had been idle.
+
+Resuming starts `claude --resume <its conversation>` (or `--continue` when
+the transcript is gone); a session never seen running Claude resumes as a
+plain shell in its directory.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shlex
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import config as app_config
 from . import proctree, session_meta, sticky, tmux
+from .paths import claude_project_dir
 
 log = logging.getLogger(__name__)
 
@@ -50,9 +58,8 @@ TICK_S = 60
 CPU_BUSY_PCT = 3.0                 # of one core, averaged over a tick
 DETAILS_EVERY_S = 300
 PROMPT_RE = re.compile(r"Do you want to|Would you like to|❯\s*1\.\s*Yes|\[y/n\]|\(y/n\)", re.I)
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
-_started = time.time()
+_started = time.time()                        # ≈ process start (imported at startup)
 _busy_at: dict[str, float] = {}               # last moment a busy signal was seen
 _cpu_prev: dict[str, tuple[float, float]] = {}  # (monotonic, cpu seconds) last tick
 _details_at: dict[str, float] = {}
@@ -113,6 +120,13 @@ def busy_reason(s: tmux.TmuxSession, roots: list[int], table: proctree.Table,
     return None
 
 
+def has_claude(roots: list[int], table: proctree.Table, state: str | None) -> bool:
+    """Is a Claude process running in the session (any pane)?"""
+    if state is not None:
+        return True
+    return any(table.procs[p].is_claude for r in roots for p in table.subtree(r))
+
+
 def status() -> dict[str, dict[str, Any]]:
     """name → {"busy": reason | None, "idle_since": unix, "stops_at": unix | None},
     as of the last tick."""
@@ -121,7 +135,9 @@ def status() -> dict[str, dict[str, Any]]:
 
 async def tick() -> None:
     cfg = app_config.load().sessions
-    sessions = await tmux.list_sessions()
+    sessions, complete = await tmux.list_sessions_checked()
+    if not complete:
+        return                     # tmux unreachable: decide nothing this tick
     live = {s.name for s in sessions}
     for gone in set(_status) - live:
         _status.pop(gone, None)
@@ -137,15 +153,18 @@ async def tick() -> None:
     now, mono = time.time(), time.monotonic()
     for s in sessions:
         cwd, title = details.get(s.name, (None, None))
-        reason = busy_reason(s, panes.get(s.name, []), table, title, now, mono,
-                             claude.get(s.name, (None, 0))[0])
+        roots = panes.get(s.name, [])
+        state = claude.get(s.name, (None, 0))[0]
+        reason = busy_reason(s, roots, table, title, now, mono, state)
         if reason:
             _busy_at[s.name] = now
         m = meta.get(s.name, {})
         idle_since = max(_busy_at.get(s.name, _started), s.activity, s.created, m.get("opened", 0))
         limit = cfg.idle_stop_sticky_min if s.name in stick else cfg.idle_stop_other_min
         resumable = bool(m.get("cwd") or stick.get(s.name, {}).get("cwd") or cwd)
-        stops_at = idle_since + limit * 60 if (limit and resumable and not reason) else None
+        claude_in = has_claude(roots, table, state)
+        stoppable = bool(limit and resumable and claude_in and not reason)
+        stops_at = idle_since + limit * 60 if stoppable else None
         _status[s.name] = {"busy": reason, "idle_since": int(idle_since),
                            "stops_at": int(stops_at) if stops_at else None}
 
@@ -153,7 +172,7 @@ async def tick() -> None:
             _details_at[s.name] = now
             try:
                 sid, ccwd = await tmux.claude_sid_and_cwd(s.name)
-                session_meta.note_details(s.name, ccwd or cwd, sid)
+                session_meta.note_details(s.name, ccwd or cwd, sid, claude_in)
             except Exception:
                 log.debug("details for %s failed", s.name, exc_info=True)
 
@@ -187,22 +206,40 @@ async def run() -> None:
 # ─── resume / stop / forget ───────────────────────────────────────────────
 
 def _transcript_exists(cwd: str, claude_id: str) -> bool:
-    return (Path.home() / ".claude" / "projects" / cwd.replace("/", "-")
-            / f"{claude_id}.jsonl").is_file()
+    return (claude_project_dir(cwd) / f"{claude_id}.jsonl").is_file()
 
 
-def resume_command(cwd: str, claude_id: str | None) -> str:
+def resume_command(cwd: str, claude_id: str | None, shell: bool = False) -> str:
     """The conversation the session was on when known (and its transcript is
-    still there); otherwise the directory's most recent one."""
-    if claude_id and _UUID_RE.match(claude_id) and _transcript_exists(cwd, claude_id):
+    still there); otherwise the directory's most recent one. A session that
+    never ran Claude gets its shell back."""
+    if shell:
+        return f"exec {shlex.quote(os.environ.get('SHELL') or '/bin/bash')} -i"
+    if claude_id and session_meta.UUID_RE.match(claude_id) and _transcript_exists(cwd, claude_id):
         return tmux.wrap_in_shell(f"claude --resume {shlex.quote(claude_id)}")
     return tmux.wrap_in_shell("claude --continue")
 
 
-def resumable(name: str) -> tuple[str, str | None] | None:
+class Resumable(NamedTuple):
+    cwd: str
+    claude: str | None
+    shell: bool
+
+
+def resumable(name: str) -> Resumable | None:
     m = session_meta.load().get(name, {})
     cwd = m.get("cwd") or sticky.load().get(name, {}).get("cwd")
-    return (cwd, m.get("claude")) if cwd else None
+    return Resumable(cwd, m.get("claude"), bool(m.get("shell"))) if cwd else None
+
+
+def ended_note(name: str) -> str:
+    """Why a session that was open is no longer running, for the terminal."""
+    m = session_meta.load().get(name)
+    if m is None:
+        return f"{name} was removed"
+    return {"stopped": f"{name} was stopped",
+            "idle": f"{name} was stopped after being idle"}.get(m.get("stop_reason", ""),
+                                                                f"{name} has ended")
 
 
 async def resume(name: str, *, capped: bool = True) -> None:
@@ -212,7 +249,7 @@ async def resume(name: str, *, capped: bool = True) -> None:
     target = resumable(name)
     if target is None:
         raise LifecycleError(404, "nothing to resume: its directory isn't known")
-    cwd, claude_id = target
+    cwd, claude_id, shell = target
     try:
         resolved = Path(cwd).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -229,11 +266,12 @@ async def resume(name: str, *, capped: bool = True) -> None:
         raise LifecycleError(403, f"directory is outside the allowed root: {cwd}")
     if capped and await tmux.at_session_cap():
         raise LifecycleError(429, f"session limit reached ({tmux.MAX_SESSIONS})")
-    await tmux.create_session(name, command=resume_command(str(resolved), claude_id), cwd=str(resolved))
+    await tmux.create_session(name, command=resume_command(str(resolved), claude_id, shell),
+                              cwd=str(resolved))
     session_meta.mark_running(name)
     _busy_at[name] = time.time()
     log.info("resumed session %r in %s (%s)", name, resolved,
-             f"conversation {claude_id}" if claude_id else "latest conversation")
+             "shell" if shell else f"conversation {claude_id}" if claude_id else "latest conversation")
 
 
 async def stop(name: str, reason: str = "stopped") -> None:
@@ -242,8 +280,11 @@ async def stop(name: str, reason: str = "stopped") -> None:
         return
     try:
         sid, cwd = await tmux.claude_sid_and_cwd(name)
-        details = await tmux.active_panes()
-        session_meta.note_details(name, cwd or details.get(name, (None, None))[0], sid)
+        details, panes, states = await asyncio.gather(
+            tmux.active_panes(), tmux.all_panes(), tmux.claude_states())
+        table = await asyncio.to_thread(proctree.snapshot)
+        claude_in = has_claude(panes.get(name, []), table, states.get(name, (None, 0))[0])
+        session_meta.note_details(name, cwd or details.get(name, (None, None))[0], sid, claude_in)
     except Exception:
         log.debug("details before stop failed", exc_info=True)
     if not await tmux.kill_session(name):
@@ -269,11 +310,21 @@ async def forget(name: str) -> None:
 # ─── boot ─────────────────────────────────────────────────────────────────
 
 async def boot_restore() -> None:
-    """At boot — tmux has no sessions — start the most recently used
-    ``boot_sticky`` sticky and ``boot_other`` other sessions. A backend
-    restart with tmux still running starts nothing (sessions the user
-    stopped stay stopped)."""
+    """At boot — a tmux server that started with ccpipe, so every session
+    died since ccpipe last ran — start the most recently used
+    ``boot_sticky`` sticky and ``boot_other`` other sessions.
+
+    A backend restart (deploy) finds the tmux server already running and
+    starts nothing, even when no user session is running: sessions the
+    user stopped stay stopped. The server's age is the test, not the
+    session count — ccpipe's hidden anchor session keeps the server alive
+    with zero user sessions, and the lifespan creates that anchor before
+    this runs."""
     if await tmux.list_sessions():
+        return
+    started = await tmux.server_started_at()
+    if started is None or started < int(_started) - 1:
+        log.info("boot: tmux server predates ccpipe (a restart, not a boot) — starting nothing")
         return
     cfg = app_config.load().sessions
     meta = session_meta.load()

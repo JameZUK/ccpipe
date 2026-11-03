@@ -28,6 +28,7 @@ from .. import config as app_config
 from .. import drafts, lifecycle, session_meta, sticky, sysstats, tmux, tmux_ui, ws
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
+from ..paths import claude_project_dir
 from ..tmux_control import CONTROL_SESSION_NAME
 from .fs import _enforce_fs_jail, content_disposition_attachment
 
@@ -47,10 +48,7 @@ def _reject_control_session(name: str) -> None:
 
 # Used to validate resumeSessionId and to confirm a /api/claude-sessions
 # JSONL filename matches the claude session UUID format.
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    re.IGNORECASE,
-)
+_UUID_RE = session_meta.UUID_RE
 
 
 # ─── Pydantic bodies ───────────────────────────────────────────────────────
@@ -110,6 +108,8 @@ class StoppedSessionInfo(BaseModel):
     cwd: str
     # The Claude conversation it resumes, when known.
     conversation: bool = False
+    # Never seen running Claude: it resumes as a plain shell.
+    shell: bool = False
     disk: int | None = None
 
 
@@ -175,11 +175,16 @@ def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
 
 async def _session_infos() -> list[SessionInfo]:
     sysstats.touch()
-    sessions, panes, claude = await asyncio.gather(
-        tmux.list_sessions(), tmux.active_panes(), tmux.claude_states())
+    (sessions, complete), panes, claude = await asyncio.gather(
+        tmux.list_sessions_checked(), tmux.active_panes(), tmux.claude_states())
     sticky_names = sticky.sticky_names()
-    meta = await asyncio.to_thread(
-        session_meta.reconcile, {s.name: (s.created, s.activity) for s in sessions}, sticky_names)
+    if complete:
+        meta = await asyncio.to_thread(
+            session_meta.reconcile, {s.name: (s.created, s.activity) for s in sessions}, sticky_names)
+    else:
+        # tmux didn't answer: an empty list here would mark every session
+        # stopped ("gone") and drop the ones that can't be resumed.
+        meta = session_meta.load()
     return [_to_session_info(s, sticky_names, meta, panes, claude) for s in sessions]
 
 
@@ -352,7 +357,10 @@ def _lifecycle_name(name: str) -> str:
 async def remembered_sessions() -> list[StoppedSessionInfo]:
     """Sessions ccpipe remembers that aren't running, most recently used first."""
     sysstats.touch()
-    live = {s.name for s in await tmux.list_sessions()}
+    sessions, complete = await tmux.list_sessions_checked()
+    if not complete:
+        return []                     # can't tell running from stopped
+    live = {s.name for s in sessions}
     meta = session_meta.load()
     stick = sticky.load()
     out: list[StoppedSessionInfo] = []
@@ -367,7 +375,8 @@ async def remembered_sessions() -> list[StoppedSessionInfo]:
             name=name, sticky=name in stick, created=m.get("created", 0),
             opened=m.get("opened", 0), stopped=m.get("stopped", 0),
             stop_reason=m.get("stop_reason", "gone"), cwd=cwd,
-            conversation=bool(m.get("claude")), disk=sysstats.project_size(cwd)))
+            conversation=bool(m.get("claude")), shell=bool(m.get("shell")),
+            disk=sysstats.project_size(cwd)))
     out.sort(key=lambda i: max(i.opened, i.stopped, i.created), reverse=True)
     return out
 
@@ -413,11 +422,15 @@ async def session_config_get() -> dict[str, Any]:
 
 @router.post("/api/session-config", dependencies=[AuthDep, CsrfDep])
 async def session_config_set(body: SessionsConfigBody) -> dict[str, Any]:
-    cfg = app_config.load()
-    merged = {**app_config.load().to_dict()["sessions"],
+    cfg = app_config.load_for_edit()
+    merged = {**cfg.to_dict()["sessions"],
               **{k: v for k, v in body.model_dump().items() if v is not None}}
     cfg.sessions = app_config.SessionsConfig.from_dict(merged)
-    app_config.save(cfg)
+    try:
+        app_config.save(cfg)
+    except OSError as exc:
+        log.warning("could not save session config: %s", exc)
+        raise HTTPException(status_code=500, detail="could not save the settings")
     return dict(cfg.to_dict()["sessions"])
 
 
@@ -454,11 +467,8 @@ async def set_sticky_endpoint(name: str, body: StickyBody) -> SessionInfo:
 # ─── Claude Code session listing + export ─────────────────────────────────
 
 def _projects_subdir_for_cwd(cwd: str) -> Path:
-    """Return ``~/.claude/projects/<encoded>/`` for a given cwd. Claude
-    encodes the cwd by replacing each '/' with '-', so
-    ``/home/you/Projects/foo`` becomes ``-home-you-Projects-foo``."""
-    encoded = cwd.replace("/", "-")
-    return Path.home() / ".claude" / "projects" / encoded
+    """``~/.claude/projects/<encoded>/`` for a cwd — see paths.claude_project_dir."""
+    return claude_project_dir(cwd)
 
 
 def _read_first_real_user_message(path: Path) -> str | None:

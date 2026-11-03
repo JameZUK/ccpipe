@@ -6,6 +6,7 @@ import {
   loadLastSession,
   onDisplayPrefsChange,
   saveLastSession,
+  setPickerNotice,
 } from "./display-prefs";
 import { DOC_SVG, FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
 import { isMobileLayout, mountMobileUI, type MobileUI } from "./mobile";
@@ -950,7 +951,9 @@ async function attachTerminal(session: string): Promise<void> {
       if (noisy.has(msg.event)) flashState(stateLabel, msg.event);
     },
     onSessionGone(msg) {
-      flashState(stateLabel, `${msg.session} closed`, 4000);
+      const note = msg.note || `${msg.session} closed`;
+      flashState(stateLabel, note, 4000);
+      setPickerNotice(note);              // and again on the picker it returns to
       socket.close();
       setTimeout(bootstrap, 1200);
     },

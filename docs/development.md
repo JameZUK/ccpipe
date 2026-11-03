@@ -55,7 +55,9 @@ backend/
                        live between devices by ws.py
     safe_write.py      Atomic saves that keep the file's mode and write
                        through symlinks (file panel + settings patch)
-    paths.py           state_dir() shared by auth/config/sticky
+    paths.py           state_dir() shared by auth/config/sticky;
+                       claude_project_dir() — Claude Code's
+                       ~/.claude/projects/<encoded cwd>
     tmux.py            libtmux wrapper for one-shot ops
     tmux_control.py    Long-lived `tmux -C` listener; pushes events
     tmux_setup.py      Sets server-wide default-shell etc. at startup
@@ -76,7 +78,8 @@ backend/
     sysstats.py        Host CPU/mem/disk sampler + per-session PSS/CPU,
                        project sizes (du at idle priority)
     proctree.py        /proc process-table snapshot (busy detection,
-                       per-session memory)
+                       per-session memory); run_argv, the one helper
+                       for short subprocess queries (tmux, du)
     settings_patch.py  Idempotently adds voice keys to ~/.claude/settings.json
   tests/               pytest suite
   pyproject.toml

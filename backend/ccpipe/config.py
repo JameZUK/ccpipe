@@ -10,6 +10,7 @@ Storage: ``~/.local/state/ccpipe/config.json`` (or
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -228,8 +229,17 @@ def load() -> AppConfig:
     return _cache
 
 
+def load_for_edit() -> AppConfig:
+    """A private copy of the config to change and pass to ``save()``.
+    Editing ``load()``'s object directly changes the live settings even
+    when the save then fails — the file and the running app disagree until
+    a restart."""
+    return copy.deepcopy(load())
+
+
 def save(config: AppConfig) -> None:
-    """Atomic-replace persist. Updates the in-memory cache."""
+    """Atomic-replace persist. Updates the in-memory cache — only once the
+    file is written."""
     global _cache
     path = config_path()
     # Mirror auth._ensure_state_dir: tighten the state directory to 0700

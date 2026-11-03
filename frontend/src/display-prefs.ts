@@ -169,6 +169,22 @@ export function clearLastSession(): void {
   try { localStorage.removeItem(LAST_SESSION_KEY); } catch {}
 }
 
+// A one-line message for the next session picker — why the terminal it
+// replaces closed ("work was stopped", "couldn't resume …"). Per tab.
+const PICKER_NOTICE_KEY = "ccpipe.picker.notice";
+
+export function setPickerNotice(msg: string): void {
+  try { sessionStorage.setItem(PICKER_NOTICE_KEY, msg); } catch { /* private mode */ }
+}
+
+export function takePickerNotice(): string | null {
+  try {
+    const v = sessionStorage.getItem(PICKER_NOTICE_KEY);
+    sessionStorage.removeItem(PICKER_NOTICE_KEY);
+    return v;
+  } catch { return null; }
+}
+
 // ─── TTS mute (per-tab affordance, but persisted) ──────────────────────
 
 const TTS_MUTE_KEY = "ccpipe.tts.muted";

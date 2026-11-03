@@ -739,10 +739,9 @@ def test_claude_sessions_lists_resumable_only(authed_client, tmp_path, monkeypat
     proj_cwd.mkdir(parents=True)
 
     # Two JSONLs live in the encoded projects dir.
-    encoded_dir = (
-        fake_home / ".claude" / "projects" /
-        (str(proj_cwd).replace("/", "-"))
-    )
+    from ccpipe.paths import claude_project_dir
+    encoded_dir = claude_project_dir(str(proj_cwd))
+    assert encoded_dir.parent == fake_home / ".claude" / "projects"
     encoded_dir.mkdir(parents=True)
     a_id = "11111111-2222-3333-4444-555555555555"
     b_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -780,10 +779,8 @@ def test_claude_sessions_skips_framework_caveat_messages(authed_client, tmp_path
     monkeypatch.setattr(routes_sessions.Path, "home", staticmethod(lambda: tmp_path))
     proj_cwd = tmp_path / "p"
     proj_cwd.mkdir()
-    encoded = (
-        tmp_path / ".claude" / "projects" /
-        str(proj_cwd).replace("/", "-")
-    )
+    from ccpipe.paths import claude_project_dir
+    encoded = claude_project_dir(str(proj_cwd))
     encoded.mkdir(parents=True)
     (encoded / "11111111-2222-3333-4444-555555555555.jsonl").write_text(
         '{"type":"user","message":{"role":"user","content":"<local-command-caveat>blah"}}\n'

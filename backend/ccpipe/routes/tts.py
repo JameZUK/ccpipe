@@ -95,7 +95,7 @@ async def tts_config_get() -> dict[str, object]:
 
 @router.post("/api/tts/config", dependencies=[AuthDep, CsrfDep])
 async def tts_config_set(body: TtsConfigBody) -> dict[str, object]:
-    cfg = app_config.load()
+    cfg = app_config.load_for_edit()
     if body.voice is not None:
         v = body.voice.strip()
         if v:

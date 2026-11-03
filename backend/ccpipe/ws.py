@@ -327,9 +327,11 @@ async def _watch_client_size(session: str) -> tuple[int, int]:
 
 
 async def handle_terminal_ws(websocket: WebSocket, session: str,
-                             watch: bool = False, tile: bool = False) -> None:
+                             watch: bool = False, tile: bool = False,
+                             reattach: bool = False) -> None:
     try:
-        await _TerminalConnection(websocket, session, watch=watch, tile=tile).run()
+        await _TerminalConnection(websocket, session, watch=watch, tile=tile,
+                                  reattach=reattach).run()
     except WebSocketDisconnect:
         # The client went away mid-handshake (e.g. a phone's network
         # handoff, or the browser replacing a dial it had just started).
@@ -363,9 +365,16 @@ class _TerminalConnection:
     each phase is its own method."""
 
     def __init__(self, websocket: WebSocket, session: str,
-                 watch: bool = False, tile: bool = False) -> None:
+                 watch: bool = False, tile: bool = False, reattach: bool = False) -> None:
         self.ws = websocket
         self.session = session
+        # A reconnect of a terminal that was already attached: it never
+        # creates or resumes the session. If the session is gone it ended
+        # while this terminal had it open — stopped or forgotten from the
+        # picker, idle-stopped, `exit`ed — and bringing it back would undo
+        # exactly that (the old reconnect resurrected a session the moment
+        # it was stopped, and a forgotten one as a fresh Claude in $HOME).
+        self.reattach = reattach
         # A secondary tile beside the main terminal (tile=True): no TTS, no
         # mic, and it never creates a session. A watch tile additionally
         # attaches read-only + ignore-size, so watching never resizes the
@@ -410,18 +419,17 @@ class _TerminalConnection:
     # ── lifecycle ──────────────────────────────────────────────────────
     async def run(self) -> None:
         await self.ws.accept()
-        if self.tile:
+        if self.tile or self.reattach:
             # A tile shows an existing session; it must never quietly
             # (re)create one — a tile left over from a killed session would
-            # otherwise resurrect it.
+            # otherwise resurrect it. Likewise a reconnect (see __init__).
             if not await tmux.session_exists(self.session):
-                with contextlib.suppress(Exception):
-                    await self.ws.send_json({"type": "session_gone", "session": self.session})
-                    await self.ws.close(code=1000, reason="no such session")
+                from . import lifecycle
+                await self._session_gone(lifecycle.ended_note(self.session))
                 return
-        elif not await self._ensure_session():
-            return
-        else:
+        if not self.tile:
+            if not await self._ensure_session():
+                return
             # "Last opened" in the session picker (tiles don't count).
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(session_meta.note_opened, self.session)
@@ -526,7 +534,10 @@ class _TerminalConnection:
             return True
         # A remembered session (stopped when idle, not started at boot, or a
         # sticky one that vanished): resume it in its directory, on the same
-        # Claude conversation — see lifecycle.py.
+        # Claude conversation — see lifecycle.py. If that fails (its
+        # directory is gone or outside the root) say so: falling through to
+        # a fresh Claude in $HOME under the same name would also overwrite
+        # the record of where — and on which conversation — it lived.
         from . import lifecycle
         if lifecycle.resumable(self.session):
             try:
@@ -536,7 +547,9 @@ class _TerminalConnection:
                 log.warning("resume of %r on connect failed: %s", self.session, exc.detail)
                 if exc.status == 429:
                     await self.ws.close(code=1013, reason="session limit reached")
-                    return False
+                else:
+                    await self._session_gone(f"couldn't resume {self.session}: {exc.detail}")
+                return False
         if await tmux.at_session_cap():
             await self.ws.close(code=1013, reason="session limit reached")
             return False
@@ -545,6 +558,13 @@ class _TerminalConnection:
             # survives claude exiting instead of vanishing with it.
             await tmux.create_session(self.session, command=tmux.wrap_in_shell("claude"))
         return True
+
+    async def _session_gone(self, note: str) -> None:
+        """Tell the client the session isn't there (and won't be made), then
+        close. The client goes back to the session list and shows *note*."""
+        with contextlib.suppress(Exception):
+            await self.ws.send_json({"type": "session_gone", "session": self.session, "note": note})
+            await self.ws.close(code=1000, reason="no such session")
 
     async def _send_hello(self) -> None:
         # Best-effort: try to open the mic pipe now so the hello message can

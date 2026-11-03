@@ -51,6 +51,7 @@ def _reset():
     lifecycle._cpu_prev.clear()
     lifecycle._busy_at.clear()
     lifecycle._status.clear()
+    lifecycle._details_at.clear()
     yield
 
 
@@ -131,10 +132,34 @@ def test_boot_starts_only_the_most_recent_per_kind(state, monkeypatch):
     async def fake_resume(name, capped=True):
         started.append(name)
 
+    async def fresh_server():
+        return int(time.time())                       # tmux started with ccpipe
+
     monkeypatch.setattr(tmux, "list_sessions", fake_list)
+    monkeypatch.setattr(tmux, "server_started_at", fresh_server)
     monkeypatch.setattr(lifecycle, "resume", fake_resume)
     asyncio.run(lifecycle.boot_restore())
     assert sorted(started) == ["e2", "s1", "s3"]
+
+
+def test_a_restart_with_every_session_stopped_is_not_a_boot(state, monkeypatch):
+    # A deploy restarts ccpipe; tmux keeps running with only ccpipe's hidden
+    # anchor session (the user had stopped everything). Starting the boot
+    # picks here would undo those stops.
+    sticky.set_sticky("s1", "/p/s1")
+    session_meta.note_created("s1", when=100, cwd="/p/s1")
+    session_meta.mark_stopped("s1", "stopped")
+
+    async def fake_list():
+        return []
+
+    async def old_server():
+        return int(lifecycle._started) - 3600
+
+    monkeypatch.setattr(tmux, "list_sessions", fake_list)
+    monkeypatch.setattr(tmux, "server_started_at", old_server)
+    monkeypatch.setattr(lifecycle, "resume", lambda *a, **k: pytest.fail("resumed"))
+    asyncio.run(lifecycle.boot_restore())
 
 
 def test_boot_does_nothing_when_tmux_already_has_sessions(state, monkeypatch):
@@ -148,9 +173,9 @@ def test_boot_does_nothing_when_tmux_already_has_sessions(state, monkeypatch):
     asyncio.run(lifecycle.boot_restore())
 
 
-def _fake_tick_env(monkeypatch, sessions, table, screen=None, titles=None):
+def _fake_tick_env(monkeypatch, sessions, table, screen=None, titles=None, complete=True):
     async def fake_list():
-        return sessions
+        return sessions, complete
 
     async def fake_panes():
         return {s.name: [10] for s in sessions}
@@ -172,7 +197,7 @@ def _fake_tick_env(monkeypatch, sessions, table, screen=None, titles=None):
     async def fake_stop(name, reason="stopped"):
         stopped.append(name)
 
-    monkeypatch.setattr(tmux, "list_sessions", fake_list)
+    monkeypatch.setattr(tmux, "list_sessions_checked", fake_list)
     monkeypatch.setattr(tmux, "all_panes", fake_panes)
     monkeypatch.setattr(tmux, "active_panes", fake_active)
     monkeypatch.setattr(tmux, "claude_sid_and_cwd", fake_sid)
@@ -223,6 +248,28 @@ def test_never_stops_when_disabled(state, monkeypatch):
     assert stopped == [] and lifecycle.status()["x"]["stops_at"] is None
 
 
+def test_tick_never_stops_a_session_without_claude(state, monkeypatch):
+    # A plain shell (say, started over ssh) sitting at its prompt: idle by
+    # every rule, but not ccpipe's to stop — and it costs next to nothing.
+    monkeypatch.setattr(lifecycle, "_started", 0.0)
+    old = time.time() - 50 * 3600
+    shell_only = _table((10, 1, "bash", ["/bin/bash", "-i"], 0.0))
+    stopped = _fake_tick_env(monkeypatch, [_sess("ssh", activity=old, created=old)], shell_only)
+    asyncio.run(lifecycle.tick())
+    assert stopped == []
+    st = lifecycle.status()["ssh"]
+    assert st["busy"] is None and st["stops_at"] is None
+    assert session_meta.load()["ssh"].get("shell") is True     # resumes as a shell
+
+
+def test_tick_decides_nothing_when_tmux_does_not_answer(state, monkeypatch):
+    monkeypatch.setattr(lifecycle, "_started", 0.0)
+    lifecycle._status["kept"] = {"busy": "x", "idle_since": 1, "stops_at": None}
+    stopped = _fake_tick_env(monkeypatch, [], _table(*IDLE), complete=False)
+    asyncio.run(lifecycle.tick())
+    assert stopped == [] and "kept" in lifecycle.status()
+
+
 def test_resume_command_prefers_the_recorded_conversation(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     cid = "0f0e0d0c-0b0a-4908-8706-050403020100"
@@ -232,6 +279,35 @@ def test_resume_command_prefers_the_recorded_conversation(tmp_path, monkeypatch)
     (d / f"{cid}.jsonl").write_text("{}\n")
     assert f"claude --resume {cid}" in lifecycle.resume_command("/p/x", cid)
     assert "claude --continue" in lifecycle.resume_command("/p/x", "not-a-uuid")
+
+
+def test_transcript_lookup_uses_claude_codes_directory_encoding(tmp_path, monkeypatch):
+    # Claude Code turns every non-alphanumeric character into "-": the
+    # transcripts of /p/my.site_x live in -p-my-site-x (on this machine:
+    # ~/Projects/jamez.me.uk → -home-james-Projects-jamez-me-uk).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cid = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    d = tmp_path / ".claude" / "projects" / "-p-my-site-x-y"
+    d.mkdir(parents=True)
+    (d / f"{cid}.jsonl").write_text("{}\n")
+    assert f"claude --resume {cid}" in lifecycle.resume_command("/p/my.site_x y", cid)
+
+
+def test_a_session_that_never_ran_claude_resumes_as_a_shell(state, monkeypatch):
+    monkeypatch.setenv("SHELL", "/opt/weird shell/zsh")
+    session_meta.note_details("ssh", "/p/ssh", None, has_claude=False)
+    r = lifecycle.resumable("ssh")
+    assert r is not None and r.shell is True
+    cmd = lifecycle.resume_command(r.cwd, r.claude, r.shell)
+    assert cmd == "exec '/opt/weird shell/zsh' -i"         # quoted; interactive
+    # Once a conversation has been seen it is a Claude session for good —
+    # even if Claude has exited to the shell when it is next checked.
+    cid = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    session_meta.note_details("ssh", "/p/ssh", cid, has_claude=True)
+    session_meta.note_details("ssh", "/p/ssh", None, has_claude=False)
+    r = lifecycle.resumable("ssh")
+    assert r.shell is False and r.claude == cid
+    assert "claude --continue; exec '/opt/weird shell/zsh' -i" == lifecycle.resume_command(r.cwd, None)
 
 
 @pytest.fixture
@@ -261,7 +337,7 @@ def test_stop_remember_resume_round_trip(tmux_server, monkeypatch):
     from ccpipe.routes import sessions
 
     # Resuming runs `claude …`; any command will do for the round trip.
-    monkeypatch.setattr(lifecycle, "resume_command", lambda cwd, cid: "sleep 600")
+    monkeypatch.setattr(lifecycle, "resume_command", lambda *a: "sleep 600")
 
     async def go():
         await sessions.list_sessions()                       # records the sessions
@@ -279,6 +355,21 @@ def test_stop_remember_resume_round_trip(tmux_server, monkeypatch):
         assert "work" not in session_meta.load()
 
     asyncio.run(go())
+
+
+def test_a_failed_config_save_leaves_the_live_settings_alone(state, monkeypatch):
+    from fastapi import HTTPException
+
+    from ccpipe.routes import sessions
+
+    def broken_save(cfg):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(app_config, "save", broken_save)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(sessions.session_config_set(sessions.SessionsConfigBody(boot_sticky=0)))
+    assert exc.value.status_code == 500
+    assert app_config.load().sessions.boot_sticky == 5
 
 
 def test_session_config_round_trip(state):
@@ -310,3 +401,115 @@ def test_claude_states_reads_live_status_files(tmp_path, monkeypatch):
         {"pid": me, "procStart": "1", "status": "idle", "tmux": "old:@1.%1"}))
     got = tmux._read_claude_states({"%7": "work", "%1": "old"})
     assert got == {"work": ("busy", 1_793_000_000)}
+
+
+# ─── reconnects and failed resumes (ws.py) ───────────────────────────────
+
+class _FakeWs:
+    def __init__(self):
+        self.sent: list[dict] = []
+        self.closed: tuple[int, str] | None = None
+
+    async def accept(self):
+        pass
+
+    async def send_json(self, msg):
+        self.sent.append(msg)
+
+    async def close(self, code=1000, reason=""):
+        self.closed = (code, reason)
+
+
+def _no_create(monkeypatch):
+    async def missing(name):
+        return False
+
+    async def create(*a, **k):
+        pytest.fail("created a session")
+
+    monkeypatch.setattr(tmux, "session_exists", missing)
+    monkeypatch.setattr(tmux, "create_session", create)
+
+
+def test_a_reconnect_never_brings_back_a_stopped_session(state, monkeypatch):
+    # The terminal was attached when the session was stopped from the
+    # picker; its reconnect must not resume it (nor, once forgotten, start
+    # a fresh Claude in $HOME under the same name).
+    from ccpipe import ws
+    _no_create(monkeypatch)
+    session_meta.note_created("work", when=100, cwd="/p/work")
+    session_meta.mark_stopped("work", "stopped")
+    fake = _FakeWs()
+    asyncio.run(ws._TerminalConnection(fake, "work", reattach=True).run())
+    assert fake.sent == [{"type": "session_gone", "session": "work", "note": "work was stopped"}]
+    session_meta.forget("work")
+    fake = _FakeWs()
+    asyncio.run(ws._TerminalConnection(fake, "work", reattach=True).run())
+    assert fake.sent[0]["note"] == "work was removed"
+
+
+def test_a_failed_resume_reports_instead_of_starting_claude_in_home(state, monkeypatch):
+    from ccpipe import ws
+    _no_create(monkeypatch)
+    session_meta.note_created("gone", when=100, cwd="/no/such/dir")
+    cid = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    session_meta.note_details("gone", None, cid)
+    before = session_meta.load()["gone"]
+    fake = _FakeWs()
+    asyncio.run(ws._TerminalConnection(fake, "gone").run())
+    assert fake.sent[0]["type"] == "session_gone"
+    assert fake.sent[0]["note"].startswith("couldn't resume gone: its directory no longer exists")
+    assert session_meta.load()["gone"] == before                 # record untouched
+
+
+# ─── tmux listing completeness, PSS cache ────────────────────────────────
+
+def test_an_unreachable_tmux_lists_as_incomplete(monkeypatch, tmp_path):
+    if not shutil.which("tmux"):
+        pytest.skip("tmux not installed")
+    d = tempfile.mkdtemp(prefix="ccn", dir="/tmp")
+    monkeypatch.setenv("TMUX_TMPDIR", d)
+    monkeypatch.delenv("TMUX", raising=False)
+    try:
+        assert tmux._sync_list_sessions() == ([], False)       # no server at all
+        assert asyncio.run(tmux.server_started_at()) is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_session_list_skips_reconcile_when_tmux_does_not_answer(state, monkeypatch):
+    from ccpipe.routes import sessions
+    session_meta.note_created("work", when=100, cwd="/p/work")
+    before = session_meta.load()
+
+    async def unanswered():
+        return [], False
+
+    async def nothing():
+        return {}
+
+    monkeypatch.setattr(tmux, "list_sessions_checked", unanswered)
+    monkeypatch.setattr(tmux, "active_panes", nothing)
+    monkeypatch.setattr(tmux, "claude_states", nothing)
+    assert asyncio.run(sessions.list_sessions()) == []
+    assert asyncio.run(sessions.remembered_sessions()) == []
+    assert session_meta.load() == before                         # not marked "gone"
+
+
+def test_pss_is_reread_at_most_every_pss_s(monkeypatch):
+    from ccpipe import sysstats
+    reads: list[int] = []
+
+    def fake_pss(pid):
+        reads.append(pid)
+        return 1000 * len(reads)
+
+    monkeypatch.setattr(proctree, "pss_bytes", fake_pss)
+    sysstats._pss.clear()
+    p = Proc(pid=4242, ppid=1, comm="claude", start=5.0, cpu=0.0)
+    assert sysstats._pss_of(p, 100.0) == 1000
+    assert sysstats._pss_of(p, 100.0 + sysstats.PSS_S - 1) == 1000       # cached
+    assert sysstats._pss_of(p, 100.0 + sysstats.PSS_S) == 2000           # refreshed
+    reused = Proc(pid=4242, ppid=1, comm="bash", start=9.0, cpu=0.0)     # pid reused
+    assert sysstats._pss_of(reused, 100.0 + sysstats.PSS_S) == 3000
+    assert reads == [4242, 4242, 4242]

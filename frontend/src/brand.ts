@@ -6,16 +6,9 @@
 // property so it can compose with the breathing scale animation (an SVG
 // transform= attribute would be overridden by the CSS transform).
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-const PETAL = "M0 -34 L4 0 L0 34 L-4 0 Z";
+import { svgEl } from "./dom";
 
-function svgEl<K extends keyof SVGElementTagNameMap>(
-  tag: K, attrs: Record<string, string>,
-): SVGElementTagNameMap[K] {
-  const el = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-  return el;
-}
+const PETAL = "M0 -34 L4 0 L0 34 L-4 0 Z";
 
 /** The animated mark, sized by its container (`.spark` + a size class). */
 export function sparkMark(extraClass = ""): HTMLElement {

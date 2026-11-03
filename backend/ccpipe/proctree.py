@@ -7,6 +7,7 @@ and memory are read lazily, only for the processes that need them.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -113,20 +114,25 @@ def pss_bytes(pid: int) -> int:
     return 0
 
 
-async def run_argv(argv: list[str], timeout: float) -> str | None:
+async def run_argv(argv: list[str], timeout: float, *, env: dict[str, str] | None = None,
+                   check: bool = False) -> str | None:
     """stdout of a command given as an argv list — no shell, so nothing in
-    argv is ever interpreted — or None if it couldn't start, timed out
-    (it is killed) or printed nothing."""
+    argv is ever interpreted — or None if it couldn't start, timed out (it
+    is killed and reaped) or, with ``check``, exited non-zero. The one
+    subprocess helper for ccpipe's short queries (tmux, du)."""
     import asyncio
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env)
     except OSError:
         return None
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
         await proc.wait()
         return None
-    return out.decode("utf-8", "replace") or None
+    if check and proc.returncode != 0:
+        return None
+    return out.decode("utf-8", "replace")

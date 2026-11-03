@@ -36,7 +36,7 @@ async def mic_config_get() -> dict[str, object]:
 
 @router.post("/api/mic/config", dependencies=[AuthDep, CsrfDep])
 async def mic_config_set(body: MicConfigBody) -> dict[str, object]:
-    cfg = app_config.load()
+    cfg = app_config.load_for_edit()
     if body.auto_stop_enabled is not None:
         cfg.mic.auto_stop_enabled = bool(body.auto_stop_enabled)
     if body.silence_ms is not None:

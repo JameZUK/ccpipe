@@ -450,19 +450,44 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   //
   // "Keyboard up" = the window is much shorter than the tallest it has
   // been at this width (with interactive-widget=resizes-content the
-  // keyboard shrinks the layout viewport itself).
+  // keyboard shrinks the layout viewport itself) — and it got that way
+  // as a keyboard would: on a touch screen, with a text field focused,
+  // just after a tap or a focus change on the page. A window that is
+  // simply shorter (split screen, a resized narrow desktop window) shows
+  // up with no tap on the page and becomes the new full height; treating
+  // it as a keyboard held the rows and pushed the top of the terminal
+  // off screen for as long as it stayed that size.
   const tallestAtWidth = new Map<number, number>();
   let fittedWidth = 0;
   const holdWidthChanged = (): boolean =>
     fittedWidth > 0 && Math.abs(container.clientWidth - fittedWidth) > 2;
   let keyboardHold = false;
+  let keyboardOpen = false;
+  let keyboardIntentAt = 0;
+  const KEYBOARD_INTENT_MS = 2000;
+  const noteKeyboardIntent = (): void => { keyboardIntentAt = Date.now(); };
+  document.addEventListener("pointerdown", noteKeyboardIntent, true);
+  document.addEventListener("focusin", noteKeyboardIntent, true);
+  const textFieldFocused = (): boolean => {
+    const a = document.activeElement as HTMLElement | null;
+    return !!a && (a.isContentEditable || a.tagName === "TEXTAREA" || a.tagName === "INPUT");
+  };
   const softKeyboardUp = (): boolean => {
-    if (!document.body.classList.contains("mobile")) return false;
+    if (!document.body.classList.contains("mobile") || !matchMedia("(pointer: coarse)").matches) {
+      return false;
+    }
     const w = window.innerWidth;
     const h = window.innerHeight;
     const tallest = Math.max(tallestAtWidth.get(w) ?? 0, h);
     tallestAtWidth.set(w, tallest);
-    return h < tallest * 0.8;
+    if (h >= tallest * 0.8) { keyboardOpen = false; return false; }
+    if (keyboardOpen) return true;
+    if (textFieldFocused() && Date.now() - keyboardIntentAt < KEYBOARD_INTENT_MS) {
+      keyboardOpen = true;
+      return true;
+    }
+    tallestAtWidth.set(w, h);           // the window itself is this tall now
+    return false;
   };
   const applyKeyboardShift = (): void => {
     const el = term.element;
@@ -1551,6 +1576,8 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       window.removeEventListener("orientationchange", scheduleResize);
       vv?.removeEventListener("resize", scheduleResize);
       document.removeEventListener("keydown", onTermKeyForSearch);
+      document.removeEventListener("pointerdown", noteKeyboardIntent, true);
+      document.removeEventListener("focusin", noteKeyboardIntent, true);
       try { term.dispose(); } catch {}
     },
   };

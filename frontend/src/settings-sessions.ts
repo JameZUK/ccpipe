@@ -8,6 +8,7 @@
 //   start at boot, and after how long completely idle each kind is stopped.
 
 import { apiJson } from "./api";
+import { h } from "./dom";
 import { deviceClass } from "./mobile";
 import { STATS_INTERVALS, loadStatsPrefs, saveStatsPrefs, type StatsPrefs } from "./sysviz";
 
@@ -18,12 +19,6 @@ interface SessionsConfig {
   idle_stop_other_min: number;
 }
 
-function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  if (cls) el.className = cls;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
 
 function section(title: string): { sec: HTMLElement; rows: HTMLElement } {
   const sec = h("section", "modal__section");
@@ -133,6 +128,10 @@ export function buildSessionsSection(): HTMLElement {
   const status = h("span", "modal__status");
   const saveBtn = h("button", "btn btn--primary", "Save sessions");
   saveBtn.type = "button";
+  // Not until the current values are in: saving the empty inputs would set
+  // both boot counts to 0 and the idle limits to the menus' defaults.
+  saveBtn.disabled = true;
+  let loaded = false;
   actions.append(status, saveBtn);
   sec.append(actions);
 
@@ -155,10 +154,16 @@ export function buildSessionsSection(): HTMLElement {
     setSel(stickyIdle, cfg.idle_stop_sticky_min);
     setSel(otherIdle, cfg.idle_stop_other_min);
   };
-  void apiJson<SessionsConfig>("/api/session-config").then(fill)
-    .catch((err) => setStatus(`failed to load: ${(err as Error).message}`, true));
+  setStatus("loading…");
+  void apiJson<SessionsConfig>("/api/session-config").then((cfg) => {
+    fill(cfg);
+    loaded = true;
+    saveBtn.disabled = false;
+    setStatus("");
+  }).catch((err) => setStatus(`failed to load: ${(err as Error).message}`, true));
 
   saveBtn.addEventListener("click", async () => {
+    if (!loaded) return;
     const clamp = (v: string): number => Math.max(0, Math.min(32, parseInt(v, 10) || 0));
     setStatus("saving…");
     saveBtn.disabled = true;

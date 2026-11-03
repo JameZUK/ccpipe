@@ -34,6 +34,8 @@ export type ServerSessionEvent = {
 export type ServerSessionGone = {
   type: "session_gone";
   session: string;
+  /** Why, in a few words ("work was stopped", "couldn't resume work: …"). */
+  note?: string;
 };
 
 export type ServerTtsStart = {
@@ -198,8 +200,12 @@ export class TerminalSocket {
     this.attachLifecycleHooks();
   }
 
+  /** Once this socket has attached, every later dial is a reconnect: it
+   * asks the server not to create or resume the session (ws.py reattach) —
+   * if the session is gone, it ended while open here (stopped, forgotten,
+   * idle-stopped, exited) and coming back would undo that. */
   private resolveUrl(): string {
-    return this.url;
+    return this.helloCount > 0 ? `${this.url}&reattach=1` : this.url;
   }
 
   connect(): void {

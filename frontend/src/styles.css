@@ -1252,6 +1252,31 @@ a:hover { color: var(--fg); }
 .picker__list--compact .picker__nomatch,
 .picker__list--detailed .picker__nomatch { border: none; }
 
+.picker__notice {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-left: 2px solid var(--accent);
+  background: var(--accent-bg);
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  font-size: var(--t-xs);
+}
+.picker__notice[hidden] { display: none; }
+.picker__notice__text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.picker__notice__close {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: var(--t-xs);
+}
+.picker__notice__close:hover { color: var(--fg); }
+
 .error {
   color: var(--critical);
   font-size: var(--t-xs);

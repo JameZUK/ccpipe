@@ -33,11 +33,13 @@ const RETRY_GUARD_MS = 10 * 60_000;
 const GUARD_KEY = "ccpipe.update.reload";
 const CHUNK_GUARD_KEY = "ccpipe.update.chunkReload";
 
-// Anything open whose state a reload would lose.
+// Anything open whose state a reload would lose. (The picker's "new
+// session" panel registers a busy check instead: it opens by itself when
+// there are no sessions, and only counts once something is typed in it.)
 const BUSY_SELECTOR = [
   ".modal-overlay", ".file-panel-shell", ".md-drawer", ".docs-menu",
   ".prompt-menu", ".tiles-menu__list", ".sess__menu:not([hidden])",
-  ".sess__rename", ".picker__create[data-expanded=\"true\"]",
+  ".sess__rename",
 ].join(",");
 
 type BusyCheck = () => boolean;
@@ -119,8 +121,9 @@ function busy(): boolean {
   return false;
 }
 
+/** The session picker is showing (its frame — session-picker.ts). */
 function onPicker(): boolean {
-  return !!document.querySelector("#app > .frame .picker");
+  return !!document.querySelector(".frame--picker");
 }
 
 function readGuard(key: string): { build: string; at: number } | null {

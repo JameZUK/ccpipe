@@ -5,6 +5,8 @@
 //
 // Built with DOM APIs only (createElementNS) — nothing is parsed as HTML.
 
+import { svgEl } from "./dom";
+
 export interface SysSnapshot {
   interval: number;
   at: number | null;
@@ -82,12 +84,7 @@ export function level(pct: number | null | undefined): "ok" | "warn" | "hot" {
 
 // ─── visuals ──────────────────────────────────────────────────────────────
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-function svg<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string>): SVGElementTagNameMap[K] {
-  const el = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-  return el;
-}
+const svg = svgEl;
 let gradSeq = 0;
 
 /** A 0–100 % series as a line with a fading fill. Gaps (null) break it.
@@ -159,10 +156,17 @@ export function bar(pct: number | null, cls = ""): HTMLElement {
 // ─── poller ───────────────────────────────────────────────────────────────
 
 /** Polls /api/system every `seconds` while the page is visible. */
+/** Polls /api/system while active (and the page is visible). Pause it with
+ * setActive(false) when its display is switched off — a hidden panel must
+ * not keep asking the server (which also keeps the per-session sampling
+ * awake). stop() is for good. */
 export class SysPoller {
   private timer: number | null = null;
-  private started = false;
-  private stopped = false;
+  private active = false;
+  private disposed = false;
+  // Bumped on every pause / resume, so a fetch already in flight neither
+  // reports into a paused display nor starts a second timer chain.
+  private gen = 0;
   private readonly onVis = (): void => { if (!document.hidden) void this.tick(); };
 
   constructor(
@@ -171,39 +175,51 @@ export class SysPoller {
     private readonly cb: (s: SysSnapshot) => void,
   ) {}
 
-  start(): void {
-    if (this.started || this.stopped) return;
-    this.started = true;
-    document.addEventListener("visibilitychange", this.onVis);
-    void this.tick();
+  setActive(on: boolean): void {
+    if (this.disposed || on === this.active) return;
+    this.active = on;
+    this.gen += 1;
+    if (on) {
+      document.addEventListener("visibilitychange", this.onVis);
+      void this.tick();
+    } else {
+      this.clearTimer();
+      document.removeEventListener("visibilitychange", this.onVis);
+    }
   }
+
+  start(): void { this.setActive(true); }
 
   setInterval(seconds: number): void {
     this.seconds = seconds;
-    this.schedule();
+    if (this.active) this.schedule();
   }
 
   stop(): void {
-    this.stopped = true;
-    if (this.timer !== null) clearTimeout(this.timer);
-    document.removeEventListener("visibilitychange", this.onVis);
+    this.setActive(false);
+    this.disposed = true;
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
   }
 
   private schedule(): void {
-    if (this.timer !== null) clearTimeout(this.timer);
-    if (this.started && !this.stopped) {
+    this.clearTimer();
+    if (this.active) {
       this.timer = window.setTimeout(() => { void this.tick(); }, this.seconds * 1000);
     }
   }
 
   private async tick(): Promise<void> {
-    if (this.stopped) return;
+    if (!this.active) return;
+    const gen = this.gen;
     if (document.hidden) { this.schedule(); return; }
     try {
       const q = this.session ? `?session=${encodeURIComponent(this.session)}` : "";
       const res = await fetch(`/api/system${q}`, { credentials: "same-origin", cache: "no-store" });
-      if (res.ok && !this.stopped) this.cb(await res.json() as SysSnapshot);
+      if (res.ok && gen === this.gen) this.cb(await res.json() as SysSnapshot);
     } catch { /* offline: next tick */ }
-    this.schedule();
+    if (gen === this.gen) this.schedule();
   }
 }
