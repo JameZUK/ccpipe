@@ -710,22 +710,30 @@ async function attachTerminal(session: string): Promise<void> {
   updateTtsBtn();
 
   // ─── Recording state (single source of truth, both UIs subscribe) ─────
-  const VOICE_TRIGGER = "\x1bk";          // matches the meta+k keybinding
-  // Wait between sending meta+k (which arms claude's /voice) and
-  // opening the browser mic. The pipeline is: meta+k → tmux → claude
-  // parses it → claude enters /voice mode → claude reads PCM from
-  // Pulse. If the mic opens before that whole chain has primed,
-  // leading audio frames can be dropped on the claude side. 60 ms
-  // was the original value and turned out to truncate the start of
-  // utterances; 200 ms gives the chain comfortable headroom while
-  // still being imperceptible from the user's tap-to-speak rhythm.
-  const TRIGGER_TO_AUDIO_DELAY_MS = 200;
-  // The release-PTT timing on stop used to live here as a fixed
-  // post-stop delay (AUDIO_TO_TRIGGER_DELAY_MS). The backend now
-  // owns it: on `mic_stop` it estimates pipeline drain from
-  // bytes-written stats and adds the configured drain_pad_ms, then
-  // writes the release keystroke itself. So the client just sends
-  // `mic_stop` and walks away.
+  // Claude's /voice (tap mode) toggles on each meta+k, and ignores the key
+  // while it's still transcribing the last recording. Pressing it blind from
+  // here put ccpipe and Claude out of step after a quick re-record. So the
+  // server does both presses and checks Claude's footer: on `mic_start` it
+  // answers `mic_armed` once Claude is recording (or `mic_failed` with the
+  // reason), and audio flows only after that; on `mic_stop` it waits for the
+  // audio to drain and presses stop only if Claude is still recording
+  // (backend voice_ptt.py).
+  let armWaiter: ((result: true | string) => void) | null = null;
+  const armVoice = (): Promise<true | string> => new Promise((resolve) => {
+    armWaiter?.("superseded");
+    const slow = window.setTimeout(() => {
+      terminalApi?.flash("Waiting for Claude to finish the last recording…");
+    }, 700);
+    const timeout = window.setTimeout(() => done("Claude didn't answer. Tap the mic to try again"), 12_000);
+    const done = (result: true | string): void => {
+      clearTimeout(slow);
+      clearTimeout(timeout);
+      if (armWaiter === done) armWaiter = null;
+      resolve(result);
+    };
+    armWaiter = done;
+    socket.send({ type: "mic_start" });
+  });
 
   let recording = false;
   const stateSubs: Array<(r: boolean) => void> = [];
@@ -752,6 +760,16 @@ async function attachTerminal(session: string): Promise<void> {
     // Still inside the tap / keydown: wake the audio context now, while the
     // browser counts this as user input (mic.ts prime()).
     if (kind !== "hold-end" && !recording && micAvailable) mic?.prime();
+    // A stop while the start is still waiting for Claude: cancel it now
+    // rather than queue behind it (the server cancels its side on mic_stop).
+    if (armWaiter && recording && (kind === "tap" || (kind === "hold-end" && pttHoldActive))) {
+      pttHoldActive = false;
+      setRecording(false);
+      socket.send({ type: "mic_stop" });
+      mic?.unprime();
+      armWaiter("cancelled");
+      return;
+    }
     micEventQueue = micEventQueue.then(async () => {
       if (!micAvailable) return;
       if (kind === "tap") {
@@ -805,10 +823,16 @@ async function attachTerminal(session: string): Promise<void> {
       // Synchronous when called straight from the desktop mic's click.
       mic?.prime();
       setRecording(true);
-      socket.send({ type: "input", data: VOICE_TRIGGER });
       void wakeLock.acquire();
-      await new Promise((r) => setTimeout(r, TRIGGER_TO_AUDIO_DELAY_MS));
-      if (!recording) { void wakeLock.release(); return; }
+      const armed = await armVoice();
+      if (!recording) { void wakeLock.release(); return; }   // stopped meanwhile
+      if (armed !== true) {
+        setRecording(false);
+        void wakeLock.release();
+        mic?.unprime();
+        if (armed !== "cancelled" && armed !== "superseded") terminalApi?.flash(armed, false);
+        return;
+      }
       try {
         await mic?.start();
         // Auto-stop when the user goes silent for ~1.5s. This makes the
@@ -820,7 +844,8 @@ async function attachTerminal(session: string): Promise<void> {
       } catch (err) {
         console.warn("mic start failed:", err);
         setRecording(false);
-        socket.send({ type: "input", data: VOICE_TRIGGER });  // unwind /voice
+        // Unwind /voice: the server presses stop if Claude is recording.
+        socket.send({ type: "mic_stop" });
         void wakeLock.release();
         const name = (err as { name?: string })?.name;
         terminalApi?.flash(
@@ -886,6 +911,7 @@ async function attachTerminal(session: string): Promise<void> {
       // dropped WS in the middle of dictation doesn't leave the UI
       // believing it's still capturing (and silently dropping frames
       // into a closed sendBinary).
+      if (status !== "open") armWaiter?.("cancelled");
       if (status !== "open" && recording) {
         setRecording(false);
         // Reset the PTT state machine and detach the silence callback
@@ -908,6 +934,8 @@ async function attachTerminal(session: string): Promise<void> {
       }
     },
     onDraft(text) { deliverDraft(text, false); },
+    onMicArmed() { armWaiter?.(true); },
+    onMicFailed(reason) { armWaiter?.(reason); },
     onHello(msg) {
       deliverDraft(msg.draft ?? "", true);
       // Seamless reconnect (short-gap reconnect to the same session): the

@@ -72,6 +72,7 @@ export type ClientMessage =
   // pad, and writes claude's release-PTT keystroke to the PTY itself
   // after that delay — the client no longer schedules it.
   | { type: "mic_stop" }
+  | { type: "mic_start" }
   // The composer's contents changed on this device. The server stores it
   // as the session's draft and relays it to the session's other devices.
   | { type: "draft"; text: string };
@@ -96,6 +97,9 @@ export interface TerminalSocketHandlers {
   onTtsEnd?: () => void;
   /** The session's composer draft was changed on another device. */
   onDraft?: (text: string) => void;
+  /** Answer to mic_start: Claude is recording (stream now), or why not. */
+  onMicArmed?: () => void;
+  onMicFailed?: (reason: string) => void;
   /** Watch tiles: the watched session changed size. */
   onSize?: (cols: number, rows: number) => void;
   onStatus: (status: "connecting" | "open" | "closed" | "reconnecting",
@@ -333,6 +337,10 @@ export class TerminalSocket {
             case "tts_end": this.handlers.onTtsEnd?.(); return;
             case "draft":
               if (typeof parsed.text === "string") this.handlers.onDraft?.(parsed.text);
+              return;
+            case "mic_armed": this.handlers.onMicArmed?.(); return;
+            case "mic_failed":
+              this.handlers.onMicFailed?.(typeof parsed.reason === "string" ? parsed.reason : "Dictation couldn't start");
               return;
             case "size":
               if (typeof parsed.cols === "number" && typeof parsed.rows === "number") {

@@ -15,14 +15,14 @@ import sys
 import time
 import unicodedata
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import drafts, session_meta, tmux, tmux_ui
+from . import drafts, session_meta, tmux, tmux_ui, voice_ptt
 from .auth import is_session_authed
 from .mic import MicWriter
 from .pty_relay import PtyProcess, pump
@@ -278,6 +278,7 @@ async def _release_ptt_after(
     pty_proc: PtyProcess,
     delay_seconds: float,
     still_authoritative: Callable[[], bool] | None = None,
+    claude_recording: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     """Sleep for `delay_seconds`, then write the meta+k keystroke into
     `pty_proc` so claude's /voice exits push-to-talk and submits the
@@ -295,6 +296,11 @@ async def _release_ptt_after(
         await asyncio.sleep(max(0.0, delay_seconds))
         if still_authoritative is not None and not still_authoritative():
             log.debug("ptt-release suppressed: handler no longer authoritative")
+            return
+        # Press only while Claude is recording: a press to an idle Claude
+        # would start a recording nobody is talking into (voice_ptt.py).
+        if claude_recording is not None and not await claude_recording():
+            log.info("ptt-release skipped: Claude isn't recording")
             return
         # \x1b k = ESC k = meta+k = the binding ccpipe installs into
         # ~/.claude/keybindings.json for the voice:pushToTalk action.
@@ -415,6 +421,9 @@ class _TerminalConnection:
         # different mic-token's pty (same name, same pty because tmux
         # sessions persist) and aborts the new voice interaction.
         self.pending_releases: set[asyncio.Task[None]] = set()
+        # The mic_start in flight (voice_ptt.arm): waits for Claude to be
+        # ready, presses /voice's key and confirms it took.
+        self.arm_task: asyncio.Task[None] | None = None
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def run(self) -> None:
@@ -710,6 +719,8 @@ class _TerminalConnection:
         # the new client's /voice interaction (see pending_releases).
         for rel_task in list(self.pending_releases):
             rel_task.cancel()
+        if self.arm_task is not None:
+            self.arm_task.cancel()
         self._unregister()
         if self.watch_task is not None:
             self.watch_task.cancel()
@@ -822,6 +833,12 @@ class _TerminalConnection:
         if _is_control_frame(text, '"type":"mic_stop"', '"type": "mic_stop"'):
             self._on_mic_stop()
             return True
+        if _is_control_frame(text, '"type":"mic_start"', '"type": "mic_start"'):
+            if not await self._still_authed("mic"):
+                return False
+            if not self.watch:
+                self._on_mic_start()
+            return True
         if not await self._still_authed("input"):
             return False
         if self.watch:
@@ -847,6 +864,48 @@ class _TerminalConnection:
             _draft_sends.add(task)
             task.add_done_callback(_draft_sends.discard)
 
+    def _on_mic_start(self) -> None:
+        """The client wants to dictate. Rather than the client pressing
+        /voice's key blind, the server gets Claude recording and confirms
+        it on screen (voice_ptt.arm), then answers mic_armed — the client
+        streams audio only after that — or mic_failed with the reason."""
+        global _mic_owner
+        if self.arm_task is not None and not self.arm_task.done():
+            # A new start replaces one still in flight (e.g. stop then start
+            # again quickly). No double press: if the old one already got
+            # Claude recording, arm() sees that and doesn't press again.
+            self.arm_task.cancel()
+        if _mic_owner is not None and _mic_owner is not self.mic_token:
+            task = asyncio.create_task(self.send_json(
+                {"type": "mic_failed", "reason": "Dictation is in use on another device"}))
+            _draft_sends.add(task)
+            task.add_done_callback(_draft_sends.discard)
+            return
+        self.arm_task = asyncio.create_task(self._arm_voice())
+
+    async def _arm_voice(self) -> None:
+        global _mic_owner
+        # A stop still draining must press its key before we press ours.
+        pending = [t for t in self.pending_releases if not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=10)
+        # Claim the mic now, so a stop that arrives mid-arm still schedules
+        # a (screen-checked) release.
+        _mic_owner = self.mic_token
+        _mic_writer.reset()
+        if sys.platform == "darwin":
+            ok, why = True, "local transcription"     # no /voice to press
+        else:
+            pty = self.pty_proc
+            ok, why = await voice_ptt.arm(
+                lambda: tmux.capture_screen(self.session),
+                lambda: pty.write(b"\x1bk") if pty is not None else None,
+            )
+        log.info("mic_start: %s (session=%s)", why, self.session)
+        if not ok and _mic_owner is self.mic_token:
+            _mic_owner = None
+        await self.send_json({"type": "mic_armed"} if ok else {"type": "mic_failed", "reason": why})
+
     def _on_mic_stop(self) -> None:
         """The client has torn down its mic and wants claude's /voice
         push-to-talk released. We CAN'T just forward the release keystroke
@@ -858,6 +917,8 @@ class _TerminalConnection:
         to the PTY ourselves after waiting that long. The client is no
         longer involved in the release timing."""
         global _mic_owner
+        if self.arm_task is not None and not self.arm_task.done():
+            self.arm_task.cancel()       # stopped while waiting for Claude
         if _mic_owner is not self.mic_token:
             return
         if sys.platform == "darwin":
@@ -902,6 +963,7 @@ class _TerminalConnection:
         rel_task = asyncio.create_task(_release_ptt_after(
             self.pty_proc, total,
             still_authoritative=(lambda mt=self.mic_token: _mic_owner is None or _mic_owner is mt),
+            claude_recording=lambda: voice_ptt.should_release(lambda: tmux.capture_screen(self.session)),
         ))
         self.pending_releases.add(rel_task)
         rel_task.add_done_callback(self.pending_releases.discard)
@@ -1451,7 +1513,7 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
             # one. See _last_client_size / _FALLBACK_COLS.
             if session is not None:
                 _remember_client_size(session, cols, rows)
-        case "ping" | "tts_mute" | "mic_stop":
+        case "ping" | "tts_mute" | "mic_stop" | "mic_start":
             # These are intercepted by the main WS receive loop where
             # the closures over send_json / tts_sub / _mic_writer live.
             # We still hit this code path when one of them lands in
