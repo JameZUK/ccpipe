@@ -745,6 +745,31 @@ async function attachTerminal(session: string): Promise<void> {
     }
   };
 
+  // "Claude is listening · tap to talk": Claude started recording without a
+  // ccpipe mic (its key pressed in the terminal). Browsers only open the mic
+  // from a tap, so offer one; it starts dictation the normal way, and the
+  // server, seeing Claude already recording, presses nothing (ws.py
+  // _listening_prompt, voice_ptt.arm).
+  const listenPrompt = document.createElement("button");
+  listenPrompt.type = "button";
+  listenPrompt.className = "voice-prompt";
+  listenPrompt.hidden = true;
+  const listenDot = document.createElement("span");
+  listenDot.className = "voice-prompt__dot";
+  const listenText = document.createElement("span");
+  listenText.textContent = "Claude is listening · tap to talk";
+  listenPrompt.append(listenDot, listenText);
+  listenPrompt.addEventListener("click", () => {
+    listenPrompt.hidden = true;
+    if (!recording) handleMicEvent("tap");
+  });
+  document.body.append(listenPrompt);
+  view.addEventListener("ccpipe:dispose", () => listenPrompt.remove(), { once: true });
+  const showListenPrompt = (on: boolean): void => {
+    listenPrompt.hidden = !(on && micAvailable && !recording);
+  };
+  stateSubs.push((r) => { if (r) listenPrompt.hidden = true; });
+
   // Tracks whether the in-flight recording was started via PTT hold
   // (so we know whether to auto-stop on hold-end vs leave it running
   // because it was tap-toggled on).
@@ -911,7 +936,7 @@ async function attachTerminal(session: string): Promise<void> {
       // dropped WS in the middle of dictation doesn't leave the UI
       // believing it's still capturing (and silently dropping frames
       // into a closed sendBinary).
-      if (status !== "open") armWaiter?.("cancelled");
+      if (status !== "open") { armWaiter?.("cancelled"); listenPrompt.hidden = true; }
       if (status !== "open" && recording) {
         setRecording(false);
         // Reset the PTT state machine and detach the silence callback
@@ -936,6 +961,7 @@ async function attachTerminal(session: string): Promise<void> {
     onDraft(text) { deliverDraft(text, false); },
     onMicArmed() { armWaiter?.(true); },
     onMicFailed(reason) { armWaiter?.(reason); },
+    onVoiceListening(on) { showListenPrompt(on); },
     onHello(msg) {
       deliverDraft(msg.draft ?? "", true);
       // Seamless reconnect (short-gap reconnect to the same session): the

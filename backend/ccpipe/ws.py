@@ -67,6 +67,11 @@ _mic_writer: MicWriter = (
 # WS to send PCM after a quiet period claims ownership; concurrent
 # others have their frames silently dropped until the owner disconnects.
 _mic_owner: object | None = None
+# Until when (monotonic) Claude's REC footer is ccpipe's own doing: a start
+# press (mic_start) or a stop that's still draining. No "Claude is
+# listening" prompt then (see _TerminalConnection._watch_for_listening).
+_voice_quiet_until = 0.0
+_VOICE_QUIET_S = 4.0
 
 # Mic ingress rate caps. A hijacked WS could otherwise flood the pipe with
 # garbage; defense in depth.  The numbers leave generous headroom for
@@ -424,6 +429,11 @@ class _TerminalConnection:
         # The mic_start in flight (voice_ptt.arm): waits for Claude to be
         # ready, presses /voice's key and confirms it took.
         self.arm_task: asyncio.Task[None] | None = None
+        # "Claude is listening" prompt: Claude started recording without a
+        # ccpipe mic (its key pressed in the terminal) — see
+        # _watch_for_listening.
+        self.listen_tail = b""
+        self.listen_task: asyncio.Task[None] | None = None
         # Relay output held back until the replay has been sent (run()).
         self.hold_pty = False
         self.held_pty: list[bytes] = []
@@ -767,6 +777,8 @@ class _TerminalConnection:
             rel_task.cancel()
         if self.arm_task is not None:
             self.arm_task.cancel()
+        if self.listen_task is not None:
+            self.listen_task.cancel()
         self._unregister()
         if self.watch_task is not None:
             self.watch_task.cancel()
@@ -935,6 +947,8 @@ class _TerminalConnection:
         pending = [t for t in self.pending_releases if not t.done()]
         if pending:
             await asyncio.wait(pending, timeout=10)
+        global _voice_quiet_until
+        _voice_quiet_until = time.monotonic() + _VOICE_QUIET_S
         # Claim the mic now, so a stop that arrives mid-arm still schedules
         # a (screen-checked) release.
         _mic_owner = self.mic_token
@@ -947,6 +961,7 @@ class _TerminalConnection:
                 lambda: tmux.capture_screen(self.session),
                 lambda: pty.write(b"\x1bk") if pty is not None else None,
             )
+        _voice_quiet_until = time.monotonic() + _VOICE_QUIET_S
         log.info("mic_start: %s (session=%s)", why, self.session)
         if not ok and _mic_owner is self.mic_token:
             _mic_owner = None
@@ -962,7 +977,7 @@ class _TerminalConnection:
         _mic_writer, add the configured pad, and write the release keystroke
         to the PTY ourselves after waiting that long. The client is no
         longer involved in the release timing."""
-        global _mic_owner
+        global _mic_owner, _voice_quiet_until
         if self.arm_task is not None and not self.arm_task.done():
             self.arm_task.cancel()       # stopped while waiting for Claude
         if _mic_owner is not self.mic_token:
@@ -987,6 +1002,7 @@ class _TerminalConnection:
         drain_s = _mic_writer.estimate_drain_seconds()
         pad_s = cfg.drain_pad_ms / 1000.0
         total = drain_s + pad_s
+        _voice_quiet_until = time.monotonic() + total + _VOICE_QUIET_S
         log.info("mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs",
                  _mic_writer.bytes_written, _mic_writer.drops, drain_s, pad_s, total)
         _mic_writer.reset()
@@ -1081,11 +1097,46 @@ class _TerminalConnection:
         # be in tmux's pane, producing the "gap until I refresh and
         # capture-pane recovers them" symptom. Re-raising trades a warning +
         # a reconnect for guaranteed eventual consistency.
+        self._watch_for_listening(data)
         if self.hold_pty:
             self.held_pty.append(data)
             self.pty_output.set()
             return
         await self._send_pty(data)
+
+    def _watch_for_listening(self, data: bytes) -> None:
+        """Claude can start recording without ccpipe: its /voice key pressed
+        in the terminal (Alt+K). Its microphone is ccpipe's pipe, though, and
+        browsers only open a mic from a tap, so tell the client, which offers
+        "Claude is listening · tap to talk". Cheap byte check on the output
+        (tmux sends Claude's footer text when it changes), then a screen
+        check to confirm."""
+        if self.watch or (self.listen_task is not None and not self.listen_task.done()):
+            return
+        seam = self.listen_tail + data[:16]
+        self.listen_tail = data[-16:]
+        if b"tap to send" not in data and b"tap to send" not in seam:
+            return
+        if _mic_owner is not None or time.monotonic() < _voice_quiet_until:
+            return
+        self.listen_task = asyncio.create_task(self._listening_prompt())
+
+    async def _listening_prompt(self) -> None:
+        capture = lambda: tmux.capture_screen(self.session)  # noqa: E731
+        if voice_ptt.voice_state(await capture()) != "recording" or _mic_owner is not None:
+            return
+        log.info("voice: Claude is listening without a ccpipe mic (session=%s)", self.session)
+        await self.send_json({"type": "voice_listening", "on": True})
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                if _mic_owner is not None or time.monotonic() < _voice_quiet_until:
+                    break                # a device took over dictation
+                if voice_ptt.voice_state(await capture()) != "recording":
+                    break
+        finally:
+            with contextlib.suppress(Exception):
+                await self.send_json({"type": "voice_listening", "on": False})
 
     async def _send_pty(self, data: bytes) -> None:
         counters = self.counters

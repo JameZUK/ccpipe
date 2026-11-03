@@ -4379,3 +4379,44 @@ html.window-buttons .statusbar__brand { align-self: stretch; padding-right: var(
   pointer-events: none;
 }
 .select-view__toast--err { color: var(--critical); border-color: var(--critical); }
+
+/* "Claude is listening · tap to talk" (main.ts): Claude started recording
+   without a ccpipe mic. Just under the top bar, above the terminal. */
+.voice-prompt {
+  position: fixed;
+  z-index: 440;
+  left: 50%;
+  top: calc(env(safe-area-inset-top, 0px) + 3.4rem);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  max-width: calc(100vw - 2rem);
+  padding: var(--s-2) var(--s-4);
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--critical);
+  border-radius: 999px;
+  box-shadow: var(--shadow-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  animation: frame-in var(--dur-med) var(--ease-out);
+}
+.voice-prompt[hidden] { display: none; }
+.voice-prompt__dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--critical);
+  box-shadow: 0 0 0 0 rgba(239, 106, 90, 0.6);
+  animation: voice-prompt-pulse 1.4s ease-out infinite;
+}
+@keyframes voice-prompt-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 106, 90, 0.6); }
+  100% { box-shadow: 0 0 0 0.55rem rgba(239, 106, 90, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-prompt__dot { animation: none; }
+}

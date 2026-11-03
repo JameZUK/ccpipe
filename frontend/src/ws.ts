@@ -100,6 +100,8 @@ export interface TerminalSocketHandlers {
   /** Answer to mic_start: Claude is recording (stream now), or why not. */
   onMicArmed?: () => void;
   onMicFailed?: (reason: string) => void;
+  /** Claude started (on: true) or stopped recording without a ccpipe mic. */
+  onVoiceListening?: (on: boolean) => void;
   /** Watch tiles: the watched session changed size. */
   onSize?: (cols: number, rows: number) => void;
   onStatus: (status: "connecting" | "open" | "closed" | "reconnecting",
@@ -339,6 +341,7 @@ export class TerminalSocket {
               if (typeof parsed.text === "string") this.handlers.onDraft?.(parsed.text);
               return;
             case "mic_armed": this.handlers.onMicArmed?.(); return;
+            case "voice_listening": this.handlers.onVoiceListening?.(parsed.on === true); return;
             case "mic_failed":
               this.handlers.onMicFailed?.(typeof parsed.reason === "string" ? parsed.reason : "Dictation couldn't start");
               return;
