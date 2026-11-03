@@ -4662,3 +4662,17 @@ html.window-buttons .file-viewer__bar { padding-left: max(var(--window-buttons-g
 }
 .file-viewer__audio .file-viewer__media { width: min(100%, 36rem); height: auto; background: transparent; }
 .file-viewer__audio-name { color: var(--fg-dim); font-size: var(--t-md); text-align: center; overflow-wrap: anywhere; }
+
+/* Settings → Voice → Sound check results. */
+.modal__soundcheck {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-height: 14em;
+  overflow: auto;
+  font: 12px/1.45 var(--font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}

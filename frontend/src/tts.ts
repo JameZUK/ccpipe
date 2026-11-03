@@ -124,7 +124,12 @@ export class TtsPlayer {
   private peak = -1;
   private peakTimer: number | null = null;
 
-  private readonly onGesture = () => this.unlock();
+  // Taps on the Settings sound check are its own (it tests playback).
+  private readonly onGesture = (e: Event) => {
+    const t = e.target as Element | null;
+    if (t && typeof t.closest === "function" && t.closest("[data-tts-own]")) return;
+    this.unlock();
+  };
 
   constructor(session?: string) {
     this.session = session;
