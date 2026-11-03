@@ -718,6 +718,7 @@ async function attachTerminal(session: string): Promise<void> {
   // plays it may land on the button itself, so its click right after
   // doesn't count as "mute".
   let unblockedAt = 0;
+  tts.onDebug = (msg) => socket.send({ type: "tts_log", msg });
   tts.onBlockedChange = (blocked) => {
     ttsBtn.classList.toggle("pill--tap", blocked);
     if (blocked) {

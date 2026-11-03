@@ -398,6 +398,9 @@ class _TerminalConnection:
         self.watch_task: asyncio.Task[None] | None = None
         # Watches for Claude stopping to ask something (main terminal only).
         self.ask_task: asyncio.Task[None] | None = None
+        # Budget for the page's tts_log reports (see _receive_loop).
+        self.tts_log_window = 0.0
+        self.tts_log_count = 0
         # Track WS-send so we can serialize sends from multiple tasks safely.
         self.send_lock = asyncio.Lock()
         # Per-WS byte accounting. Registered in the global active list for
@@ -936,6 +939,20 @@ class _TerminalConnection:
                 clean = lambda v, n: re.sub(r"[\x00-\x1f]", " ", str(v))[:n]  # noqa: E731
                 log.info("mic_error from client: %s: %s (session=%s)",
                          clean(msg.get("name", "?"), 40), clean(msg.get("message", ""), 200), self.session)
+            return True
+        if _is_control_frame(text, '"type":"tts_log"', '"type": "tts_log"'):
+            # What the page's audio player did (played, was refused, heard
+            # silence): the only view of playback on a device we can't see.
+            # Bounded: 40 lines a minute per connection.
+            now = time.monotonic()
+            if now - self.tts_log_window >= 60.0:
+                self.tts_log_window, self.tts_log_count = now, 0
+            self.tts_log_count += 1
+            if self.tts_log_count <= 40:
+                with contextlib.suppress(Exception):
+                    msg = _safe_json_loads(text)
+                    log.info("tts client (session=%s): %s", self.session,
+                             re.sub(r"[\x00-\x1f]", " ", str(msg.get("msg", "")))[:300])
             return True
         if _is_control_frame(text, '"type":"mic_start"', '"type": "mic_start"'):
             if not await self._still_authed("mic"):
@@ -1665,7 +1682,7 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
             # one. See _last_client_size / _FALLBACK_COLS.
             if session is not None:
                 _remember_client_size(session, cols, rows)
-        case "ping" | "tts_mute" | "mic_stop" | "mic_start" | "mic_error":
+        case "ping" | "tts_mute" | "tts_log" | "mic_stop" | "mic_start" | "mic_error":
             # These are intercepted by the main WS receive loop where
             # the closures over send_json / tts_sub / _mic_writer live.
             # We still hit this code path when one of them lands in

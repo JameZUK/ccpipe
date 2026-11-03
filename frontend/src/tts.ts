@@ -111,6 +111,15 @@ export class TtsPlayer {
   onMutedChange: ((muted: boolean) => void) | null = null;
   /** Audio is waiting for a tap (true), or the wait is over (false). */
   onBlockedChange: ((blocked: boolean) => void) | null = null;
+  /** What the player did, a line at a time, for the server log: the only
+   * view of playback on a device we can't see (an iPad). */
+  onDebug: ((msg: string) => void) | null = null;
+  private debug(msg: string): void { try { this.onDebug?.(msg); } catch {} }
+  // While a clip plays: when it started and the loudest sample the
+  // analyser saw (0 = the graph passed silence).
+  private playStartedAt = 0;
+  private peak = -1;
+  private peakTimer: number | null = null;
 
   private readonly onGesture = () => this.unlock();
 
@@ -196,7 +205,8 @@ export class TtsPlayer {
   }
 
   /** Wait for a tap to play `item` (the browser refused to). */
-  private blockUntilTap(item: Queued): void {
+  private blockUntilTap(item: Queued, why: string): void {
+    this.debug(`waiting for a tap: ${why}`);
     this.queue.unshift(item);
     this.unlocked = false;
     this.setBlocked(true);
@@ -212,8 +222,12 @@ export class TtsPlayer {
     this.ensureWebAudio();
     this.ensureGraph();
     const ctx = this.audioCtx;
-    if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+    if (ctx && ctx.state !== "running") {
+      this.debug(`tap: resuming context (${ctx.state})`);
+      ctx.resume().catch(() => {});
+    }
     if (this.unlocked && !this.blocked) return;
+    this.debug(`tap: unlocking (${this.blocked ? "audio waiting" : "first tap"})`);
     const a = this.audio;
     if (!a || !a.paused || this.starting || this.priming) return;
     if (this.blocked) {
@@ -247,6 +261,7 @@ export class TtsPlayer {
    * the context starts running; made once. */
   private ensureGraph(): void {
     if (this.audioCtx || !this.audio) return;
+    this.debug(`graph: made (element already played: ${this.unlocked})`);
     try {
       this.audioCtx = new AudioContext();
       const source = this.audioCtx.createMediaElementSource(this.audio);
@@ -271,6 +286,16 @@ export class TtsPlayer {
   private handlePlaybackStart(): void {
     if (this.playbackActive) return;
     this.playbackActive = true;
+    this.playStartedAt = performance.now();
+    this.peak = this.analyser ? 0 : -1;
+    if (this.analyser) {
+      const an = this.analyser;
+      const buf = new Uint8Array(an.fftSize);
+      this.peakTimer = window.setInterval(() => {
+        an.getByteTimeDomainData(buf);
+        for (const v of buf) this.peak = Math.max(this.peak, Math.abs(v - 128));
+      }, 100);
+    }
     // Resume context if it was suspended by browser autoplay policy.
     if (this.audioCtx && this.audioCtx.state === "suspended") {
       this.audioCtx.resume().catch(() => {});
@@ -281,6 +306,10 @@ export class TtsPlayer {
   private handlePlaybackEnd(): void {
     if (!this.playbackActive) return;
     this.playbackActive = false;
+    if (this.peakTimer !== null) { clearInterval(this.peakTimer); this.peakTimer = null; }
+    const secs = ((performance.now() - this.playStartedAt) / 1000).toFixed(1);
+    this.debug(`played ${secs} s to t=${this.audio?.currentTime.toFixed(1) ?? "?"}, `
+      + `peak ${this.peak < 0 ? "n/a (no graph)" : this.peak}, context ${this.audioCtx?.state ?? "none"}`);
     if (this.playingUrl) {
       URL.revokeObjectURL(this.playingUrl);
       this.playingUrl = null;
@@ -321,7 +350,7 @@ export class TtsPlayer {
         this.starting = false;
         if (this.muted) return;
         if (ctx.state === "running") this.startPlayback(item);
-        else this.blockUntilTap(item);
+        else this.blockUntilTap(item, `context ${ctx.state}`);
       }, 250);
       return;
     }
@@ -337,6 +366,7 @@ export class TtsPlayer {
     // Acquire BEFORE play() so the screen doesn't dim during a long
     // sentence; release on every failure / end path below.
     void this._acquireWakeLock();
+    this.debug(`play: ${item.blob.size} B, context ${this.audioCtx?.state ?? "none"}, unlocked ${this.unlocked}`);
     audio.play().then(() => { this.unlocked = true; }).catch((err) => {
       // play() rejection means "playing" will never fire, so
       // handlePlaybackStart was never called and the wake-lock would
@@ -345,7 +375,7 @@ export class TtsPlayer {
       this.handlePlaybackEnd();
       if ((err as DOMException)?.name === "NotAllowedError") {
         // Autoplay refused: keep it for the next tap rather than lose it.
-        this.blockUntilTap(item);
+        this.blockUntilTap(item, "play() refused");
         return;
       }
       console.warn("tts: playback failed:", err);

@@ -81,6 +81,8 @@ export type ClientMessage =
   // Mirror of the client mute state. Server skips the Kokoro round-trip
   // and TTS audio fan-out for any subscription whose `muted` is true.
   | { type: "tts_mute"; value: boolean }
+  // What the audio player did, for the server log (diagnosing devices).
+  | { type: "tts_log"; msg: string }
   // Sent after the browser mic has been torn down. The server estimates
   // the audio drain time from bytes-written stats, adds the configured
   // pad, and writes claude's release-PTT keystroke to the PTY itself
