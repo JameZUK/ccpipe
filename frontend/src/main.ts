@@ -1198,7 +1198,7 @@ async function attachTerminal(session: string): Promise<void> {
     // can't reintroduce the duplication.
     try { socket.close(); } catch {}
     try { tts.dispose(); } catch (e) { console.warn("tts dispose failed:", e); }
-    try { mic?.stop(); } catch {}
+    try { mic?.dispose(); } catch {}
     try { terminalApi.dispose(); } catch (e) { console.warn("terminal dispose failed:", e); }
   }, { once: true });
 

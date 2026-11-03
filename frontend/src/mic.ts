@@ -111,44 +111,63 @@ export class MicStreamer {
 
   // An AudioContext only starts if it's created or resumed from inside a
   // user-input handler. start() runs after several awaits (the /voice
-  // trigger delay, getUserMedia), and Firefox on Android left a context
-  // created there suspended for good: the mic opened, but no audio was ever
-  // processed (2026-11-03; diag showed ctx "suspended", 0 frames). So the
-  // mic buttons call prime() synchronously in their tap / press / keydown
-  // handler, and start() takes that context. Unused, it's closed after 30 s
-  // (long enough for a first-time permission prompt).
-  private primed: AudioContext | null = null;
-  private primedTimer: number | null = null;
+  // trigger, getUserMedia), and Firefox on Android left a context created
+  // there suspended for good: the mic opened, but no audio was processed
+  // (2026-11-03; ctx "suspended", 0 frames). So the mic buttons call prime()
+  // synchronously in their tap / press / keydown handler.
+  //
+  // And it's ONE context for this streamer's life, suspended between
+  // recordings, not one per recording: a fresh context had to pass
+  // Firefox's autoplay check every time and sometimes didn't, even in a
+  // tap ("audio context suspended (a fresh one too)"), and closing the old
+  // one held the streamer in "stopping" — where prime() used to bail — so a
+  // quick second tap started its contexts outside the gesture. A context
+  // that has run once resumes freely.
+  private audio: AudioContext | null = null;
+  private workletReady: Promise<void> | null = null;
+  private idleTimer: number | null = null;
+  private lastPrimeAt = 0;
 
   /** Create or wake the AudioContext. Call synchronously from the user's
    * gesture, before anything async. A no-op while recording. */
   prime(): void {
-    if (this.state === "running" || this.state === "starting" || this.state === "stopping") return;
+    if (this.state === "running" || this.state === "starting") return;
     try {
-      if (!this.primed || this.primed.state === "closed") this.primed = new AudioContext();
-      void this.primed.resume().catch(() => {});
+      if (!this.audio || this.audio.state === "closed") this._newAudio();
+      void this.audio!.resume().catch(() => {});
+      this.lastPrimeAt = performance.now();
     } catch {
-      this.primed = null;
+      this.audio = null;
       return;
     }
-    if (this.primedTimer !== null) clearTimeout(this.primedTimer);
-    this.primedTimer = window.setTimeout(() => this.unprime(), 30_000);
+    // Primed but never used (a cancelled press): don't leave it running.
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = window.setTimeout(() => this.unprime(), 30_000);
   }
 
-  /** Drop a primed context that won't be used (e.g. a cancelled press). */
+  /** Let a primed context idle again (e.g. a cancelled press). */
   unprime(): void {
-    const ctx = this._takePrimed();
-    if (ctx) void ctx.close().catch(() => {});
+    if (this.idleTimer !== null) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    if (this.state === "idle") void this.audio?.suspend().catch(() => {});
   }
 
-  private _takePrimed(): AudioContext | null {
-    if (this.primedTimer !== null) {
-      clearTimeout(this.primedTimer);
-      this.primedTimer = null;
-    }
-    const ctx = this.primed;
-    this.primed = null;
-    return ctx && ctx.state !== "closed" ? ctx : null;
+  /** Stop and release everything, the context included (session closed). */
+  dispose(): void {
+    void this.stop().then(() => {
+      if (this.idleTimer !== null) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+      const ctx = this.audio;
+      this.audio = null;
+      this.workletReady = null;
+      if (ctx && ctx.state !== "closed") void ctx.close().catch(() => {});
+    });
+  }
+
+  private _newAudio(): AudioContext {
+    const old = this.audio;
+    if (old && old.state !== "closed") void old.close().catch(() => {});
+    this.audio = new AudioContext();
+    this.workletReady = null;
+    return this.audio;
   }
 
   /** Start recording. Rejects if the mic can't start, so the caller can
@@ -178,11 +197,9 @@ export class MicStreamer {
           autoGainControl: true,
         },
       });
-      // The primed context (mic buttons, prime()) normally runs already.
-      // If it doesn't, one more resume(); failing that a fresh context: on a
-      // phone the press creates the context, but a touch only counts as user
-      // activity once the finger lifts, so on a freshly loaded page the
-      // press's context can stay suspended while one made now can run.
+      // The context prime() woke normally runs already. If not, one more
+      // resume(); failing that a fresh context (made now that the tap has
+      // registered as user activity).
       const runs = async (ctx: AudioContext): Promise<boolean> => {
         if (ctx.state === "running") return true;
         await Promise.race([
@@ -191,20 +208,26 @@ export class MicStreamer {
         ]);
         return (ctx.state as AudioContextState) === "running";
       };
-      let ctx = this._takePrimed() ?? new AudioContext();
+      const wasState = this.audio?.state ?? "none";
+      const sincePrime = this.lastPrimeAt ? Math.round(performance.now() - this.lastPrimeAt) : -1;
+      let ctx = this.audio && this.audio.state !== "closed" ? this.audio : this._newAudio();
       if (!(await runs(ctx))) {
-        void ctx.close().catch(() => {});
-        ctx = new AudioContext();
+        ctx = this._newAudio();
         if (!(await runs(ctx))) {
-          const state = ctx.state;
-          void ctx.close().catch(() => {});
-          const err = new Error(`audio context ${state} (a fresh one too)`);
+          const act = (navigator as Navigator & { userActivation?: { isActive: boolean; hasBeenActive: boolean } }).userActivation;
+          const err = new Error(`ctx ${ctx.state} (fresh too); was ${wasState}; primed ${sincePrime}ms ago; `
+            + `activation ${act ? `${act.isActive ? 1 : 0}/${act.hasBeenActive ? 1 : 0}` : "?"}; ${document.visibilityState}`);
           err.name = "MicBlocked";
           throw err;
         }
       }
       this.ctx = ctx;
-      await this.ctx.audioWorklet.addModule("/mic-worklet.js");
+      if (this.idleTimer !== null) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+      if (!this.workletReady) {
+        this.workletReady = ctx.audioWorklet.addModule("/mic-worklet.js");
+        this.workletReady.catch(() => { this.workletReady = null; });
+      }
+      await this.workletReady;
       this.source = this.ctx.createMediaStreamSource(this.stream);
 
       // Tap-off for visualisation. fftSize 512 gives a smooth scope at
@@ -330,10 +353,8 @@ export class MicStreamer {
       for (const t of this.stream.getTracks()) t.stop();
       this.stream = null;
     }
-    const ctx = this.ctx;
+    // Keep the context (see prime()); just let it idle.
     this.ctx = null;
-    if (ctx && ctx.state !== "closed") {
-      try { await ctx.close(); } catch {}
-    }
+    if (this.audio && this.audio.state === "running") void this.audio.suspend().catch(() => {});
   }
 }
