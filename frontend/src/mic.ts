@@ -69,6 +69,14 @@ export class MicStreamer {
    * mic_stop so the backend can release /voice's PTT after drain. */
   onSilence: (() => void) | null = null;
 
+  /** TEMPORARY diagnostics (phone dictation bug, 2026-11-03): called once
+   * per recording, ~2 s in (or on a start failure), with a compact JSON
+   * report of the audio pipeline's state. main.ts posts it to the journal. */
+  onDiag: ((report: string) => void) | null = null;
+  private diagFrames = 0;
+  private diagBytes = 0;
+  private diagTimer: number | null = null;
+
   constructor(private readonly socket: TerminalSocket) {}
 
   /** Apply new VAD / max-record settings. Safe to call at any time;
@@ -121,6 +129,9 @@ export class MicStreamer {
   private async _start(): Promise<void> {
     if (this.state === "running" || this.state === "starting") return;
     this.state = "starting";
+    const t0 = performance.now();
+    const diag: Record<string, unknown> = {};
+    let stage = "gum";
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -130,8 +141,15 @@ export class MicStreamer {
           autoGainControl: true,
         },
       });
+      diag.gumMs = Math.round(performance.now() - t0);
+      stage = "ctx";
       this.ctx = new AudioContext();
+      diag.ctx0 = this.ctx.state;
+      diag.rate = this.ctx.sampleRate;
+      stage = "worklet";
       await this.ctx.audioWorklet.addModule("/mic-worklet.js");
+      diag.ctx1 = this.ctx.state;
+      stage = "source";
       this.source = this.ctx.createMediaStreamSource(this.stream);
 
       // Tap-off for visualisation. fftSize 512 gives a smooth scope at
@@ -140,9 +158,14 @@ export class MicStreamer {
       this.analyser.fftSize = 512;
       this.analyser.smoothingTimeConstant = 0.4;
 
+      stage = "node";
       this.node = new AudioWorkletNode(this.ctx, "mic-capture");
+      this.diagFrames = 0;
+      this.diagBytes = 0;
       this.node.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
         const buf = new Uint8Array(e.data);
+        this.diagFrames++;
+        this.diagBytes += buf.byteLength;
         this.socket.sendBinary(FRAME_MIC_PCM, buf);
       };
       // Same source feeds both branches. Worklet pulls PCM for the
@@ -154,11 +177,50 @@ export class MicStreamer {
       this.state = "running";
       if (this.cfg.autoStopEnabled) this._startVad();
       this._armMaxRecordTimer();
+      this._scheduleDiag(diag);
     } catch (err) {
+      const e = err as { name?: string; message?: string };
+      diag.failed = stage;
+      diag.err = `${e?.name ?? "?"}: ${String(e?.message ?? err).slice(0, 160)}`;
+      this._sendDiag(diag);
       this.state = "idle";
       await this._teardown();
       throw err;
     }
+  }
+
+  private _scheduleDiag(diag: Record<string, unknown>): void {
+    if (this.diagTimer !== null) clearTimeout(this.diagTimer);
+    const levels = new Uint8Array(this.analyser?.fftSize ?? 512);
+    let peak = 0;
+    const sampler = window.setInterval(() => {
+      if (!this.analyser) return;
+      this.analyser.getByteTimeDomainData(levels);
+      for (const v of levels) peak = Math.max(peak, Math.abs(v - 128) / 128);
+    }, 100);
+    this.diagTimer = window.setTimeout(() => {
+      this.diagTimer = null;
+      clearInterval(sampler);
+      diag.ctx2 = this.ctx?.state ?? "gone";
+      diag.frames = this.diagFrames;
+      diag.bytes = this.diagBytes;
+      diag.peak = Math.round(peak * 1000) / 1000;
+      const track = this.stream?.getAudioTracks()[0];
+      if (track) {
+        const s = track.getSettings();
+        diag.track = {
+          state: track.readyState, muted: track.muted, enabled: track.enabled,
+          rate: s.sampleRate, ch: s.channelCount, ec: s.echoCancellation,
+          ns: s.noiseSuppression, agc: s.autoGainControl,
+        };
+      }
+      this._sendDiag(diag);
+    }, 2000);
+  }
+
+  private _sendDiag(diag: Record<string, unknown>): void {
+    diag.ua = navigator.userAgent.replace(/^Mozilla\/5\.0 /, "").slice(0, 120);
+    try { this.onDiag?.(JSON.stringify(diag)); } catch {}
   }
 
   private _startVad(): void {

@@ -22,7 +22,7 @@ import { TerminalSocket } from "./ws";
 //   - settings / file-panel / session-picker are large (758 + 752 + 629
 //     LOC) and gated behind a button or a no-last-session bootstrap.
 //   - xterm, mic, tts, waveform are loaded when a terminal view attaches.
-import { getMicConfig, type MarkdownIndexEntry, type MicConfig } from "./api";
+import { apiJson, getMicConfig, type MarkdownIndexEntry, type MicConfig } from "./api";
 import type { MicStreamer as MicStreamerType } from "./mic";
 import type { TtsPlayer as TtsPlayerType } from "./tts";
 import * as wakeLock from "./wake-lock";
@@ -931,6 +931,13 @@ async function attachTerminal(session: string): Promise<void> {
 
       if (micAvailable && !mic) {
         mic = new MicStreamer(socket);
+        // TEMPORARY (phone dictation bug): log the mic pipeline's state.
+        mic.onDiag = (report) => {
+          void apiJson("/api/debug/snapshot", {
+            method: "POST",
+            body: JSON.stringify({ session, note: `mic-diag ${report}`.slice(0, 1000), payload: {} }),
+          }).catch(() => {});
+        };
         // Fetch the persisted voice-input settings and apply once
         // they land. Mic stays at safe defaults until the round-trip
         // finishes; a slow GET doesn't block the UI from working.
