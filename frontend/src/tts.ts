@@ -251,7 +251,12 @@ export class TtsPlayer {
     a.play().then(() => {
       this.unlocked = true;
       if (seq === this.playSeq) { try { a.pause(); } catch {} }
-    }).catch(() => {}).finally(() => {
+    }).catch((err) => {
+      // Aborted (the iPad, before the clip loaded) still counts: the tap's
+      // permission sticks to the element. Refused doesn't.
+      if ((err as DOMException)?.name === "AbortError") this.unlocked = true;
+      this.debug(`tap: silence ${(err as DOMException)?.name ?? "failed"}`);
+    }).finally(() => {
       this.priming = false;
       this.pumpQueue();
     });
@@ -393,27 +398,14 @@ export class TtsPlayer {
     this.debug(`play: ${item.blob.size} B, context ${this.audioCtx?.state ?? "none"}, unlocked ${this.unlocked}`);
     this.playPending = true;
     const seq = ++this.playSeq;
-    audio.play().then(() => {
-      if (seq !== this.playSeq) return;
+    const fail = (err: unknown) => {
       this.playPending = false;
-      this.unlocked = true;
-      settle?.resolve();
-    }).catch((err) => {
-      if (seq !== this.playSeq) { settle?.reject(err); return; }
-      this.playPending = false;
-      const e = err as DOMException;
-      this.debug(`play failed: ${e?.name}: ${e?.message}`);
-      if (settle) {
-        void this._releaseWakeLock();
-        this.handlePlaybackEnd();
-        settle.reject(err);
-        return;
-      }
       // play() rejection means "playing" will never fire, so
       // handlePlaybackStart was never called and the wake-lock would
       // otherwise leak. Force-release symmetrically.
       void this._releaseWakeLock();
       this.handlePlaybackEnd();
+      if (settle) { settle.reject(err); return; }
       if ((err as DOMException)?.name === "NotAllowedError") {
         // Autoplay refused: keep it for the next tap rather than lose it.
         this.blockUntilTap(item, "play() refused");
@@ -421,7 +413,41 @@ export class TtsPlayer {
       }
       console.warn("tts: playback failed:", err);
       this.pumpQueue();
-    });
+    };
+    const attempt = (again: boolean) => {
+      audio.play().then(() => {
+        if (seq !== this.playSeq) return;
+        this.playPending = false;
+        this.unlocked = true;
+        settle?.resolve();
+      }).catch((err) => {
+        if (seq !== this.playSeq) { settle?.reject(err); return; }
+        const e = err as DOMException;
+        this.debug(`play failed${again ? " again" : ""}: ${e?.name}: ${e?.message}`);
+        // The iPad aborts a play() made before its clip has loaded (the
+        // sound check, 2026-11-03: a new clip aborted, the same element
+        // played once loaded). The attempt still counts as the tap's
+        // permission, so play again once it has loaded.
+        if (!again && e?.name === "AbortError") {
+          const retry = () => {
+            window.clearTimeout(giveUp);
+            if (seq === this.playSeq) attempt(true);
+          };
+          const giveUp = window.setTimeout(() => {
+            audio.removeEventListener("canplay", retry);
+            if (seq === this.playSeq) fail(err);
+          }, 4000);
+          if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) retry();
+          else {
+            audio.addEventListener("canplay", retry, { once: true });
+            try { audio.load(); } catch {}
+          }
+          return;
+        }
+        fail(err);
+      });
+    };
+    attempt(false);
   }
 
   /** Fetch a fresh synth of *text* from the server and enqueue it for
