@@ -111,9 +111,6 @@ def _patch_deps(monkeypatch):
     async def _cwd(*a, **k):
         return "/home/tester"
 
-    async def _no_history(*a, **k):
-        return b""
-
     async def _resize(_ws, _session):
         return (50, 40, [])
 
@@ -127,7 +124,14 @@ def _patch_deps(monkeypatch):
     monkeypatch.setattr(wsmod.tmux, "session_exists", _true)
     monkeypatch.setattr(wsmod.tmux, "attach_argv", lambda name, **_kw: ["tmux", "attach", "-t", name])
     monkeypatch.setattr(wsmod.tmux, "session_cwd", _cwd)
-    monkeypatch.setattr(wsmod, "_capture_session_history", _no_history)
+    async def _no_replay(_session):
+        return None
+
+    async def _no_state(_session):
+        return None
+
+    monkeypatch.setattr(wsmod, "_capture_replay_history", _no_replay)
+    monkeypatch.setattr(wsmod, "_pane_state_now", _no_state)
     monkeypatch.setattr(wsmod, "_wait_for_initial_resize", _resize)
     monkeypatch.setattr(wsmod, "_build_tts_filter", _tts_filter)
     monkeypatch.setattr(wsmod, "PtyProcess", _FakePty)

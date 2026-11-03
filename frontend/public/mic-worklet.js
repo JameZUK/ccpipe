@@ -18,6 +18,12 @@ class MicCapture extends AudioWorkletProcessor {
     this.decimation = Math.max(1, Math.round(sampleRate / TARGET_RATE));
     this.outBuf = new Int16Array(BATCH_SAMPLES);
     this.outIdx = 0;
+    // "stop" from the main thread ends this processor: returning false
+    // from process() lets the browser release it. The AudioContext lives
+    // for the whole page now, and a processor that always returns true is
+    // kept running for good, one more per recording.
+    this.stopped = false;
+    this.port.onmessage = (e) => { if (e.data === "stop") this.stopped = true; };
   }
 
   flush() {
@@ -30,6 +36,7 @@ class MicCapture extends AudioWorkletProcessor {
   }
 
   process(inputs) {
+    if (this.stopped) return false;
     const channel = inputs[0]?.[0];
     if (!channel || channel.length === 0) return true;
 

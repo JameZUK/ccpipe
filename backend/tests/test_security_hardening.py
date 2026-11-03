@@ -277,7 +277,8 @@ async def test_history_capture_keeps_newest_tail_and_whole_lines(monkeypatch):
     from unittest.mock import patch
     from ccpipe import ws
     lines = [f"line{i:06d} \x1b[31mred\x1b[0m".encode() for i in range(200_000)]
-    blob = b"\n".join(lines) + b"\n"
+    # The replay capture: history, then tmux's history size and pane width.
+    blob = b"\n".join(lines) + b"\n200000 80\n"
 
     class _Stream:
         def __init__(self, d): self.d = d
@@ -291,11 +292,11 @@ async def test_history_capture_keeps_newest_tail_and_whole_lines(monkeypatch):
         async def wait(self): return 0
         def kill(self): pass
 
-    ws._clear_history_cache()
     monkeypatch.setattr(ws, "_HISTORY_MAX_BYTES", 100_000)
     monkeypatch.setattr(ws, "_HISTORY_READ_SLACK", 10_000)
     with patch("ccpipe.ws.asyncio.create_subprocess_exec", return_value=_Proc()):
-        out = await ws._capture_session_history("work", viewport_rows=30)
+        out, history_rows, width = await ws._capture_replay_history("work")
+    assert (history_rows, width) == (200_000, 80)
     assert len(out) <= 100_000
     assert out.endswith(lines[-1])                     # newest line kept
     assert out.startswith(b"line")                     # no partial first line

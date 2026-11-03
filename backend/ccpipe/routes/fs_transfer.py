@@ -21,8 +21,14 @@ one-shot upload uses), so finishing is one atomic rename, and its length
 on disk *is* the received count, which keeps a resume right even across a
 ccpipe restart. Pieces are written at their offset (pwrite), so a retried
 piece whose first attempt half-arrived just rewrites the same bytes.
-Abandoned uploads are removed after a day; the registry of part-files is
-kept in the state directory so that also happens after a restart.
+Abandoned uploads are removed after a day: the registry of part-files is
+kept in the state directory and swept at startup, hourly (sweep_loop, run
+from main.py's lifespan) and whenever an upload starts.
+
+The upload routes are all ``async`` on purpose: the registry is then only
+ever touched from the event loop, one request at a time, so it needs no
+lock. The one slow step, writing a piece to disk, goes to a thread in
+1 MiB batches.
 """
 from __future__ import annotations
 
@@ -82,7 +88,11 @@ def open_readonly(resolved: Path) -> tuple[int, os.stat_result]:
     parent_fd, leaf = _walk_parent_nofollow(str(resolved))
     try:
         try:
-            fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+            # O_NONBLOCK: opening a FIFO for reading would otherwise wait for
+            # a writer, holding a worker thread for good (the type check
+            # below rejects it). It changes nothing for a regular file.
+            fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                         dir_fd=parent_fd)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise HTTPException(status_code=403, detail="symlink at target")
@@ -124,9 +134,22 @@ CHUNK_MAX = 16 * 1024 * 1024          # one PUT's body (main.py caps it too)
 # A new file's mode, as open() would give it (safe_write.NEW_FILE_MODE less
 # the umask). The part-file itself stays 0600 until it's finished, so it can
 # be reopened for writing even when the file it replaces is read-only.
-_UMASK = os.umask(0)
-os.umask(_UMASK)
+def _read_umask() -> int:
+    """The process umask, read without changing it (os.umask can only be
+    read by setting it, which would briefly loosen it for every thread)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError):
+        pass
+    return 0o022
+
+
+_UMASK = _read_umask()
 _UPLOAD_TTL_S = 24 * 3600
+_WRITE_BATCH = 1024 * 1024
 _MAX_UPLOADS = 64
 
 
@@ -168,6 +191,7 @@ def _load() -> None:
         pass
     except (OSError, ValueError, TypeError) as exc:
         log.warning("uploads registry unreadable, ignored: %s", exc)
+    _sweep()
 
 
 def _part_open(u: _Upload, flags: int) -> tuple[int, int]:
@@ -216,6 +240,20 @@ def _sweep() -> None:
             _discard(u)
 
 
+_SWEEP_EVERY_S = 3600
+
+
+async def sweep_loop() -> None:
+    """Remove abandoned uploads at startup and then hourly (main.py)."""
+    while True:
+        try:
+            _load()                 # the first call loads and sweeps
+            _sweep()
+        except Exception:           # never let the loop die
+            log.exception("upload sweep failed")
+        await asyncio.sleep(_SWEEP_EVERY_S)
+
+
 def _get(upload_id: str) -> _Upload:
     _load()
     u = _uploads.get(upload_id)
@@ -239,16 +277,15 @@ class UploadStart(BaseModel):
 
 
 @router.post("/api/fs/uploads", dependencies=[AuthDep, CsrfDep])
-def upload_start(body: UploadStart) -> dict[str, Any]:
+async def upload_start(body: UploadStart) -> dict[str, Any]:
     _load()
+    _sweep()
     final = _resolve_write_target(body.path)
     cap = app_config.load().fs.upload_limit_mb * 1024 * 1024
     if body.size > cap:
         raise HTTPException(status_code=413, detail=f"file exceeds upload limit ({cap} bytes)")
     if len(_uploads) >= _MAX_UPLOADS:
-        _sweep()
-        if len(_uploads) >= _MAX_UPLOADS:
-            raise HTTPException(status_code=429, detail="too many unfinished uploads")
+        raise HTTPException(status_code=429, detail="too many unfinished uploads")
     parent_fd, _ = _walk_parent_nofollow(str(final))
     try:
         tmp = temp_name()
@@ -269,7 +306,7 @@ def upload_start(body: UploadStart) -> dict[str, Any]:
 
 
 @router.get("/api/fs/uploads/{upload_id}", dependencies=[AuthDep, SameOriginDep])
-def upload_status(upload_id: str) -> dict[str, Any]:
+async def upload_status(upload_id: str) -> dict[str, Any]:
     u = _get(upload_id)
     return {"id": u.id, "received": _received(u), "size": u.size}
 
@@ -283,17 +320,31 @@ async def upload_chunk(request: Request, upload_id: str, offset: int) -> Respons
         if offset < 0 or offset > received:
             return JSONResponse(status_code=409, content={
                 "detail": "offset is past what has arrived", "received": received})
-        pos = offset
+        pos = offset              # where the next batch goes
+        buf = bytearray()
+
+        async def flush() -> None:
+            nonlocal pos
+            if buf:
+                data = bytes(buf)
+                buf.clear()
+                await asyncio.to_thread(os.pwrite, fd, data, pos)
+                pos += len(data)
+
         try:
             async for chunk in request.stream():
                 if not chunk:
                     continue
-                if pos + len(chunk) > u.size or pos + len(chunk) - offset > CHUNK_MAX:
+                end = pos + len(buf) + len(chunk)
+                if end > u.size or end - offset > CHUNK_MAX:
                     raise HTTPException(status_code=413, detail="piece runs past the file's size")
-                os.pwrite(fd, chunk, pos)
-                pos += len(chunk)
+                buf += chunk
+                if len(buf) >= _WRITE_BATCH:
+                    await flush()
         except ClientDisconnect:
             pass             # what arrived is kept; the client resumes from it
+        finally:
+            await flush()
         received = os.fstat(fd).st_size
     finally:
         os.close(fd)
@@ -336,6 +387,6 @@ async def upload_finish(upload_id: str) -> dict[str, Any]:
 
 
 @router.delete("/api/fs/uploads/{upload_id}", dependencies=[AuthDep, CsrfDep])
-def upload_cancel(upload_id: str) -> dict[str, Any]:
+async def upload_cancel(upload_id: str) -> dict[str, Any]:
     _discard(_get(upload_id))
     return {"ok": True}

@@ -44,9 +44,20 @@ VoiceState = Literal["recording", "processing", "idle"]
 
 _RECORDING_RE = re.compile(r"tap to send")
 _PROCESSING_RE = re.compile(r"processing…|Voice: processing")
-# The footer sits under the prompt box; look only at the bottom of the
-# screen so a "processing…" in the conversation can't match.
-_FOOTER_LINES = 8
+# The voice footer sits under the prompt box, whose bottom edge is a
+# horizontal rule:
+#     ─────────────
+#     ❯ <prompt>
+#     ─────────────
+#       [statusline]
+#       ● REC · tap to send
+# Only the lines below the last rule are the footer. Counting lines from
+# the bottom instead took in the last of the conversation too, so Claude
+# writing "tap to send" just above the prompt (it does, working on
+# ccpipe) read as recording (code review, 2026-11-03).
+_RULE_RE = re.compile(r"^[\s╭╮╰╯│]*─{10,}[─\s╭╮╰╯│]*$")
+# No prompt box on screen (a dialog, say): only the very bottom counts.
+_FALLBACK_LINES = 3
 
 ARM_PROCESSING_WAIT_S = 8.0     # longest we wait for a transcription to finish
 ARM_CONFIRM_S = 1.5             # how long the "tap to send" footer may take
@@ -65,13 +76,21 @@ def voice_state(lines: list[str] | None) -> VoiceState | None:
     global _footer_seen
     if lines is None:
         return None
-    tail = "\n".join([ln for ln in lines if ln.strip()][-_FOOTER_LINES:])
+    tail = "\n".join(_footer(lines))
     if _RECORDING_RE.search(tail):
         _footer_seen = True
         return "recording"
     if _PROCESSING_RE.search(tail):
         return "processing"
     return "idle"
+
+
+def _footer(lines: list[str]) -> list[str]:
+    """The non-empty lines below the prompt box's bottom rule."""
+    for i in range(len(lines) - 1, -1, -1):
+        if _RULE_RE.match(lines[i]):
+            return [ln for ln in lines[i + 1:] if ln.strip()]
+    return [ln for ln in lines if ln.strip()][-_FALLBACK_LINES:]
 
 
 def footer_seen() -> bool:

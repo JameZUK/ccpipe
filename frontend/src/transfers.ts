@@ -11,8 +11,8 @@
 // browser's own download instead, which can resume them since the server
 // honours ranges.
 //
-// Either way a transfer that stalls (no bytes for STALL_MS) is cut and
-// retried, and coming back online retries at once. Transfers belong to the
+// Either way a transfer that stalls (no answer, or no bytes, for STALL_MS)
+// is cut and retried, and coming back online retries at once. Transfers belong to the
 // page, not the file panel: closing the panel doesn't stop them, and the
 // panel lists them again when reopened. While any is running, the page
 // won't reload itself for an update and asks before being closed.
@@ -113,8 +113,13 @@ class Fatal extends Error {}
 function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) { reject(new Cancelled()); return; }
-    const done = (): void => { clearTimeout(timer); signal.removeEventListener("abort", onAbort); resolve(); };
-    const onAbort = (): void => { clearTimeout(timer); reject(new Cancelled()); };
+    const forget = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      wakeRetries = wakeRetries.filter((f) => f !== done);
+    };
+    const done = (): void => { forget(); resolve(); };
+    const onAbort = (): void => { forget(); reject(new Cancelled()); };
     const timer = window.setTimeout(done, ms);
     signal.addEventListener("abort", onAbort, { once: true });
     wakeRetries.push(done);
@@ -135,11 +140,23 @@ interface Runner {
   lastDone: number;
 }
 
-/** A transfer, listed at once. *run* starts when *gate* resolves (the one
- * before it in a queue has finished). */
+interface TransferOptions {
+  /** Start only once this resolves (the one before in a queue is done). */
+  gate?: Promise<void>;
+  /** Runs when the transfer is cancelled, whatever it was doing (or
+   * waiting for): abandon the server-side upload, drop downloaded bytes. */
+  onCancel?: () => void;
+}
+
+/** A transfer, listed at once. *finished* resolves when it first stops
+ * running, however it ended. It's a plain promise, not tied to the list's
+ * redraws (those wait for animation frames, which a hidden page doesn't
+ * get), so a queue keeps moving in the background. */
 function makeTransfer(kind: Transfer["kind"], name: string, path: string, size: number,
-                      run: (r: Runner) => Promise<void>, gate: Promise<void> = Promise.resolve()): Transfer {
+                      run: (r: Runner) => Promise<void>, opts: TransferOptions = {}): { t: Transfer; finished: Promise<void> } {
   install();
+  let settle!: () => void;
+  const finished = new Promise<void>((resolve) => { settle = resolve; });
   let r: Runner = { t: null as unknown as Transfer, ctl: new AbortController(), failures: 0, lastAt: 0, lastDone: 0 };
   const t: Transfer = {
     id: nextId++, kind, name, path, size, done: 0, state: "queued", note: "", rate: 0,
@@ -148,6 +165,9 @@ function makeTransfer(kind: Transfer["kind"], name: string, path: string, size: 
       r.ctl.abort();
       t.state = "cancelled";
       t.note = "";
+      t.rate = 0;
+      try { opts.onCancel?.(); } catch { /* best effort */ }
+      settle();
       notify();
     },
     retry: () => {
@@ -164,29 +184,22 @@ function makeTransfer(kind: Transfer["kind"], name: string, path: string, size: 
       t.state = "done";
       t.done = t.size;
       t.note = "";
+      t.rate = 0;
+      settle();
       notify();
     }, (e: unknown) => {
       if (e instanceof Cancelled || t.state === "cancelled") return;
       t.state = "failed";
       t.note = errorText(e);
+      t.rate = 0;
+      settle();
       notify();
     });
   };
   all.push(t);
   notify();
-  void gate.then(() => { if (t.state === "queued") start(); });
-  return t;
-}
-
-/** Resolves once *t* has stopped running, whatever the outcome. */
-function settled(t: Transfer): Promise<void> {
-  return new Promise((resolve) => {
-    const unsub = onTransfers(() => {
-      if (active(t)) return;
-      queueMicrotask(() => unsub());
-      resolve();
-    });
-  });
+  void (opts.gate ?? Promise.resolve()).then(() => { if (t.state === "queued") start(); });
+  return { t, finished };
 }
 
 function progress(r: Runner, done: number): void {
@@ -256,17 +269,26 @@ function putPiece(url: string, blob: Blob, signal: AbortSignal, onSent: (n: numb
   });
 }
 
-/** fetch() with the CSRF header; a network failure becomes an Error
- * (a cancel, Cancelled). */
+/** fetch() with the CSRF header. A network failure becomes an Error, a
+ * cancel Cancelled, and no answer (headers) within STALL_MS is cut off
+ * like a stalled body: on a dead connection fetch can otherwise wait for
+ * minutes. The cancel still reaches a body being read afterwards. */
 async function call(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  if (signal.aborted) throw new Cancelled();
+  const ctl = new AbortController();
+  signal.addEventListener("abort", () => ctl.abort(), { once: true });
+  let timedOut = false;
+  const timer = window.setTimeout(() => { timedOut = true; ctl.abort(); }, STALL_MS);
   try {
     return await fetch(url, {
       credentials: "same-origin", ...init,
-      headers: { ...HEADERS, ...(init.headers as Record<string, string> | undefined) }, signal,
+      headers: { ...HEADERS, ...(init.headers as Record<string, string> | undefined) }, signal: ctl.signal,
     });
   } catch (e) {
     if (signal.aborted) throw new Cancelled();
-    throw new Error("connection lost", { cause: e });
+    throw new Error(timedOut ? "no answer from the server" : "connection lost", { cause: e });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -305,9 +327,19 @@ async function runUpload(r: Runner, file: File, target: string, st: UploadState)
   let piece = PIECE_START;
   let pieceMax = PIECE_MAX;
 
+  // Set once every byte is in and the finish has been sent: if the upload
+  // then disappears, the finish most likely worked and only its answer
+  // was lost, so check the file before uploading it all again.
+  let finishing = false;
+  const landed = async (): Promise<boolean> => {
+    const stat = await call(`/api/fs/stat?path=${encodeURIComponent(target)}`, {}, sig);
+    return stat.ok && (await stat.json()).size === file.size;
+  };
+
   for (;;) {
     try {
       if (id === null) {
+        finishing = false;
         const res = await call("/api/fs/uploads", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ path: target, size: file.size }),
@@ -343,28 +375,25 @@ async function runUpload(r: Runner, file: File, target: string, st: UploadState)
         r.failures = 0;
         if (performance.now() - t0 < 2000) piece = Math.min(pieceMax, piece * 2);
       }
+      finishing = true;
       const res = await call(`/api/fs/uploads/${id}/finish`, { method: "POST" }, sig);
-      if (res.ok) return;
+      if (res.ok) { st.id = null; return; }
       if (res.status === 409) {
         const d = await res.json().catch(() => ({}));
-        if (typeof d.received === "number") { offset = d.received; continue; }
+        if (typeof d.received === "number") { offset = d.received; finishing = false; continue; }
       }
       if (res.status === 404) {
-        // The finish may have worked, with its answer lost on the way back.
-        const stat = await call(`/api/fs/stat?path=${encodeURIComponent(target)}`, {}, sig);
-        if (stat.ok && (await stat.json()).size === file.size) return;
+        // A retried finish after one that worked, its answer lost.
+        if (await landed()) { st.id = null; return; }
         id = st.id = null;
         throw new Error("upload expired; starting again");
       }
       if (fatalStatus(res.status)) throw new Fatal(await detail(res));
       throw new Error(await detail(res));
     } catch (e) {
-      if (e instanceof Cancelled || e instanceof Fatal) {
-        if (e instanceof Cancelled && id) {
-          void call(`/api/fs/uploads/${id}`, { method: "DELETE" }, new AbortController().signal).catch(() => {});
-        }
-        throw e;
-      }
+      // (A cancel abandons the server-side upload in the transfer's
+      // onCancel, which also covers a cancel during the pause below.)
+      if (e instanceof Cancelled || e instanceof Fatal) throw e;
       piece = Math.max(PIECE_MIN, Math.floor(piece / 2));
       await failed(r, errorText(e));
       // Where did we get to? (The failed piece may have half-arrived.)
@@ -372,7 +401,10 @@ async function runUpload(r: Runner, file: File, target: string, st: UploadState)
         try {
           const res = await call(`/api/fs/uploads/${id}`, {}, sig);
           if (res.ok) offset = (await res.json()).received;
-          else if (res.status === 404 || res.status === 410) id = st.id = null;
+          else if (res.status === 404 || res.status === 410) {
+            if (finishing && await landed()) { st.id = null; return; }
+            id = st.id = null;
+          }
         } catch (e2) {
           if (e2 instanceof Cancelled) throw e2;
           // Still offline: the next attempt finds out.
@@ -390,8 +422,16 @@ export function uploadFiles(dir: string, files: File[], onDone?: (path: string) 
   for (const f of files) {
     const target = base + f.name;
     const st: UploadState = { id: null };
-    const t = makeTransfer("upload", f.name, target, f.size, (r) => runUpload(r, f, target, st), gate);
-    gate = settled(t).then(() => { if (t.state === "done") onDone?.(target); });
+    const { t, finished } = makeTransfer("upload", f.name, target, f.size, (r) => runUpload(r, f, target, st), {
+      gate,
+      onCancel: () => {
+        // Abandon the part-file now, whatever the upload was doing.
+        const id = st.id;
+        st.id = null;
+        if (id) void call(`/api/fs/uploads/${id}`, { method: "DELETE" }, new AbortController().signal).catch(() => {});
+      },
+    });
+    gate = finished.then(() => { if (t.state === "done") onDone?.(target); });
   }
 }
 
@@ -483,7 +523,11 @@ async function runDownload(r: Runner, path: string, name: string, st: DownloadSt
       await failed(r, errorText(e));
     }
   }
-  saveBlob(new Blob(parts as BlobPart[], { type: "application/octet-stream" }), name);
+  const blob = new Blob(parts as BlobPart[], { type: "application/octet-stream" });
+  // The Blob has its own copy: let the pieces go now, not when the list
+  // is cleared (they can be hundreds of MB on a phone).
+  st.parts.length = 0;
+  saveBlob(blob, name);
 }
 
 /** Download the file at *path*. *size* (from the listing) picks how: in
@@ -500,5 +544,7 @@ export function downloadFile(path: string, name: string, size: number): void {
     return;
   }
   const st: DownloadState = { parts: [], have: 0, tag: null };
-  makeTransfer("download", name, path, size, (r) => runDownload(r, path, name, st));
+  makeTransfer("download", name, path, size, (r) => runDownload(r, path, name, st), {
+    onCancel: () => { st.parts.length = 0; st.have = 0; st.tag = null; },
+  });
 }

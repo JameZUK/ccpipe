@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import config as app_config
-from .. import drafts, lifecycle, session_meta, sticky, sysstats, tmux, tmux_ui, ws
+from .. import drafts, lifecycle, session_meta, sticky, sysstats, tmux, tmux_ui
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..paths import claude_project_dir
@@ -312,10 +312,6 @@ async def rename_session_endpoint(name: str, body: RenameSessionBody) -> Session
         layouts.rename(name, new_name)
         # …and its created / last-opened record.
         session_meta.rename(name, new_name)
-        # Drop any cached capture-pane blob under BOTH names so a
-        # reconnect can't be served the prior occupant's history.
-        ws.invalidate_history_cache(name)
-        ws.invalidate_history_cache(new_name)
     info = await _session_info(new_name)
     if info is None:
         raise HTTPException(status_code=500, detail="renamed but session vanished")

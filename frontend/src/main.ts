@@ -724,7 +724,15 @@ async function attachTerminal(session: string): Promise<void> {
     const slow = window.setTimeout(() => {
       terminalApi?.flash("Waiting for Claude to finish the last recording…");
     }, 700);
-    const timeout = window.setTimeout(() => done("Claude didn't answer. Tap the mic to try again"), 12_000);
+    // Longer than the server can take to arm (a pending stop ≤10 s, the
+    // repaint ≤1 s, a transcription ≤8 s, the confirm 1.5 s). Giving up
+    // sends mic_stop, so the server abandons the arm too: otherwise it
+    // could still start Claude recording, and keep the mic, after the
+    // button had reset (code review, 2026-11-03).
+    const timeout = window.setTimeout(() => {
+      socket.send({ type: "mic_stop" });
+      done("Claude didn't answer. Tap the mic to try again");
+    }, 25_000);
     const done = (result: true | string): void => {
       clearTimeout(slow);
       clearTimeout(timeout);

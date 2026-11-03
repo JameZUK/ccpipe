@@ -233,3 +233,61 @@ def _umask() -> int:
     u = os.umask(0)
     os.umask(u)
     return u
+
+
+# ── review fixes (2026-11-03) ────────────────────────────────────────────
+
+def test_fifo_is_refused_without_hanging(env):
+    c, root, *_ = env
+    os.mkfifo(root / "pipe.png")
+    os.mkfifo(root / "pipe.bin")
+    # Before: os.open blocked waiting for a writer, holding a worker for good.
+    assert c.get(f"/api/fs/download?path={root}/pipe.bin").status_code == 400
+    assert c.get(f"/api/fs/inline?path={root}/pipe.png").status_code == 400
+
+
+def test_abandoned_uploads_swept_on_load_and_on_start(env, monkeypatch):
+    c, root, data, ft, _ = env
+    uid = start(c, root / "old.bin", 10)
+    assert len(parts(root)) == 1
+    # As after a restart a day later: the registry is reloaded and swept.
+    ft._uploads.clear()
+    ft._loaded = False
+    monkeypatch.setattr(ft, "_UPLOAD_TTL_S", -1)
+    ft._load()
+    assert parts(root) == [] and uid not in ft._uploads
+    # And a new upload sweeps any that went stale while running.
+    uid2 = start(c, root / "a.bin", 10)
+    uid3 = start(c, root / "b.bin", 10)
+    assert uid2 not in ft._uploads and uid3 in ft._uploads
+
+
+def test_sweep_loop_runs_at_startup(env, monkeypatch):
+    import asyncio
+    c, root, data, ft, _ = env
+    start(c, root / "x.bin", 10)
+    ft._uploads.clear()
+    ft._loaded = False
+    monkeypatch.setattr(ft, "_UPLOAD_TTL_S", -1)
+
+    async def one_pass():
+        task = asyncio.create_task(ft.sweep_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+    asyncio.run(one_pass())
+    assert parts(root) == []
+
+
+def test_read_umask_matches_the_process():
+    import ccpipe.routes.fs_transfer as ft
+    assert ft._read_umask() == _umask()
+
+
+def test_piece_bigger_than_a_write_batch(env):
+    c, root, *_ = env
+    payload = os.urandom(3 * 1024 * 1024 + 7)        # several 1 MiB batches in one PUT
+    uid = start(c, root / "batch.bin", len(payload))
+    assert put(c, uid, 0, payload).json()["received"] == len(payload)
+    assert c.post(f"/api/fs/uploads/{uid}/finish", headers=H).status_code == 200
+    assert (root / "batch.bin").read_bytes() == payload

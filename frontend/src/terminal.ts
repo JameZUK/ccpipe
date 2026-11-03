@@ -1229,6 +1229,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     const LONG_PRESS_MS = 450;
     const LONG_PRESS_SLOP_PX = 10;
     let pressTimer: number | null = null;
+    let longPressAt = -Infinity;          // when the last long-press fired
     let pressX = 0;
     let pressY = 0;
     const clearPress = (): void => {
@@ -1250,6 +1251,7 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
         pressTimer = null;
         if (activeId === -1 || dragging || disposed) return;
         activeId = -1;                       // the gesture ends here
+        longPressAt = performance.now();
         // Hide the soft keyboard while reading.
         const focused = document.activeElement as HTMLElement | null;
         focused?.blur?.();
@@ -1300,8 +1302,12 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
       clearPress();
       if (e.pointerId === activeId) { activeId = -1; dragging = false; wheelAccum = 0; }
     };
-    // The browser's own long-press menu would land on the canvas.
-    const onContextMenu = (e: Event): void => { if (pressTimer !== null || activeId !== -1) e.preventDefault(); };
+    // The browser's own long-press menu would land on the canvas — or, a
+    // moment after our long-press fired (Android's comes at ~500 ms, ours
+    // at 450), over the select-text view.
+    const onContextMenu = (e: Event): void => {
+      if (pressTimer !== null || activeId !== -1 || performance.now() - longPressAt < 1500) e.preventDefault();
+    };
     container.addEventListener("contextmenu", onContextMenu);
 
     container.addEventListener("pointerdown",   onDown, { capture: true });

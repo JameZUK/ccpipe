@@ -221,23 +221,40 @@ Order of likelihood:
    `scrollToBottom` fires. See [`docs/threat-model.md`](threat-model.md)
    for the four xterm scrollback quirks documented in May-2026.
 
-2. **The replay seam.** On a full replay the server sends a
-   `capture-pane` blob, then tmux's attach output erases the client's
-   screen (`ESC[2J`) and repaints the pane. Any row on the client's
-   screen that tmux doesn't repaint is lost, so the blob's last
-   screenful must be exactly what tmux repaints. Two things broke that
-   until 2026-11-03 (`_send_history`):
-   - the capture was taken before tmux resized the window to the new
-     client, and tmux reflows a pane that grows after a screen clear by
-     padding at the bottom, so a phone attaching to a window the desktop
-     had sized lost a row per row of growth (9 lines in one test);
-   - the client is the pane plus tmux's status line, so the blob must
-     end with one CRLF per status row, or the last history line is
-     erased on every full replay (`frontend/test/seam-status-row.mjs`).
+2. **The replay seam.** On a full replay the server sends the pane's
+   scrollback, then tmux's attach output erases the client's screen and
+   repaints the pane. The replay (`_send_history`) is the **history only**
+   (`capture-pane -E -1`) followed by one blank line per client row, so
+   all of it is in the client's scrollback before tmux's erase and none
+   of it is erased; the screen comes from tmux's own redraw. How it got
+   there (2026-11-03):
+   - The capture must follow tmux's resize of the window to the new
+     client: history reflows on a resize (captured before, a phone
+     attaching to a desktop-sized window lost 9 lines). The relay's
+     output is held until the replay is sent.
+   - Lines that scroll into history between tmux's redraw and the
+     capture were in both: the captured history and the held output
+     after the redraw (measured: 2-3 per attach at 200 lines/s). tmux's
+     history size is read just after the redraw, over the control
+     connection (`tmux_control.query`, well under a millisecond; a tmux
+     subprocess takes ~5 ms), and again atomically with the capture; the
+     rows added in between are dropped from the capture's end, whole
+     lines only. The reading waits for the redraw itself (the first held
+     output with text in it), not tmux's terminal setup, which comes
+     0.3-1 ms earlier: read then, it dropped lines that belonged.
+     Left over: one duplicate line on some attaches at very high output
+     rates (1000 lines/s), never a lost one.
+   - Still open: a phone that resizes the terminal again just after
+     connecting (47 → 49 columns, measured) makes tmux redraw the whole
+     screen once more, and a line that scrolls while that redraw is
+     pending is never sent to the client as a scroll. It's lost from the
+     client's scrollback (it stays in tmux's). This predates the replay
+     changes.
 
-   The capture now follows the attach: the relay's output is held until
-   the blob is sent. Output that arrives in the few milliseconds between
-   the attach and the capture can still appear twice.
+   Harness: `frontend/test/seam-history-only.mjs` models the seam
+   headless; the live measurement prints numbered lines in a pane and
+   attaches over and over, checking the client's buffer (debug
+   snapshot) around the seam, which is found from the WebSocket frames.
 
 3. **Lifecycle-driven reconnects on focus.** The client kicks the WS
    on focus events if no data was received recently. The threshold is
@@ -295,7 +312,7 @@ is logged at debug level only (it is routine on network handoffs).
 | Accounting drift / unit-test failure         | `backend/ccpipe/ws.py::WsCounters` + `tests/test_ws_byte_accounting.py` |
 | capture-pane returns wrong content           | `backend/ccpipe/ws.py::_capture_session_history`         |
 | Wrong content after reconnect (`--reconnect` fails) | `backend/ccpipe/ws.py::_TerminalConnection.run` (hello → relay start, output held → `_send_history` → stream_ready → `_release_pty`) |
-| Lines missing or doubled at the history/screen seam | `backend/ccpipe/ws.py::_send_history` + `frontend/test/seam-status-row.mjs` |
+| Lines missing or doubled at the history/screen seam | `backend/ccpipe/ws.py::_send_history` + `frontend/test/seam-history-only.mjs` |
 | xterm shows stale buffer after reconnect     | `frontend/src/main.ts::onHello` (`resetTerminal` + `bottomOnNextOutput`) |
 | Doctor `--realistic` fails on a specific phase | `scripts/scrollback-doctor.py::assert_phase_*` + the matching block in `scripts/scrollback-test-generator.sh` |
 | Frequent reconnects on focus                 | `frontend/src/ws.ts::kickStaleSocket` (idle-threshold heuristic) |

@@ -4,15 +4,19 @@ Spawns a long-lived `tmux -C` subprocess (no attach) and surfaces server-wide
 notifications (sessions-changed, window-add/close, exit, etc.) to async
 subscribers. Auto-respawns the subprocess if the tmux server dies.
 
-This is purely an event channel — we don't send commands through it. One-shot
-operations go through libtmux (see tmux.py). The per-client attached terminal
-is a separate `tmux attach-session` PTY (see pty_relay.py / ws.py).
+Mostly an event channel: one-shot operations go through tmux subprocesses
+(see tmux.py). The exception is query(), for the rare read that must be
+fast: the connection is already open, so a reply takes well under a
+millisecond where spawning tmux takes several (ws._send_history reads the
+pane's history size right after an attach with it). The per-client attached
+terminal is a separate `tmux attach-session` PTY (see pty_relay.py / ws.py).
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -77,6 +81,36 @@ class TmuxControlClient:
     _task: asyncio.Task[None] | None = None
     _proc: asyncio.subprocess.Process | None = None
     _stopped: bool = False
+    # Replies owed to commands this client wrote, oldest first: a future
+    # for query(), None for a keepalive probe (its reply is dropped). tmux
+    # answers a client's commands in order, one %begin…%end/%error block
+    # each, so the next block from this client is the oldest one's.
+    _pending: deque[asyncio.Future[list[str] | None] | None] = field(default_factory=deque)
+    _block: list[str] | None = None        # lines of the reply being read
+
+    async def query(self, command: str, timeout: float = 0.5) -> list[str] | None:
+        """Run *command* (tmux command syntax) and return its output lines,
+        or None: not connected, an error, or no reply within *timeout*.
+        A reply that comes later still consumes its place in the queue."""
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.stdin.is_closing():
+            return None
+        fut: asyncio.Future[list[str] | None] = asyncio.get_running_loop().create_future()
+        self._pending.append(fut)
+        try:
+            proc.stdin.write(command.encode() + b"\n")
+            await proc.stdin.drain()
+            return await asyncio.wait_for(asyncio.shield(fut), timeout)
+        except (OSError, ConnectionError, asyncio.TimeoutError):
+            return None
+
+    def _fail_pending(self) -> None:
+        """The connection is gone: nothing owed will be answered."""
+        while self._pending:
+            fut = self._pending.popleft()
+            if fut is not None and not fut.done():
+                fut.set_result(None)
+        self._block = None
 
     async def start(self) -> None:
         if self._task is not None:
@@ -203,6 +237,7 @@ class TmuxControlClient:
                     if proc.stdin is None or proc.stdin.is_closing():
                         break
                     try:
+                        self._pending.append(None)     # its reply isn't wanted
                         proc.stdin.write(b"refresh-client\n")
                         await proc.stdin.drain()
                     except (OSError, ConnectionError):
@@ -230,10 +265,29 @@ class TmuxControlClient:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(proc.wait(), timeout=2.0)
             self._proc = None
+            self._fail_pending()
 
     async def _handle_line(self, line: str) -> None:
+        if self._block is not None:
+            # Inside the reply to one of our commands (tmux doesn't
+            # interleave notifications into a reply).
+            if line.startswith(("%end ", "%error ")):
+                fut = self._pending.popleft() if self._pending else None
+                if fut is not None and not fut.done():
+                    fut.set_result(self._block if line.startswith("%end ") else None)
+                self._block = None
+            else:
+                self._block.append(line)
+            return
+        if line.startswith("%begin "):
+            # "%begin <time> <number> <flags>": flags 1 = a command this
+            # client sent. (The attach that opened the connection is
+            # answered before anything is owed.)
+            parts = line.split(" ")
+            if len(parts) >= 4 and parts[3] == "1" and self._pending:
+                self._block = []
+            return
         if not line.startswith("%"):
-            # Command-response data lines; we don't send commands so ignore.
             return
         # Strip the leading '%' then split off the name token.
         body = line[1:]

@@ -595,6 +595,27 @@ async def window_layout(name: str) -> tuple[int, int, int] | None:
     return int(parts[0]), int(parts[1]), rows
 
 
+PANE_STATE_FORMAT = (f"#{{window_width}}{_FIELD_SEP}#{{window_height}}{_FIELD_SEP}#{{status}}"
+                     f"{_FIELD_SEP}#{{history_size}}")
+
+
+async def pane_state(name: str) -> tuple[int, int, int, int] | None:
+    """window_layout plus the active pane's history size (rows scrolled
+    into tmux's scrollback): (width, height, status rows, history rows)."""
+    out = await _tmux_out("display-message", "-p", "-t", pane_target(name), PANE_STATE_FORMAT)
+    return parse_pane_state(out)
+
+
+def parse_pane_state(out: str | None) -> tuple[int, int, int, int] | None:
+    """PANE_STATE_FORMAT's output as pane_state's tuple."""
+    parts = (out or "").strip().split(_FIELD_SEP)
+    if len(parts) != 4 or not all(p.isdigit() for p in (parts[0], parts[1], parts[3])):
+        return None
+    status = parts[2].strip()
+    rows = 0 if status in ("off", "0", "") else (int(status) if status.isdigit() else 1)
+    return int(parts[0]), int(parts[1]), rows, int(parts[3])
+
+
 async def capture_screen(name: str) -> list[str] | None:
     """The visible screen of the session's active pane as plain text (no
     escapes), trailing spaces and trailing blank rows removed."""

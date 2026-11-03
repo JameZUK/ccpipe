@@ -438,7 +438,9 @@ class _TerminalConnection:
         # Relay output held back until the replay has been sent (run()).
         self.hold_pty = False
         self.held_pty: list[bytes] = []
-        self.pty_output = asyncio.Event()
+        # Set by the first held output with text in it: tmux's drawing of
+        # this client's screen (_send_history).
+        self.pty_redraw = asyncio.Event()
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def run(self) -> None:
@@ -507,10 +509,13 @@ class _TerminalConnection:
         tts_filter = await _build_tts_filter(self.session)
         self._register(tts_filter)
 
-        # Hold the relay's output until the replay is on the wire: the
+        # Hold the relay's output until stream_ready is on the wire: the
         # client takes everything between hello and stream_ready as the
-        # replay, and tmux's attach redraw must land after it.
-        self.hold_pty = replay
+        # replay (and drops PTY output there when it has no replay), so
+        # tmux's attach redraw must land after it. Always, not only with a
+        # replay: a split window has none, and its redraw was being dropped
+        # whenever it beat stream_ready (code review, 2026-11-03).
+        self.hold_pty = True
         await self._start_pty(cols, rows)
         self.pty_task = asyncio.create_task(self._pty_lifecycle())
         if self.watch:
@@ -636,46 +641,69 @@ class _TerminalConnection:
         self.tts_sub.cancel()
 
     async def _send_history(self, cols: int, rows: int) -> None:
-        """Send the pane replay, captured once tmux has resized the window to
-        this client. tmux's attach output erases the client's screen and
-        repaints the pane, so the replay's last screenful must be exactly
-        what tmux will repaint, or the rows in between are lost:
+        """Send the replay: the pane's scrollback as it was when tmux drew
+        this client's screen, then a blank screenful. tmux's attach redraw
+        (held until this is sent) erases the client's screen and paints the
+        pane itself, so the replay carries history only:
 
-        - The capture must follow the resize. Captured before (at the size
-          the last device left the window), a pane that grows after a screen
-          clear is padded at the bottom by tmux (it pulls back only history
-          it scrolled), while the client's copy is bottom-aligned; the erase
-          then wiped one row per row of growth (2026-11-03: 9 lines lost
+        - Captured once tmux has resized the window to this client: history
+          reflows on a resize (2026-11-03: captured before, 9 lines were lost
           attaching a phone to a 60x24 window).
-        - One CRLF per status-line row ends the replay: the client is the
-          pane's height plus tmux's status line, and tmux repaints only the
-          pane. Without it the screen's top row, the last history line, was
-          erased on every full replay (the status line is on by default).
+        - Lines that scroll into history between the redraw and the capture
+          would land twice: in the captured history and again from the held
+          output that follows the redraw (measured: 2-3 lines per attach at
+          200 lines/s). tmux's history size is read just after the redraw
+          (over the control connection, well under a millisecond) and again
+          atomically with the capture; the rows added in between are dropped
+          from the capture's end. Only whole lines are dropped, and the
+          reading can only come after the redraw, so at worst a duplicate
+          remains, never a lost row.
+        - The blank screenful is the client's height (pane plus status
+          line), so all of the history is above the screen when tmux's erase
+          comes, and none of it is erased.
         """
+        # Wait for tmux's redraw of this client, not just its first bytes:
+        # tmux first sends terminal setup (modes, queries, a clear), then
+        # draws the screen 0.3-1 ms later (measured). A history size read
+        # before the drawing is too small, and dropping by it lost lines.
+        # The drawing is the first output with any text in it; a blank,
+        # idle pane has none, and then the timeout costs nothing.
         try:
-            await asyncio.wait_for(self.pty_output.wait(), timeout=1.5)
+            await asyncio.wait_for(self.pty_redraw.wait(), timeout=1.5)
         except asyncio.TimeoutError:
             pass
-        status_rows = 0
+        t_redraw = time.monotonic()
+        t_seen = 0.0
+        seen_history: int | None = None
         deadline = time.monotonic() + 1.0
         while True:
-            layout = await tmux.window_layout(self.session)
-            if layout is None:
+            state = await _pane_state_now(self.session)
+            if state is None:
                 break
-            width, height, status_rows = layout
+            width, height, status_rows, seen_history = state
+            t_seen = time.monotonic()
             if self.watch or (width, height) == (cols, max(1, rows - status_rows)):
                 break
             if time.monotonic() >= deadline:
                 break                    # another client sets the size: capture as is
             await asyncio.sleep(0.03)
-        invalidate_history_cache(self.session)
-        blob = await asyncio.to_thread(
-            _trim_wrap_padding, await _capture_session_history(self.session, rows),
-            cols, rows)
+        captured = await _capture_replay_history(self.session)
+        if captured is None:
+            return
+        history, history_rows, pane_width = captured
+        dropped = 0
+        if seen_history is not None and 0 < history_rows - seen_history <= _SEAM_MAX_ROWS:
+            before = history.count(b"\r\n")
+            history = _drop_last_rows(history, history_rows - seen_history, pane_width)
+            dropped = before - history.count(b"\r\n")
+        log.debug("replay %s: history %s→%d rows, %d lines dropped; size read %.1f ms after the "
+                  "redraw, capture %.1f ms after", self.session, seen_history, history_rows, dropped,
+                  (t_seen - t_redraw) * 1000, (time.monotonic() - t_redraw) * 1000)
+        blob = await asyncio.to_thread(_trim_wrap_padding, history, cols)
         if not blob:
             return
         async with self.send_lock:
-            await self.ws.send_bytes(bytes([FRAME_PTY_OUTPUT]) + blob + b"\r\n" * status_rows)
+            await self.ws.send_bytes(bytes([FRAME_PTY_OUTPUT]) + blob + b"\r\n" * rows)
 
     async def _release_pty(self) -> None:
         """Forward the relay output held during the replay, in order, then
@@ -1110,7 +1138,8 @@ class _TerminalConnection:
         self._watch_for_listening(data)
         if self.hold_pty:
             self.held_pty.append(data)
-            self.pty_output.set()
+            if not self.pty_redraw.is_set() and _has_visible_text(data):
+                self.pty_redraw.set()
             return
         await self._send_pty(data)
 
@@ -1124,7 +1153,9 @@ class _TerminalConnection:
         if self.watch or (self.listen_task is not None and not self.listen_task.done()):
             return
         seam = self.listen_tail + data[:16]
-        self.listen_tail = data[-16:]
+        # The last 16 bytes seen, even when they arrived in several small
+        # chunks (one chunk's tail alone missed a phrase split three ways).
+        self.listen_tail = data[-16:] if len(data) >= 16 else (self.listen_tail + data)[-16:]
         if b"tap to send" not in data and b"tap to send" not in seam:
             return
         if _mic_owner is not None or time.monotonic() < _voice_quiet_until:
@@ -1266,100 +1297,44 @@ _HISTORY_MAX_LINES = 10_000
 # — always survives.
 _HISTORY_MAX_BYTES = 4 * 1024 * 1024
 
-# Tiny per-session cache for the most recent capture-pane output, so
-# that a mobile reconnect storm (Wi-Fi → cellular handoff fires several
-# online/visibility events in quick succession) doesn't pay one full
-# `tmux capture-pane` for each WS attempt. The window is kept SHORT:
-# a cached blob is a point-in-time snapshot, and the longer it's reused
-# the more a busy streaming session can mutate between the snapshot and
-# the attach redraw — content that scrolls out of the visible region in
-# that gap lands in neither the blob nor tmux's redraw, a dropped/
-# duplicated band at the seam. 250 ms still coalesces a handoff storm
-# (those events fire within tens of ms) while bounding staleness an
-# order of magnitude tighter than the old 1 s. Keyed by session name.
-_HISTORY_CACHE_TTL_S = 0.25
-_history_cache: dict[str, tuple[float, bytes]] = {}
+async def _capture_replay_history(session: str) -> tuple[bytes, int, int] | None:
+    """The pane's scrollback only (not the visible screen), for the
+    replay, with tmux's history size and the pane's width at the same
+    instant: one command list, which tmux runs without the pane's program
+    output being processed in between. None if the capture failed."""
+    target = tmux.pane_target(session)
+    out = await _tmux_capture([
+        "capture-pane", "-t", target, "-p", "-e", "-J",
+        "-S", f"-{_HISTORY_MAX_LINES}", "-E", "-1",
+        # Last, so a capture cut at the front still has it.
+        ";", "display-message", "-p", "-t", target, "#{history_size} #{pane_width}",
+    ])
+    if out is None:
+        return None
+    body, _, last = out.rstrip(b"\n").rpartition(b"\n")
+    parts = last.split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    history_rows, width = int(parts[0]), int(parts[1])
+    if history_rows == 0:
+        # With no history, "-E -1" returns the screen's first row instead.
+        return b"", 0, width
+    return _replay_bytes(body), history_rows, width
 
 
-def _clear_history_cache() -> None:
-    """Drop any cached capture-pane output. Called by the tests
-    between runs so a stale entry from one test case doesn't bypass
-    the subprocess mock in the next one."""
-    _history_cache.clear()
-
-
-def invalidate_history_cache(session: str) -> None:
-    """Drop the cached capture for *session*. Called when a session is
-    renamed or killed so a recreated session reusing the same name (or
-    the rename's new name) can't be served a stale blob from the prior
-    occupant within the TTL window."""
-    _history_cache.pop(session, None)
-
-
-async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
-    """Return the full tmux pane content (scrollback + visible) as
-    xterm-ready bytes, preserving ANSI escape sequences.
-
-    The previous implementation captured *only* scrollback (``-E -1``)
-    and padded with ``viewport_rows`` blank LFs so the captured tail
-    would scroll past xterm's visible region before tmux's attach
-    redraw could clobber it. That seam was fragile: the padding count
-    had to equal the rows tmux would paint, but the two diverge as
-    soon as anything shifts the pane height (status bar, multi-pane
-    layouts, tmux config drift). When they disagreed the result was
-    silently-missing lines at the seam — exactly the
-    "older-overwriting-newer" symptom reported by the user.
-
-    The new approach is seam-free: capture the *entire* pane (history
-    + visible), send it as-is, and let tmux's attach redraw paint
-    over the visible region with the same bytes we just placed there.
-    The visible portion of our capture and tmux's redraw show
-    identical content (they're snapshots of the same pane microseconds
-    apart) so the overwrite is a no-op — no data loss, no alignment
-    to maintain. ``viewport_rows`` is kept on the API for callers
-    that still pass it; it's unused.
-
-    Returns empty bytes on any failure or when the pane is empty.
-    """
-    del viewport_rows  # accepted for backwards compat; intentionally unused
-    # Coalesce repeated captures within the TTL window. A mobile
-    # reconnect storm can fire several attaches in quick succession;
-    # without this each one pays a tmux subprocess + several MB of
-    # capture output. Mutation is on the asyncio loop thread so no
-    # lock is needed.
-    now = time.monotonic()
-    cached = _history_cache.get(session)
-    if cached is not None:
-        if now - cached[0] < _HISTORY_CACHE_TTL_S:
-            return cached[1]
-        # L2: stale on read — drop so the dict doesn't hold this entry
-        # until the 64-key threshold sweep runs. A session that was
-        # attached once then renamed/killed would otherwise sit with
-        # its ~MB of capture bytes until 63 other unique session names
-        # appear over the process lifetime.
-        _history_cache.pop(session, None)
+async def _tmux_capture(args: list[str]) -> bytes | None:
+    """Run tmux with *args* and return its stdout, keeping at most the
+    last _HISTORY_MAX_BYTES (+ slack) of it, starting at a line. None on
+    any failure or empty output."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            tmux.TMUX_BIN, "capture-pane",
-            "-t", tmux.pane_target(session),
-            "-p",                              # print to stdout
-            "-e",                              # include escape sequences
-            "-J",                              # join wrapped lines (+ trailing
-                                               # spaces) so xterm can re-wrap a
-                                               # logically-long line to the
-                                               # client viewport instead of
-                                               # rendering it hard-broken at the
-                                               # capture-time pane width
-            "-S", f"-{_HISTORY_MAX_LINES}",    # start: N lines into history
-            # No -E flag: capture extends through the visible pane to
-            # the bottom, so the resulting bytes describe the WHOLE
-            # pane state at this instant.
+            tmux.TMUX_BIN, *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=tmux.tmux_env(),
         )
     except FileNotFoundError:
-        return b""
+        return None
     assert proc.stdout is not None
     try:
         out, cut = await asyncio.wait_for(
@@ -1375,50 +1350,96 @@ async def _capture_session_history(session: str, viewport_rows: int) -> bytes:
             proc.kill()
         with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=1.0)
-        return b""
+        return None
     if proc.returncode != 0 or not out:
-        return b""
+        return None
     if cut:
         # The tail read started mid-line (possibly mid escape sequence);
         # drop everything up to the first line break.
         nl = out.find(b"\n")
         out = out[nl + 1:] if nl != -1 else b""
+    return out or None
+
+
+def _replay_bytes(out: bytes) -> bytes:
+    """capture-pane output as xterm-ready replay bytes."""
     # tmux capture-pane joins lines with LF. xterm.js wants CRLF to start
     # a new line at column 0; otherwise lines stack on the right of the
     # previous one. Normalise (idempotent if already CRLF).
     normalised = out.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-    # IMPORTANT: do NOT end the blob with a trailing CRLF. On a full
-    # reconnect the frontend replays this blob and tmux's attach redraw
-    # then repaints the visible screen IN PLACE. A trailing CRLF first
-    # scrolls the grid up by one row — so the top visible line is pushed
-    # into scrollback AND immediately repainted on screen by the redraw,
-    # a duplicate line per reconnect that piles up under mobile reconnect
-    # churn ("duplicate data in scrollback"). Ending exactly at the last
-    # line's content lets the redraw overwrite with no scroll, no dup.
-    # The next bytes after this blob are always a cursor-positioning
-    # redraw (\x1b[H…), so nothing concatenates onto that last line.
-    # Validated headless in frontend/test/dup-seam.mjs.
-    # That holds for the PANE. The client is also tmux's status line tall,
-    # so _send_history appends one CRLF per status row; with none the
-    # last history line was erased on every full replay
-    # (frontend/test/seam-status-row.mjs).
+    # No trailing CRLF: the caller decides what follows the last line
+    # (_send_history: a blank screenful).
     if normalised.endswith(b"\r\n"):
         normalised = normalised[:-2]
     # Cap the blob size, truncating the OLDEST content from the front so
-    # the newest (visible) lines always survive. Trim to the next CRLF
-    # boundary so we never emit a half escape sequence / partial line.
+    # the newest lines always survive. Trim to the next CRLF boundary so we
+    # never emit a half escape sequence / partial line.
     if len(normalised) > _HISTORY_MAX_BYTES:
         cut = len(normalised) - _HISTORY_MAX_BYTES
         nl = normalised.find(b"\r\n", cut)
         normalised = normalised[nl + 2:] if nl != -1 else normalised[cut:]
-    # Cache for the coalesce window, sweeping expired entries on every
-    # insert: each can hold up to _HISTORY_MAX_BYTES, and waiting for 64
-    # distinct names before sweeping kept several MB of stale captures
-    # (sessions attached once, then never again) alive indefinitely.
-    for k in [k for k, (t, _) in _history_cache.items() if now - t >= _HISTORY_CACHE_TTL_S]:
-        _history_cache.pop(k, None)
-    _history_cache[session] = (now, normalised)
     return normalised
+
+
+# Escape sequences: CSI, OSC / DCS / APC / PM strings, and two-byte ESC x.
+_ESCAPES = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[\]P_^][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -~]")
+_VISIBLE = re.compile(rb"[!-~\x80-\xff]")
+
+
+def _has_visible_text(data: bytes) -> bool:
+    """Any printable character outside escape sequences: tmux's terminal
+    setup has none, its drawing of the screen does."""
+    return _VISIBLE.search(_ESCAPES.sub(b"", data)) is not None
+
+
+async def _pane_state_now(session: str) -> tuple[int, int, int, int] | None:
+    """tmux.pane_state, over the control connection when it's up. Its
+    reply is in well under a millisecond; spawning tmux takes ~5 ms, and
+    lines that scroll into history in that time after the attach redraw
+    are the replay's leftover duplicates (measured: 1-2 lines per attach
+    at 200 lines/s)."""
+    try:
+        tmux.safe_name(session)      # it goes into a tmux command line
+    except ValueError:
+        return await tmux.pane_state(session)
+    lines = await control_client.query(
+        f"display-message -p -t '{tmux.pane_target(session)}' '{tmux.PANE_STATE_FORMAT}'")
+    state = tmux.parse_pane_state(lines[0]) if lines else None
+    return state if state is not None else await tmux.pane_state(session)
+
+
+# Rows added between the size check and the capture that _send_history
+# will drop; more than this means something else happened (a clear, the
+# history limit's trim) and nothing is dropped.
+_SEAM_MAX_ROWS = 10_000
+
+
+def _pane_rows(line: bytes, width: int) -> int:
+    """How many pane rows a captured (-J joined) line took, at *width*,
+    counted high where unsure: a wide character can leave a column empty
+    at a row's end, so each one counts an extra column."""
+    if len(line) <= width:
+        return 1
+    text = _ANSI.sub(b"", line).decode("utf-8", errors="replace")
+    cols = _visible_width(line)
+    wide = sum(1 for ch in text if unicodedata.east_asian_width(ch) in ("W", "F"))
+    return max(1, -(-(cols + wide) // width))
+
+
+def _drop_last_rows(history: bytes, rows: int, width: int) -> bytes:
+    """Drop the last *rows* pane rows from a captured history, whole lines
+    only. A line that would be cut part-way is kept: the cost is a
+    duplicate, where cutting into it would lose rows."""
+    if rows <= 0 or not history or width <= 0:
+        return history
+    lines = history.split(b"\r\n")
+    while lines and rows > 0:
+        r = _pane_rows(lines[-1], width)
+        if r > rows:
+            break
+        lines.pop()
+        rows -= r
+    return b"\r\n".join(lines)
 
 
 # Trailing padding in the replay. capture-pane -J keeps each line's
@@ -1442,27 +1463,16 @@ def _visible_width(line: bytes) -> int:
     return width
 
 
-def _trim_wrap_padding(data: bytes, cols: int, keep_rows: int = 0) -> bytes:
+def _trim_wrap_padding(data: bytes, cols: int) -> bytes:
     """Drop the trailing spaces (keeping any SGR codes among them) from
     replay lines wider than *cols*, so padding doesn't wrap into blank
-    rows on a narrower client.
-
-    The last *keep_rows* rows (as the client will wrap them) are left
-    alone: tmux's attach redraw paints over exactly that screenful, and
-    the seam-free replay depends on it covering the same rows tmux's own
-    screen does. Trimming there packs more lines into that screenful and
-    the redraw then overwrites lines that belonged in history.
+    rows on a narrower client. (The replay is history only, so every line
+    can be trimmed: tmux's redraw paints the screen itself.)
     """
     if not data or cols <= 0:
         return data
     lines = data.split(b"\r\n")
-    end = len(lines)
-    rows = 0
-    while end > 0 and rows < keep_rows:
-        end -= 1
-        width = _visible_width(lines[end]) if len(lines[end]) > cols else len(lines[end])
-        rows += max(1, -(-width // cols))
-    for i, line in enumerate(lines[:end]):
+    for i, line in enumerate(lines):
         if len(line) <= cols:
             continue               # bytes >= visible width: can't wrap
         m = _TRAILING_PAD.search(line)

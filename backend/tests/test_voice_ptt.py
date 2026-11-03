@@ -142,3 +142,30 @@ def test_old_press_is_not_waited_on(monkeypatch):
     monkeypatch.setattr(voice_ptt, "_last_press", (voice_ptt.time.monotonic() - 5, "recording"))
     s = Screen([REC])
     assert run(voice_ptt.arm(s.capture, s.press)) == (True, "already recording")
+
+
+# The real layout (Claude Code 2.1): conversation, the prompt box between
+# two rules, then the statusline and the footer.
+RULE = "─" * 70
+
+
+def screen(footer, above=("● Done.",)):
+    return [*above, "", RULE, "❯ ", RULE, "  [james@ ccpipe]", *footer]
+
+
+def test_footer_is_below_the_prompt_box():
+    assert voice_ptt.voice_state(screen(["  ● REC · tap to send"])) == "recording"
+    assert voice_ptt.voice_state(screen(["  ⏵⏵ auto mode on · listening… · tap to send"])) == "recording"
+    assert voice_ptt.voice_state(screen(["  Voice: processing…"])) == "processing"
+    assert voice_ptt.voice_state(screen(["  ⏵⏵ auto mode on (shift+tab to cycle)"])) == "idle"
+
+
+def test_conversation_just_above_the_prompt_never_matches():
+    talk = ("● The footer reads REC · tap to send while recording,",
+            "  and processing… while transcribing.")
+    assert voice_ptt.voice_state(screen(["  ⏵⏵ auto mode on"], above=talk)) == "idle"
+
+
+def test_multi_line_prompt_box():
+    lines = ["● hi", RULE, "❯ first line of a long", "  dictated prompt", RULE, "  ● REC · tap to send"]
+    assert voice_ptt.voice_state(lines) == "recording"

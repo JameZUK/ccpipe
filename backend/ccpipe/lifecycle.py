@@ -290,8 +290,6 @@ async def stop(name: str, reason: str = "stopped") -> None:
     if not await tmux.kill_session(name):
         raise LifecycleError(500, "stop failed")
     session_meta.mark_stopped(name, reason)
-    from . import ws
-    ws.invalidate_history_cache(name)
     _status.pop(name, None)
 
 
@@ -300,8 +298,6 @@ async def forget(name: str) -> None:
     or it would come back after a reboot)."""
     if await tmux.session_exists(name):
         await tmux.kill_session(name)
-        from . import ws
-        ws.invalidate_history_cache(name)
     session_meta.forget(name)
     sticky.clear(name)
     _status.pop(name, None)

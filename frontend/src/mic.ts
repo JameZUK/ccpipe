@@ -381,6 +381,12 @@ export class MicStreamer {
   private async _teardown(): Promise<void> {
     try { this.source?.disconnect(); } catch {}
     try { this.analyser?.disconnect(); } catch {}
+    if (this.node) {
+      // End the processor (mic-worklet.js): the context outlives this
+      // recording, and a processor left running is never released.
+      this.node.port.onmessage = null;
+      try { this.node.port.postMessage("stop"); } catch {}
+    }
     try { this.node?.disconnect(); } catch {}
     this.source = null;
     this.analyser = null;

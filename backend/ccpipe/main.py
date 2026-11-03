@@ -150,7 +150,9 @@ async def lifespan(app: FastAPI):
     await lifecycle.boot_restore()
     await control_client.start()
     # Resource sampling for the picker / session bar, and the idle-stop loop.
-    _background = [asyncio.create_task(sysstats.run()), asyncio.create_task(lifecycle.run())]
+    from .routes import fs_transfer
+    _background = [asyncio.create_task(sysstats.run()), asyncio.create_task(lifecycle.run()),
+                   asyncio.create_task(fs_transfer.sweep_loop())]
     if os.environ.get("CCPIPE_TTS", "off").lower() in ("kokoro", "on", "1", "true"):
         tts_service.set_enabled(True)
         await tts_service.start()

@@ -55,17 +55,6 @@ def test_trim_keeps_text_and_inner_spaces_of_long_lines():
     assert _trim_wrap_padding(line, 51) == b"a   b" + b"c" * 80
 
 
-def test_trim_leaves_the_last_screenful_alone():
-    # tmux's attach redraw paints over the last `rows` rows; they must
-    # keep their padding so they cover the same rows tmux's screen does.
-    pad = b" " * 100
-    data = b"\r\n".join([b"old" + pad, b"mid" + pad, b"new" + pad])
-    # 51 columns: each padded line wraps to 3 rows. keep_rows=4 keeps the
-    # last two lines (3 + 3 rows) intact and trims only the first.
-    assert _trim_wrap_padding(data, 51, 4) == b"\r\n".join([b"old", b"mid" + pad, b"new" + pad])
-    assert _trim_wrap_padding(data, 51, 100) == data
-
-
 def test_trim_multiline_and_empty():
     data = b"one" + b" " * 100 + b"\r\n\r\ntwo" + b" " * 100
     assert _trim_wrap_padding(data, 51) == b"one\r\n\r\ntwo"
