@@ -13,7 +13,7 @@ import { hasWindowButtons, isMobileLayout, mountMobileUI, type MobileUI } from "
 import { capturePendingShare } from "./share";
 import { sparkMark } from "./brand";
 import { installTooltips } from "./tooltip";
-import { addBusyCheck, installUpdater, recoverFromStaleBundle } from "./update";
+import { addBusyCheck, installUpdater, onBeforeReload, recoverFromStaleBundle } from "./update";
 import * as notifications from "./notifications";
 import { attachOptionSpacePtt } from "./ptt";
 import { mdViewUrl } from "./view-url";
@@ -721,6 +721,10 @@ async function attachTerminal(session: string): Promise<void> {
   // doesn't count as "mute".
   let unblockedAt = 0;
   tts.onDebug = (msg) => socket.send({ type: "tts_log", msg });
+  onBeforeReload(() => {
+    try { socket.close(); } catch {}
+    try { tts.dispose(); } catch {}
+  });
   tts.onBlockedChange = (blocked) => {
     ttsBtn.classList.toggle("pill--tap", blocked);
     if (blocked) {

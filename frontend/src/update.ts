@@ -70,9 +70,19 @@ export function onUpdateChange(cb: (build: string | null) => void): () => void {
   return () => { listeners.delete(cb); };
 }
 
-/** Reload now, onto whatever build the server serves. */
+const beforeReload = new Set<() => void>();
+/** Run `fn` just before an update reload: close sockets, release audio. */
+export function onBeforeReload(fn: () => void): () => void {
+  beforeReload.add(fn);
+  return () => { beforeReload.delete(fn); };
+}
+
+/** Reload now, onto whatever build the server serves. First the page lets
+ * go of its connection and audio: on the iPad the old page has been seen
+ * to live on after its reload, still connected and still playing. */
 export function reloadNow(): void {
   reloading = true;
+  for (const fn of beforeReload) { try { fn(); } catch { /* never block the reload */ } }
   location.reload();
 }
 

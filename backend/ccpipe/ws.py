@@ -216,6 +216,26 @@ async def close_stale_ws_sockets(reason: str = "credentials changed") -> int:
     return closed
 
 
+_build_cache: tuple[float, str | None] = (-1.0, None)
+
+
+def _current_build() -> str | None:
+    """The commit of the frontend being served (dist/version.json, cached
+    by mtime), or None if it can't be read."""
+    global _build_cache
+    from .routes.static import _frontend_dist
+    path = _frontend_dist() / "version.json"
+    try:
+        mtime = path.stat().st_mtime
+        if mtime != _build_cache[0]:
+            build = json.loads(path.read_text()).get("build")
+            commit = build.split()[0] if isinstance(build, str) and build.split() else None
+            _build_cache = (mtime, commit)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return _build_cache[1]
+
+
 async def _build_tts_filter(tmux_session: str):
     """Return a content filter that gates TTS to *this* claude conversation
     and to records appended after the WS attach time.
@@ -398,6 +418,9 @@ class _TerminalConnection:
         self.watch_task: asyncio.Task[None] | None = None
         # Watches for Claude stopping to ask something (main terminal only).
         self.ask_task: asyncio.Task[None] | None = None
+        # The page's build ("5478df8_2026-11-03T2120Z" → "5478df8").
+        params = getattr(websocket, "query_params", None) or {}
+        self.build = (params.get("build") or "").split("_")[0][:40]
         # Budget for the page's tts_log reports (see _receive_loop).
         self.tts_log_window = 0.0
         self.tts_log_count = 0
@@ -635,8 +658,19 @@ class _TerminalConnection:
         # every reply of its session a second time.
         self.tts_sub = _NoTts() if self.tile else tts_service.subscribe(
             on_start=self._on_tts_start, on_chunk=self._on_tts_chunk,
-            on_end=self._on_tts_end, content_filter=tts_filter,
+            on_end=self._on_tts_end,
+            content_filter=lambda r: not self.outdated() and tts_filter(r),
         )
+
+    def outdated(self) -> bool:
+        """The page runs an older build than the one being served. A visible
+        one reloads itself within minutes; a hidden one may never: on the
+        iPad, pages from earlier builds lived on after their reload and even
+        after the app was quit, and played every reply too — and there only
+        one page can play, so they aborted the live one (2026-11-03). Such
+        pages get no speech and no question announcements."""
+        current = _current_build()
+        return bool(current and self.build and self.build != current)
 
     def _unregister(self) -> None:
         with contextlib.suppress(ValueError):
@@ -951,7 +985,8 @@ class _TerminalConnection:
             if self.tts_log_count <= 40:
                 with contextlib.suppress(Exception):
                     msg = _safe_json_loads(text)
-                    log.info("tts client (session=%s): %s", self.session,
+                    log.info("tts client (session=%s build=%s conn=%x): %s", self.session,
+                             self.build or "?", id(self) & 0xffff,
                              re.sub(r"[\x00-\x1f]", " ", str(msg.get("msg", "")))[:300])
             return True
         if _is_control_frame(text, '"type":"mic_start"', '"type": "mic_start"'):
@@ -1265,7 +1300,7 @@ class _TerminalConnection:
         page (for a notification) and say it, unless voice is muted or set
         to read nothing. The id is the spoken copy's, so the page doesn't
         notify a second time when it finishes playing."""
-        if not self.alive:
+        if not self.alive or self.outdated():
             return
         uid = None
         if app_config.load().tts.scope != "off" and not isinstance(self.tts_sub, _NoTts):
