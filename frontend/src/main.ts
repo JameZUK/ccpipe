@@ -1004,6 +1004,9 @@ async function attachTerminal(session: string): Promise<void> {
 
       if (micAvailable && !mic) {
         mic = new MicStreamer(socket);
+        mic.onDiag = (name, detail) => {
+          socket.send({ type: "mic_error", name: name.slice(0, 40), message: detail.slice(0, 150) });
+        };
         // Fetch the persisted voice-input settings and apply once
         // they land. Mic stays at safe defaults until the round-trip
         // finishes; a slow GET doesn't block the UI from working.

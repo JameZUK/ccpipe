@@ -70,6 +70,10 @@ export class MicStreamer {
   onSilence: (() => void) | null = null;
 
 
+  /** Called with (name, detail) when starting was slow or needed a retry:
+   * main.ts sends it to the server's journal (as mic_error, logged only). */
+  onDiag: ((name: string, detail: string) => void) | null = null;
+
   constructor(private readonly socket: TerminalSocket) {}
 
   /** Apply new VAD / max-record settings. Safe to call at any time;
@@ -197,29 +201,41 @@ export class MicStreamer {
           autoGainControl: true,
         },
       });
-      // The context prime() woke normally runs already. If not, one more
-      // resume(); failing that a fresh context (made now that the tap has
-      // registered as user activity).
-      const runs = async (ctx: AudioContext): Promise<boolean> => {
-        if (ctx.state === "running") return true;
-        await Promise.race([
-          ctx.resume().catch(() => {}),
-          new Promise((r) => setTimeout(r, 600)),
-        ]);
-        return (ctx.state as AudioContextState) === "running";
+      // The context prime() woke normally runs already. If not, keep asking
+      // for a while: on Android the first start after the phone's audio has
+      // idled can take well over half a second (the mic opening switches it
+      // to call mode), and giving up at 0.6 s failed taps that were fine
+      // (2026-11-03). Failing that, a fresh context. How long it took is
+      // reported when it was slow (onDiag), so the cause stays measurable.
+      const runs = async (ctx: AudioContext, ms: number): Promise<number | null> => {
+        const t0 = performance.now();
+        const deadline = t0 + ms;
+        while ((ctx.state as AudioContextState) !== "running") {
+          if (performance.now() >= deadline) return null;
+          void ctx.resume().catch(() => {});
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return Math.round(performance.now() - t0);
       };
       const wasState = this.audio?.state ?? "none";
       const sincePrime = this.lastPrimeAt ? Math.round(performance.now() - this.lastPrimeAt) : -1;
       let ctx = this.audio && this.audio.state !== "closed" ? this.audio : this._newAudio();
-      if (!(await runs(ctx))) {
+      let took = await runs(ctx, 3000);
+      let fresh = false;
+      if (took === null) {
         ctx = this._newAudio();
-        if (!(await runs(ctx))) {
+        fresh = true;
+        took = await runs(ctx, 2000);
+        if (took === null) {
           const act = (navigator as Navigator & { userActivation?: { isActive: boolean; hasBeenActive: boolean } }).userActivation;
-          const err = new Error(`ctx ${ctx.state} (fresh too); was ${wasState}; primed ${sincePrime}ms ago; `
+          const err = new Error(`ctx ${ctx.state} after 5 s (fresh too); was ${wasState}; primed ${sincePrime}ms ago; `
             + `activation ${act ? `${act.isActive ? 1 : 0}/${act.hasBeenActive ? 1 : 0}` : "?"}; ${document.visibilityState}`);
           err.name = "MicBlocked";
           throw err;
         }
+      }
+      if (took > 300 || fresh) {
+        this.onDiag?.("MicSlowStart", `ctx running after ${took}ms${fresh ? " (fresh)" : ""}; was ${wasState}; primed ${sincePrime}ms ago`);
       }
       this.ctx = ctx;
       if (this.idleTimer !== null) { clearTimeout(this.idleTimer); this.idleTimer = null; }
