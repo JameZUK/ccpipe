@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import errno
 import logging
+import math
+import operator
 import os
+import sys
 import time
+from array import array
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +29,55 @@ _OPEN_RETRY_INTERVAL_S = 2.0
 _MIC_SAMPLE_RATE_HZ = 16000
 _MIC_BYTES_PER_SAMPLE = 2
 _MIC_BYTES_PER_SEC = _MIC_SAMPLE_RATE_HZ * _MIC_BYTES_PER_SAMPLE  # 32000
+
+
+class _Levels:
+    """How loud a recording was, for the mic_stop journal line: whether
+    Claude was sent something it could hear (2026-11-03: the phone with
+    its voice processing off "couldn't hear me properly")."""
+
+    BLOCK = _MIC_SAMPLE_RATE_HZ // 10      # 100 ms
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.peak = 0
+        self.blocks: list[float] = []      # RMS of each 100 ms block
+        self._sum = 0
+        self._n = 0
+        self._odd = b""
+
+    def add(self, data: bytes) -> None:
+        data = self._odd + data
+        self._odd = data[len(data) // 2 * 2:]
+        samples = array("h")
+        samples.frombytes(data[:len(data) // 2 * 2])
+        if sys.byteorder != "little":
+            samples.byteswap()
+        i = 0
+        while i < len(samples):
+            seg = samples[i:i + self.BLOCK - self._n]
+            i += len(seg)
+            self.peak = max(self.peak, max(seg), -min(seg))
+            self._sum += sum(map(operator.mul, seg, seg))
+            self._n += len(seg)
+            if self._n == self.BLOCK:
+                self.blocks.append(math.sqrt(self._sum / self.BLOCK))
+                self._sum = self._n = 0
+
+    def summary(self) -> str:
+        """Speech level (the loudest tenth of 100 ms blocks), the floor
+        (the quietest tenth) and the peak, in dBFS."""
+        if not self.blocks:
+            return "level n/a"
+
+        def db(x: float) -> str:
+            return f"{20 * math.log10(x / 32768):.0f}" if x > 0 else "-inf"
+
+        b = sorted(self.blocks)
+        return (f"level speech={db(b[int(len(b) * 0.9)])} floor={db(b[len(b) // 10])} "
+                f"peak={db(self.peak)} dBFS")
 
 
 class MicWriter:
@@ -45,6 +98,7 @@ class MicWriter:
         self._bytes_written: int = 0
         self._first_write_ts: float | None = None
         self._drops: int = 0
+        self.levels = _Levels()
 
     @property
     def available(self) -> bool:
@@ -73,6 +127,11 @@ class MicWriter:
 
     def write(self, data: bytes) -> bool:
         """Best-effort write. Returns False if the pipe is unavailable."""
+        if data:
+            try:
+                self.levels.add(data)
+            except Exception:       # a stats bug must never cost audio
+                log.exception("mic level stats failed")
         if self._fd is None and not self._try_open():
             return False
         assert self._fd is not None
@@ -134,6 +193,7 @@ class MicWriter:
         self._bytes_written = 0
         self._first_write_ts = None
         self._drops = 0
+        self.levels.reset()
 
     @property
     def bytes_written(self) -> int:

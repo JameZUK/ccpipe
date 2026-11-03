@@ -9,6 +9,7 @@
 // teardown and setup (notably on iOS during orientation changes).
 
 import { FRAME_MIC_PCM, TerminalSocket } from "./ws";
+import { loadMicProcessing } from "./display-prefs";
 
 export interface MicStreamerConfig {
   /** Whether the client-side VAD trips an automatic stop on sustained
@@ -28,22 +29,19 @@ export const DEFAULT_MIC_CONFIG: MicStreamerConfig = {
   maxRecordingSeconds: 60,
 };
 
-// Firefox for Android puts the phone into call mode while the mic is open
-// with any voice processing on (echo cancellation, noise suppression or
-// auto gain): Gecko then treats the input as "voice", runs the audio graph
-// with CUBEB_DEVICE_PREF_VOICE and calls SetCommunicationAudioModeOn
-// (dom/media/GraphDriver.cpp, the AudioCallbackDriver constructor;
-// AudioInputProcessing::IsVoiceInput). So each recording switched Android
-// into call mode and each stop switched it back, and a start that raced
-// that switch could leave every AudioContext suspended ("MicBlocked: ctx
-// suspended after 5 s (fresh too)" — three of four within 4 s of the last
-// stop, 2026-11-03). Raw input keeps it a plain recording. Claude's
-// speech-to-text doesn't need call processing; the cost is no echo
-// cancellation, so speech playing from the phone while you dictate would
-// be picked up.
-const UA = typeof navigator === "undefined" ? "" : navigator.userAgent;
-const FIREFOX_ANDROID = /Android/i.test(UA) && /Firefox\//.test(UA);
-const VOICE_PROCESSING = !FIREFOX_ANDROID;
+// Voice processing (echo cancellation, noise suppression, auto gain) is on
+// unless switched off for this device in Settings → voice input. With any
+// of it on, Firefox for Android treats the mic as a phone call: Gecko runs
+// the audio graph with CUBEB_DEVICE_PREF_VOICE and calls
+// SetCommunicationAudioModeOn (dom/media/GraphDriver.cpp, the
+// AudioCallbackDriver constructor; AudioInputProcessing::IsVoiceInput), so
+// each recording switches Android into call mode and each stop switches it
+// back. A start racing that switch may be what leaves every AudioContext
+// suspended ("MicBlocked: ctx suspended after 5 s (fresh too)", three of
+// four within 4 s of the last stop, 2026-11-03). Turning it off avoids call
+// mode, but on that phone Claude then heard dictation badly (no auto gain),
+// so it stays a per-device choice. The mic_stop journal line shows each
+// recording's level for comparing the two.
 
 export class MicStreamer {
   private ctx: AudioContext | null = null;
@@ -210,13 +208,14 @@ export class MicStreamer {
   private async _start(): Promise<void> {
     if (this.state === "running" || this.state === "starting") return;
     this.state = "starting";
+    const processing = loadMicProcessing();
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          echoCancellation: VOICE_PROCESSING,
-          noiseSuppression: VOICE_PROCESSING,
-          autoGainControl: VOICE_PROCESSING,
+          echoCancellation: processing,
+          noiseSuppression: processing,
+          autoGainControl: processing,
         },
       });
       // The context prime() woke normally runs already. If not, keep asking
@@ -238,7 +237,7 @@ export class MicStreamer {
       const wasState = this.audio?.state ?? "none";
       const sincePrime = this.lastPrimeAt ? Math.round(performance.now() - this.lastPrimeAt) : -1;
       const sinceStop = this.lastStopAt ? `${Math.round(performance.now() - this.lastStopAt)}ms` : "never";
-      const tail = `last stop ${sinceStop} ago; proc ${VOICE_PROCESSING ? "on" : "off"}`;
+      const tail = `last stop ${sinceStop} ago; proc ${processing ? "on" : "off"}`;
       let ctx = this.audio && this.audio.state !== "closed" ? this.audio : this._newAudio();
       let took = await runs(ctx, 3000);
       let fresh = false;

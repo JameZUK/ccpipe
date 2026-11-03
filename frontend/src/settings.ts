@@ -23,7 +23,9 @@ import {
   DEFAULT_PREFS,
   DisplayPrefs,
   loadDisplayPrefs,
+  loadMicProcessing,
   saveDisplayPrefs,
+  saveMicProcessing,
 } from "./display-prefs";
 
 const ICONS = {
@@ -535,6 +537,12 @@ function buildVoiceInputSection(opts: SettingsOpts): HTMLElement {
         </span>
         <input type="range" name="max_recording_seconds" min="10" max="300" step="5" value="60" class="slider"/>
       </label>
+      <label class="row">
+        <span class="row__label">Voice processing on this device
+          <span class="row__hint">echo cancellation, noise suppression and auto gain. On Firefox for Android these put the phone into call mode for each recording, which may stop the mic starting; off, quiet speech may be missed. Applies from the next recording</span>
+        </span>
+        <input type="checkbox" name="mic_processing" class="checkbox"/>
+      </label>
     </div>
     <div class="modal__row-actions">
       <span class="modal__status" data-role="voice-input-status"></span>
@@ -551,6 +559,10 @@ function buildVoiceInputSection(opts: SettingsOpts): HTMLElement {
   const maxLabel = sec.querySelector<HTMLElement>("[data-role=max-value]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
   const status = sec.querySelector<HTMLElement>("[data-role=voice-input-status]")!;
+  // Per device (localStorage), so it applies at once rather than on Save.
+  const processing = sec.querySelector<HTMLInputElement>("input[name=mic_processing]")!;
+  processing.checked = loadMicProcessing();
+  processing.addEventListener("change", () => saveMicProcessing(processing.checked));
 
   const fmtSeconds = (ms: number) => `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)}s`;
   const updateLabels = () => {

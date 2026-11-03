@@ -185,6 +185,21 @@ export function takePickerNotice(): string | null {
   } catch { return null; }
 }
 
+// ─── Mic voice processing (per device) ─────────────────────────────────
+// Echo cancellation, noise suppression and auto gain on the mic. On unless
+// switched off on this device (Settings → voice input; see mic.ts for why
+// Firefox on Android might want it off).
+
+const MIC_PROCESSING_KEY = "ccpipe.mic.processing";
+
+export function loadMicProcessing(): boolean {
+  try { return localStorage.getItem(MIC_PROCESSING_KEY) !== "0"; } catch { return true; }
+}
+
+export function saveMicProcessing(on: boolean): void {
+  try { localStorage.setItem(MIC_PROCESSING_KEY, on ? "1" : "0"); } catch {}
+}
+
 // ─── TTS mute (per-tab affordance, but persisted) ──────────────────────
 
 const TTS_MUTE_KEY = "ccpipe.tts.muted";

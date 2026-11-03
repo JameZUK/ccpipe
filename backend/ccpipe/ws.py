@@ -1012,8 +1012,9 @@ class _TerminalConnection:
         pad_s = cfg.drain_pad_ms / 1000.0
         total = drain_s + pad_s
         _voice_quiet_until = time.monotonic() + total + _VOICE_QUIET_S
-        log.info("mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs",
-                 _mic_writer.bytes_written, _mic_writer.drops, drain_s, pad_s, total)
+        log.info("mic_stop: bytes=%d drops=%d drain=%.2fs pad=%.2fs total=%.2fs %s",
+                 _mic_writer.bytes_written, _mic_writer.drops, drain_s, pad_s, total,
+                 _mic_writer.levels.summary())
         _mic_writer.reset()
         _mic_owner = None
         # M3: cancel any prior pending release from this same handler before
