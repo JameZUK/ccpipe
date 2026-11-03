@@ -15,6 +15,8 @@ IDLE = ["❯ ", "  ⏵⏵ auto mode on (shift+tab to cycle)"]
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     monkeypatch.setattr(voice_ptt, "_footer_seen", False)
+    monkeypatch.setattr(voice_ptt, "_last_press", None)
+    monkeypatch.setattr(voice_ptt, "REPAINT_S", 0.5)
     monkeypatch.setattr(voice_ptt, "POLL_S", 0.001)
     monkeypatch.setattr(voice_ptt, "ARM_PROCESSING_WAIT_S", 0.05)
     monkeypatch.setattr(voice_ptt, "ARM_CONFIRM_S", 0.05)
@@ -100,3 +102,43 @@ def test_should_release_only_while_recording():
 def test_should_release_blind_until_the_footer_is_known():
     assert run(voice_ptt.should_release(Screen([IDLE]).capture)) is True
     assert run(voice_ptt.should_release(Screen([None]).capture)) is True
+
+
+def test_arm_right_after_a_stop_press_waits_for_the_repaint():
+    # Our stop press has gone in, but the screen still shows "REC": that's
+    # the old recording, not a new one. Wait for Claude to move on, then
+    # wait out the transcription and press.
+    voice_ptt.voice_state(REC)
+    voice_ptt.pressed("recording")
+    s = Screen([REC, REC, PROCESSING, PROCESSING, IDLE], after_press=[IDLE, REC])
+    assert run(voice_ptt.arm(s.capture, s.press)) == (True, "armed")
+    assert s.presses == 1
+
+
+def test_arm_right_after_a_start_press_sees_it_take_effect():
+    # An arm cancelled just after its press, then a new one: the stale idle
+    # screen mustn't cause a second press (which would stop the recording).
+    voice_ptt.voice_state(REC)
+    voice_ptt.pressed("idle")
+    s = Screen([IDLE, IDLE, REC])
+    assert run(voice_ptt.arm(s.capture, s.press)) == (True, "already recording")
+    assert s.presses == 0
+
+
+def test_arm_records_its_press():
+    s = Screen([IDLE], after_press=[REC])
+    run(voice_ptt.arm(s.capture, s.press))
+    assert voice_ptt._last_press is not None and voice_ptt._last_press[1] == "idle"
+
+
+def test_should_release_waits_for_the_repaint_of_a_start_press():
+    voice_ptt.voice_state(REC)
+    voice_ptt.pressed("idle")
+    assert run(voice_ptt.should_release(Screen([IDLE, REC]).capture)) is True
+
+
+def test_old_press_is_not_waited_on(monkeypatch):
+    voice_ptt.voice_state(REC)
+    monkeypatch.setattr(voice_ptt, "_last_press", (voice_ptt.time.monotonic() - 5, "recording"))
+    s = Screen([REC])
+    assert run(voice_ptt.arm(s.capture, s.press)) == (True, "already recording")

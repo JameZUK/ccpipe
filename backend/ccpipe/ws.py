@@ -310,6 +310,7 @@ async def _release_ptt_after(
         # \x1b k = ESC k = meta+k = the binding ccpipe installs into
         # ~/.claude/keybindings.json for the voice:pushToTalk action.
         pty_proc.write(b"\x1bk")
+        voice_ptt.pressed("recording")
     except asyncio.CancelledError:
         raise
     except Exception:
