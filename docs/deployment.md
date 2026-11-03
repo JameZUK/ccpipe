@@ -316,6 +316,15 @@ whose), so its lazily-loaded code is still there. (`frontend/src/update.ts`,
   app has been in the background). Audio refused that way waits: the
   speaker button pulses amber and the next tap or key press plays it.
   Audio left waiting for over three minutes is dropped.
+- **TTS silent on an iPad even after a tap**, every play "aborted": the
+  iPad plays one page at a time, and pages from earlier builds can live
+  on hidden after a reload — even after the app is quit — and take the
+  audio. Builds since 2026-11-03 disconnect and release audio before an
+  update reload, and the server speaks only to pages on the current
+  build; pages left over from before then go away with a restart of the
+  iPad. Settings → Voice → **Sound check** plays the sample four ways and
+  shows what happened to each; the page's playback trouble is also logged
+  (`journalctl --user -u ccpipe | grep "tts client"`).
 - **Lost the generated initial password**: the credentials file stores
   only the hash. If you didn't capture the password from
   `~/.local/state/ccpipe/initial_password.txt` before deleting it,

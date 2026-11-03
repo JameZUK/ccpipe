@@ -235,7 +235,7 @@ export class TtsPlayer {
       ctx.resume().catch(() => {});
     }
     if (this.unlocked && !this.blocked) return;
-    this.debug(`tap: unlocking (${this.blocked ? "audio waiting" : "first tap"})`);
+    if (this.blocked) this.debug("tap: playing what was waiting");
     const a = this.audio;
     if (!a || !a.paused || this.starting || this.priming || this.playPending) return;
     if (this.blocked) {
@@ -255,7 +255,6 @@ export class TtsPlayer {
       // Aborted (the iPad, before the clip loaded) still counts: the tap's
       // permission sticks to the element. Refused doesn't.
       if ((err as DOMException)?.name === "AbortError") this.unlocked = true;
-      this.debug(`tap: silence ${(err as DOMException)?.name ?? "failed"}`);
     }).finally(() => {
       this.priming = false;
       this.pumpQueue();
@@ -321,9 +320,13 @@ export class TtsPlayer {
     if (!this.playbackActive) return;
     this.playbackActive = false;
     if (this.peakTimer !== null) { clearInterval(this.peakTimer); this.peakTimer = null; }
-    const secs = ((performance.now() - this.playStartedAt) / 1000).toFixed(1);
-    this.debug(`played ${secs} s to t=${this.audio?.currentTime.toFixed(1) ?? "?"}, `
-      + `peak ${this.peak < 0 ? "n/a (no graph)" : this.peak}, context ${this.audioCtx?.state ?? "none"}`);
+    // Only trouble is reported: a clip cut off at once, or one the
+    // analyser heard as silence.
+    const secs = (performance.now() - this.playStartedAt) / 1000;
+    if (secs < 0.5 || (this.peak === 0 && secs > 0.5)) {
+      this.debug(`played ${secs.toFixed(1)} s to t=${this.audio?.currentTime.toFixed(1) ?? "?"}, `
+        + `peak ${this.peak < 0 ? "n/a (no graph)" : this.peak}, context ${this.audioCtx?.state ?? "none"}`);
+    }
     if (this.playingUrl) {
       URL.revokeObjectURL(this.playingUrl);
       this.playingUrl = null;
@@ -395,7 +398,6 @@ export class TtsPlayer {
     // Acquire BEFORE play() so the screen doesn't dim during a long
     // sentence; release on every failure / end path below.
     void this._acquireWakeLock();
-    this.debug(`play: ${item.blob.size} B, context ${this.audioCtx?.state ?? "none"}, unlocked ${this.unlocked}`);
     this.playPending = true;
     const seq = ++this.playSeq;
     const fail = (err: unknown) => {
