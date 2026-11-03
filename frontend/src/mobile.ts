@@ -29,6 +29,60 @@ export function deviceClass(): "phone" | "tablet" | "desktop" {
   return Math.min(screen.width, screen.height) < 600 ? "phone" : "tablet";
 }
 
+/** Running as an installed (home-screen) app rather than in a browser tab. */
+export function isStandalone(): boolean {
+  return window.matchMedia("(display-mode: standalone)").matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+}
+
+/** An iPad. iPadOS Safari reports itself as a Mac, so a "Mac" with a touch
+ * screen is one too. */
+export function isIPad(): boolean {
+  const ua = navigator.userAgent;
+  return /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+}
+
+/** An installed app on an iPad: iPadOS 26 draws its window buttons (the
+ * three dots) over the app's top-left corner, where taps go to the OS. In a
+ * Safari tab they sit over Safari's own toolbar instead. */
+export function hasWindowButtons(): boolean {
+  return isIPad() && isStandalone();
+}
+
+export interface Insets { top: number; right: number; bottom: number; left: number }
+
+/** Measure four CSS env() values with a hidden fixed-position probe. */
+function probeEnv(props: [string, string, string, string], fallback: string): Insets {
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:fixed;top:0;left:0;visibility:hidden;pointer-events:none";
+  const [t, r, b, l] = props;
+  probe.style.setProperty("margin-top", `env(${t}, ${fallback})`);
+  probe.style.setProperty("margin-right", `env(${r}, ${fallback})`);
+  probe.style.setProperty("margin-bottom", `env(${b}, ${fallback})`);
+  probe.style.setProperty("margin-left", `env(${l}, ${fallback})`);
+  document.body.append(probe);
+  const cs = getComputedStyle(probe);
+  const px = (v: string): number => Math.round(parseFloat(v) || 0);
+  const out = { top: px(cs.marginTop), right: px(cs.marginRight), bottom: px(cs.marginBottom), left: px(cs.marginLeft) };
+  probe.remove();
+  return out;
+}
+
+/** The safe-area insets this browser reports (CSS px). */
+export function safeAreaInsets(): Insets {
+  return probeEnv(
+    ["safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left"], "0px");
+}
+
+/** The window-controls-overlay title-bar area (x, y, width, height), or null
+ * where the browser doesn't report one (it's a Chromium desktop feature). */
+export function titlebarArea(): { x: number; y: number; width: number; height: number } | null {
+  const a = probeEnv(
+    ["titlebar-area-y", "titlebar-area-width", "titlebar-area-height", "titlebar-area-x"], "-1px");
+  if (a.top < 0 && a.right < 0 && a.bottom < 0 && a.left < 0) return null;
+  return { x: a.left, y: a.top, width: a.right, height: a.bottom };
+}
+
 export type MicEventKind = "tap" | "hold-start" | "hold-end";
 
 export interface MobileMicAdapter {

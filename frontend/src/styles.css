@@ -2006,6 +2006,15 @@ a:hover { color: var(--fg); }
   padding: var(--s-1) var(--s-3);
   white-space: nowrap;
 }
+/* Screen readout under the version (settings.ts buildScreenReadout). */
+.modal__footer-screen {
+  flex-basis: 100%;
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 
 /* Two-factor (TOTP) section status pill */
 .totp-status {
@@ -4224,6 +4233,22 @@ body.mobile .statusbar__brand .spark--brand {
   filter: drop-shadow(0 0 6px rgba(245, 165, 36, 0.25));
 }
 body.mobile .statusbar__brand .spark--brand * { animation: none; }
+
+/* iPad home-screen app (html.window-buttons, mobile.ts): iPadOS 26 draws its
+   window buttons over the top-left corner (about 20–62 px across, measured
+   from a screenshot) and takes the taps there, so the top bar starts clear
+   of them. An iPad's bar has room for the wordmark again, which is a bigger
+   target than the spark; a narrow window keeps the spark. */
+html.window-buttons { --window-buttons-gap: 84px; }
+html.window-buttons .statusbar {
+  padding-left: max(var(--window-buttons-gap), calc(env(safe-area-inset-left, 0px) + var(--s-4)));
+}
+/* The whole bar's height is the target, not just the line of text. */
+html.window-buttons .statusbar__brand { align-self: stretch; padding-right: var(--s-2); }
+@media (min-width: 769px) {
+  html.window-buttons body.mobile .statusbar__brand .wordmark { display: inline; }
+  html.window-buttons body.mobile .statusbar__brand .spark--brand { display: none; }
+}
 
 /* Settings → Display is a group of sections; the group's last one still
    needs its divider above the next section in the panel. */

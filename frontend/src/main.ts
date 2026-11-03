@@ -9,7 +9,7 @@ import {
   setPickerNotice,
 } from "./display-prefs";
 import { DOC_SVG, FOLDER_SVG, GEAR_SVG, MIC_SVG, TTS_MUTED_SVG, TTS_SVG } from "./icons";
-import { isMobileLayout, mountMobileUI, type MobileUI } from "./mobile";
+import { hasWindowButtons, isMobileLayout, mountMobileUI, type MobileUI } from "./mobile";
 import { capturePendingShare } from "./share";
 import { sparkMark } from "./brand";
 import { installTooltips } from "./tooltip";
@@ -84,6 +84,10 @@ window.addEventListener("focus", applyOsChromeCompensation);
 window.addEventListener("pageshow", applyOsChromeCompensation);
 document.addEventListener("visibilitychange", applyOsChromeCompensation);
 applyOsChromeCompensation();
+
+// iPad home-screen app: keep the top-left corner clear of iPadOS's window
+// buttons (mobile.ts; styles.css "window-buttons").
+document.documentElement.classList.toggle("window-buttons", hasWindowButtons());
 
 // PWA share_target text is captured at app start (before anything mounts
 // and could read it); the helpers live in share.ts — see there.

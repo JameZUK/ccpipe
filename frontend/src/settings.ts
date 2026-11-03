@@ -18,7 +18,7 @@ import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
 import { onUpdateChange, pendingUpdate } from "./update";
 import { buildSessionsSection, buildStatsSection } from "./settings-sessions";
-import { deviceClass, isMobileLayout } from "./mobile";
+import { deviceClass, isIPad, isMobileLayout, isStandalone, safeAreaInsets, titlebarArea } from "./mobile";
 import {
   DEFAULT_PREFS,
   DisplayPrefs,
@@ -1361,6 +1361,39 @@ function buildAboutFooter(): HTMLElement {
   const unsub = onUpdateChange((b) => { if (f.isConnected) showPending(b); else unsub(); });
 
   right.append(meta, reload);
-  f.append(mark, right);
+  f.append(mark, right, buildScreenReadout());
   return f;
+}
+
+// What this screen reports, for checking the layout on a new device: the
+// safe-area insets (notches, home bar), the title-bar area if any, how the
+// page is running, and whether the top bar is keeping clear of iPadOS's
+// window buttons. Re-measured on resize / rotation while it's on screen.
+function buildScreenReadout(): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "modal__footer-screen";
+  const insets = document.createElement("div");
+  const env = document.createElement("div");
+  el.append(insets, env);
+  const paint = (): void => {
+    const s = safeAreaInsets();
+    insets.textContent = `safe area · top ${s.top} · right ${s.right} · bottom ${s.bottom} · left ${s.left} px`;
+    const t = titlebarArea();
+    const parts = [
+      isStandalone() ? "installed app" : "browser tab",
+      isIPad() ? "iPad" : deviceClass(),
+      `window ${window.innerWidth}×${window.innerHeight}`,
+      `screen ${screen.width}×${screen.height} @${window.devicePixelRatio}x`,
+      t ? `title bar ${t.x},${t.y} ${t.width}×${t.height}` : "no title-bar area",
+      `corner gap ${document.documentElement.classList.contains("window-buttons") ? "on" : "off"}`,
+    ];
+    env.textContent = parts.join(" · ");
+  };
+  paint();
+  const onResize = (): void => {
+    if (el.isConnected) paint();
+    else window.removeEventListener("resize", onResize);
+  };
+  window.addEventListener("resize", onResize);
+  return el;
 }
