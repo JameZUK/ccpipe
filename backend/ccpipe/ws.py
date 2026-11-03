@@ -891,6 +891,14 @@ class _TerminalConnection:
         if _is_control_frame(text, '"type":"mic_stop"', '"type": "mic_stop"'):
             self._on_mic_stop()
             return True
+        if _is_control_frame(text, '"type":"mic_error"', '"type": "mic_error"'):
+            # The browser couldn't start its mic: log why (cleaned, bounded).
+            with contextlib.suppress(Exception):
+                msg = _safe_json_loads(text)
+                clean = lambda v, n: re.sub(r"[\x00-\x1f]", " ", str(v))[:n]  # noqa: E731
+                log.info("mic_error from client: %s: %s (session=%s)",
+                         clean(msg.get("name", "?"), 40), clean(msg.get("message", ""), 200), self.session)
+            return True
         if _is_control_frame(text, '"type":"mic_start"', '"type": "mic_start"'):
             if not await self._still_authed("mic"):
                 return False
@@ -1621,7 +1629,7 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
             # one. See _last_client_size / _FALLBACK_COLS.
             if session is not None:
                 _remember_client_size(session, cols, rows)
-        case "ping" | "tts_mute" | "mic_stop" | "mic_start":
+        case "ping" | "tts_mute" | "mic_stop" | "mic_start" | "mic_error":
             # These are intercepted by the main WS receive loop where
             # the closures over send_json / tts_sub / _mic_writer live.
             # We still hit this code path when one of them lands in

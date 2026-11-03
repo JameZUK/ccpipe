@@ -873,6 +873,13 @@ async function attachTerminal(session: string): Promise<void> {
         socket.send({ type: "mic_stop" });
         void wakeLock.release();
         const name = (err as { name?: string })?.name;
+        // Into the server's journal, so a failure on a device can be
+        // diagnosed from its exact cause.
+        socket.send({
+          type: "mic_error",
+          name: String(name ?? "Error").slice(0, 40),
+          message: String((err as { message?: string })?.message ?? err).slice(0, 150),
+        });
         terminalApi?.flash(
           name === "NotAllowedError" ? "Microphone access was refused"
             : name === "NotFoundError" ? "No microphone found"

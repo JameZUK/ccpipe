@@ -178,21 +178,33 @@ export class MicStreamer {
           autoGainControl: true,
         },
       });
-      this.ctx = this._takePrimed() ?? new AudioContext();
-      await this.ctx.audioWorklet.addModule("/mic-worklet.js");
-      if (this.ctx.state !== "running") {
-        // Not started from a gesture, or the browser said no: one more try,
-        // then give up visibly rather than hold the mic open with no audio.
+      // The primed context (mic buttons, prime()) normally runs already.
+      // If it doesn't, one more resume(); failing that a fresh context: on a
+      // phone the press creates the context, but a touch only counts as user
+      // activity once the finger lifts, so on a freshly loaded page the
+      // press's context can stay suspended while one made now can run.
+      const runs = async (ctx: AudioContext): Promise<boolean> => {
+        if (ctx.state === "running") return true;
         await Promise.race([
-          this.ctx.resume().catch(() => {}),
-          new Promise((r) => setTimeout(r, 1000)),
+          ctx.resume().catch(() => {}),
+          new Promise((r) => setTimeout(r, 600)),
         ]);
-        if ((this.ctx.state as AudioContextState) !== "running") {
-          const err = new Error(`audio context ${this.ctx.state}`);
+        return (ctx.state as AudioContextState) === "running";
+      };
+      let ctx = this._takePrimed() ?? new AudioContext();
+      if (!(await runs(ctx))) {
+        void ctx.close().catch(() => {});
+        ctx = new AudioContext();
+        if (!(await runs(ctx))) {
+          const state = ctx.state;
+          void ctx.close().catch(() => {});
+          const err = new Error(`audio context ${state} (a fresh one too)`);
           err.name = "MicBlocked";
           throw err;
         }
       }
+      this.ctx = ctx;
+      await this.ctx.audioWorklet.addModule("/mic-worklet.js");
       this.source = this.ctx.createMediaStreamSource(this.stream);
 
       // Tap-off for visualisation. fftSize 512 gives a smooth scope at

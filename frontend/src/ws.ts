@@ -73,6 +73,8 @@ export type ClientMessage =
   // after that delay — the client no longer schedules it.
   | { type: "mic_stop" }
   | { type: "mic_start" }
+  // The browser couldn't start the mic; logged by the server for diagnosis.
+  | { type: "mic_error"; name: string; message: string }
   // The composer's contents changed on this device. The server stores it
   // as the session's draft and relays it to the session's other devices.
   | { type: "draft"; text: string };
