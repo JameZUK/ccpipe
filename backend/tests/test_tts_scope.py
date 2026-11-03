@@ -161,3 +161,23 @@ def test_pipeline_strips_code_full_mode_preserves_remainder():
     out = prepare_for_tts(text, "full")
     assert "-old" not in out and "+new" not in out
     assert "Here is the change" in out and "done." in out
+
+
+# ─── First paragraph / first sentence ─────────────────────────────────────
+
+def test_scope_first_paragraph():
+    assert _apply_scope("Opening line. More here.\n\nSecond para.", "first_paragraph") == \
+        "Opening line. More here."
+
+
+def test_scope_first_sentence():
+    assert _apply_scope("Opening line. More here.\n\nSecond para.", "first_sentence") == "Opening line."
+
+
+def test_scope_first_sentence_stays_in_the_first_paragraph():
+    assert _apply_scope("Done\n\nThe fix is in. It works.", "first_sentence") == "Done"
+
+
+def test_scope_first_on_a_single_sentence():
+    assert _apply_scope("Just one.", "first_paragraph") == "Just one."
+    assert _apply_scope("Just one.", "first_sentence") == "Just one."

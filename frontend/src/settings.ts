@@ -81,20 +81,24 @@ function saveLastTab(t: TabId): void {
   try { localStorage.setItem(LS_LAST_TAB, t); } catch {}
 }
 
-type TtsScope = "full" | "last_paragraph" | "last_sentence" | "last_question" | "off";
+type TtsScope = "full" | "first_paragraph" | "first_sentence" | "last_paragraph"
+  | "last_sentence" | "last_question" | "off";
 type TtsServerConfig = {
   voice: string;
   speech_rate: number;
   enabled: boolean;
   scope: TtsScope;
+  progress?: boolean;
 };
 
 const SCOPE_OPTIONS: Array<{ value: TtsScope; label: string }> = [
-  { value: "full",           label: "Full response" },
-  { value: "last_paragraph", label: "Last paragraph" },
-  { value: "last_sentence",  label: "Last sentence" },
-  { value: "last_question",  label: "Last question (or paragraph)" },
-  { value: "off",            label: "Off (don't speak)" },
+  { value: "full",            label: "Full response" },
+  { value: "first_paragraph", label: "First paragraph" },
+  { value: "first_sentence",  label: "First sentence" },
+  { value: "last_paragraph",  label: "Last paragraph" },
+  { value: "last_sentence",   label: "Last sentence" },
+  { value: "last_question",   label: "Last question (or paragraph)" },
+  { value: "off",             label: "Off (don't speak)" },
 ];
 
 export interface SettingsOpts {
@@ -337,6 +341,12 @@ function buildVoiceSection(): HTMLElement {
         </select>
       </label>
       <label class="row">
+        <span class="row__label">Read progress notes too
+          <span class="row__hint">what Claude says between tool calls, not only the reply that ends its turn</span>
+        </span>
+        <input type="checkbox" name="progress" class="checkbox"/>
+      </label>
+      <label class="row">
         <span class="row__label">Notify when backgrounded
           <span class="row__hint">browser notification on response, requires permission</span>
         </span>
@@ -353,6 +363,7 @@ function buildVoiceSection(): HTMLElement {
   const rate = sec.querySelector<HTMLInputElement>("input[name=speech_rate]")!;
   const rateValue = sec.querySelector<HTMLElement>("[data-role=rate-value]")!;
   const scopeSelect = sec.querySelector<HTMLSelectElement>("select[name=scope]")!;
+  const progressCheckbox = sec.querySelector<HTMLInputElement>("input[name=progress]")!;
   const notifyCheckbox = sec.querySelector<HTMLInputElement>("input[name=notify]")!;
   const testBtn = sec.querySelector<HTMLButtonElement>("[data-role=test]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
@@ -426,6 +437,7 @@ function buildVoiceSection(): HTMLElement {
       // Default to last_paragraph if the server returned an unknown value.
       const knownScope = SCOPE_OPTIONS.some(o => o.value === cfg.scope);
       scopeSelect.value = knownScope ? cfg.scope : "last_paragraph";
+      progressCheckbox.checked = cfg.progress === true;
       // Only now is the form populated with the server's real config —
       // enable Save. Until this point Save stays disabled so a failed
       // load can't be "saved", overwriting the server's voice/rate/scope
@@ -489,6 +501,7 @@ function buildVoiceSection(): HTMLElement {
           voice: select.value || null,
           speech_rate: parseFloat(rate.value),
           scope: scopeSelect.value as TtsScope,
+          progress: progressCheckbox.checked,
         }),
       });
       if (!res.ok) throw new Error(`status ${res.status}`);

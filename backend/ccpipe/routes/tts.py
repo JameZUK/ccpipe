@@ -53,6 +53,7 @@ class TtsConfigBody(BaseModel):
     speech_rate: float | None = Field(default=None, ge=0.5, le=2.0)
     enabled: bool | None = None
     scope: str | None = None  # one of ccpipe.config.VALID_SCOPES
+    progress: bool | None = None
 
 
 class SpeakBody(BaseModel):
@@ -114,6 +115,8 @@ async def tts_config_set(body: TtsConfigBody) -> dict[str, object]:
                 status_code=400,
                 detail=f"invalid scope; one of {list(app_config.VALID_SCOPES)}",
             )
+    if body.progress is not None:
+        cfg.tts.progress = bool(body.progress)
     app_config.save(cfg)
     return dict(cfg.to_dict()["tts"])
 

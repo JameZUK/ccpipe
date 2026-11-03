@@ -643,9 +643,13 @@ async function attachTerminal(session: string): Promise<void> {
   tts.onMutedChange = (muted) => {
     socket.send({ type: "tts_mute", value: muted });
   };
-  // Caches the most recent assistant text so the "replay" pill can ask
-  // the backend to re-synthesize it. Updated on each tts_start.
+  // Caches the most recent spoken reply (all of it, not just the sentence
+  // playing) so the "replay" pill can ask the backend to re-synthesize it.
+  // Updated on each tts_start. The id lets the background notification
+  // fire once per reply rather than once per sentence.
   let lastSpokenText = "";
+  let lastSpokenId: number | undefined;
+  let notifiedId: number | undefined;
 
   // ─── Mic-availability pub-sub ────────────────────────────────────────
   // micAvailable is `true` once the server's hello says voice is wired up
@@ -1055,7 +1059,8 @@ async function attachTerminal(session: string): Promise<void> {
     },
     onTtsStart(msg) {
       tts.onStart();
-      lastSpokenText = msg.text || "";
+      lastSpokenText = msg.utterance || msg.text || "";
+      lastSpokenId = msg.id;
       updateReplayBtn();
       // Claude is now speaking back, which means /voice has already
       // finished and transcribed. If the UI still thinks it's recording
@@ -1066,10 +1071,19 @@ async function attachTerminal(session: string): Promise<void> {
       }
     },
     onTtsAudio(chunk) { tts.onChunk(chunk); },
+    onClaudeAsk(msg) {
+      // Its spoken copy (if any) mustn't notify again when it ends.
+      if (msg.id != null) notifiedId = msg.id;
+      notifications.fireResponseReady(msg.text, session, msg.title);
+    },
     onTtsEnd() {
       tts.onEnd();
-      // Notify if the tab is backgrounded (user opted in via settings).
-      notifications.fireResponseReady(lastSpokenText, session);
+      // Notify if the tab is backgrounded (user opted in via settings),
+      // once per reply. An older server sends no id: notify every time.
+      if (lastSpokenId === undefined || lastSpokenId !== notifiedId) {
+        notifiedId = lastSpokenId;
+        notifications.fireResponseReady(lastSpokenText, session);
+      }
     },
     onOutput(data) {
       if (bottomOnNextOutput) {

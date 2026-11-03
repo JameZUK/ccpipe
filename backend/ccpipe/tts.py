@@ -48,7 +48,10 @@ _SUB_CB_TIMEOUT_S = 5.0
 log = logging.getLogger(__name__)
 
 ChunkCallback = Callable[[bytes], Awaitable[None]]
-TurnCallback = Callable[[str], Awaitable[None]]   # text of the utterance just started
+# (sentence just started, the whole utterance it belongs to, utterance id).
+# A reply is spoken a sentence at a time; the id and the whole text let the
+# page replay all of it and notify once rather than per sentence.
+TurnCallback = Callable[[str, str, int], Awaitable[None]]
 EndCallback = Callable[[], Awaitable[None]]
 ContentFilter = Callable[[dict[str, Any]], bool]
 
@@ -97,8 +100,12 @@ def _strip_code_blocks(text: str) -> str:
     return _CODE_BLOCK_RE.sub("", text)
 
 
+def _paragraphs(text: str) -> list[str]:
+    return [p.strip() for p in _PARAGRAPH_SPLIT_RE.split(text) if p.strip()]
+
+
 def _last_paragraph(text: str) -> str:
-    paras = [p.strip() for p in _PARAGRAPH_SPLIT_RE.split(text) if p.strip()]
+    paras = _paragraphs(text)
     return paras[-1] if paras else ""
 
 
@@ -117,17 +124,28 @@ def _apply_scope(text: str, scope: str) -> str:
     """Narrow the assistant turn to just the portion the user wants spoken.
 
     scope values (see ccpipe.config.VALID_SCOPES):
-      - full           : whole response
-      - last_paragraph : final block of non-empty lines
-      - last_sentence  : final sentence
-      - last_question  : final sentence if it ends in '?', else last paragraph
-      - off            : speak nothing
+      - full            : whole response
+      - first_paragraph : opening block of non-empty lines
+      - first_sentence  : opening sentence
+      - last_paragraph  : final block of non-empty lines
+      - last_sentence   : final sentence
+      - last_question   : final sentence if it ends in '?', else last paragraph
+      - off             : speak nothing
     """
     text = text.strip()
     if not text or scope == "off":
         return ""
     if scope == "full":
         return text
+    if scope == "first_paragraph":
+        paras = _paragraphs(text)
+        return paras[0] if paras else text
+    if scope == "first_sentence":
+        # Of the first paragraph, so an opening line with no full stop
+        # ("Done") doesn't run on into the next paragraph.
+        paras = _paragraphs(text)
+        sentences = split_sentences(paras[0]) if paras else []
+        return sentences[0] if sentences else text
     if scope == "last_paragraph":
         return _last_paragraph(text) or text
     if scope == "last_sentence":
@@ -140,38 +158,112 @@ def _apply_scope(text: str, scope: str) -> str:
     return text  # unknown scope → speak everything
 
 
+# ─── Markdown → something a voice can say ─────────────────────────────────
+# Kokoro reads markdown literally: "**bold**" comes out as "asterisk bold
+# asterisk", "## Summary" as "hash summary", "a/b/tts.py" as "a slash b
+# slash tts dot py" and "→" as "right arrow" (checked against its
+# /dev/phonemize, 2026-11-03). A quarter of replies had bold in the spoken
+# part. These turn the markup into what a person reading it out would say.
+
+_TABLE_ROW_RE = re.compile(r"(?m)^[ \t]*\|.*\|[ \t]*$")
+_HEADING_RE = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.*?)[ \t#]*$")
+_BULLET_RE = re.compile(r"(?m)^[ \t]*[-*+][ \t]+(?=\S)(.*)$")
+_NUMBERED_RE = re.compile(r"(?m)^[ \t]*(\d{1,3}[.)][ \t]+(?=\S).*)$")
+_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\([^)\s]*(?:[ \t]+\"[^\"\n]*\")?\)")
+_URL_RE = re.compile(r"\b(?:https?|ftp)://(?:www\.)?([\w.-]+)[^\s)>\]]*")
+_CODE_SPAN_RE = re.compile(r"(`+)(?=\S)(.+?)(?<=\S)\1")
+_STRONG_RE = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
+_STRIKE_RE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
+_EM_RE = re.compile(r"(?<![\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])")
+# Anything path-shaped. _path_repl decides whether it really is a path.
+_PATH_RE = re.compile(r"(?<![\w/])(?:~|\.{1,2})?/?[\w.@+-]+(?:/[\w.@+-]*)+(?::\d+){0,2}")
+_ARROW_RE = re.compile(r"[ \t]*(?:→|⇒|⟶|->|=>)[ \t]*")
+_ABOUT_RE = re.compile(r"(?<![\w~])~(?=\d)")
+_ENDS_SENTENCE_RE = re.compile(r"[.!?:;,…]$")
+
+
+def _path_repl(m: re.Match[str]) -> str:
+    """A path is read as its last part: "backend/ccpipe/tts.py:156" →
+    "tts.py". Only for things that are clearly paths (rooted, or ending in
+    a file name), so "and/or", "3/4" and "TCP/IP" are left alone."""
+    tok = m.group(0)
+    core = re.sub(r"(?::\d+){1,2}$", "", tok)
+    parts = [p for p in core.split("/") if p]
+    if not parts:
+        return tok
+    rooted = core.startswith(("/", "~/", "./", "../"))
+    file_name = re.search(r"\w\.[A-Za-z]\w{0,7}$", parts[-1]) is not None
+    return parts[-1] if rooted or file_name else tok
+
+
+def _end_line(text: str) -> str:
+    """Give a heading or list item a full stop, so the voice pauses at the
+    end of it rather than running it into the next one."""
+    text = text.rstrip()
+    return text if not text or _ENDS_SENTENCE_RE.search(text) else text + "."
+
+
+def speakable(text: str) -> str:
+    """Public for tests. Markdown → plain spoken text. Blank lines are
+    kept, since the scopes split paragraphs on them."""
+    text = _TABLE_ROW_RE.sub("", text)
+    text = _HEADING_RE.sub(lambda m: _end_line(m.group(1)), text)
+    text = _BULLET_RE.sub(lambda m: _end_line(m.group(1)), text)
+    text = _NUMBERED_RE.sub(lambda m: _end_line(m.group(1)), text)
+    text = _LINK_RE.sub(r"\1", text)
+    text = _URL_RE.sub(r"\1", text)
+    text = _CODE_SPAN_RE.sub(r"\2", text)
+    text = _STRONG_RE.sub(r"\2", text)
+    text = _STRIKE_RE.sub(r"\1", text)
+    text = _EM_RE.sub(r"\1", text)
+    text = _PATH_RE.sub(_path_repl, text)
+    text = _ARROW_RE.sub(" to ", text)
+    text = _ABOUT_RE.sub("about ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return re.sub(r"[ \t]+([,.;:!?])", r"\1", text)
+
+
 def prepare_for_tts(text: str, scope: str) -> str:
-    """Public for tests. Strips code blocks then applies scope filtering."""
-    return _apply_scope(_strip_code_blocks(text), scope).strip()
+    """Public for tests. Strips code blocks and markdown, then applies the
+    scope."""
+    return _apply_scope(speakable(_strip_code_blocks(text)), scope).strip()
 
 
-def _extract_assistant_text(line_obj: dict[str, Any]) -> str | None:
-    """Pull human-speakable text out of one Claude Code transcript line.
+def _extract_assistant_text(line_obj: dict[str, Any], *,
+                            progress: bool = False) -> str | None:
+    """Claude's reply text in one Claude Code transcript record, or None.
 
-    The transcript schema has shifted a few times; we handle the common
-    shapes: top-level ``role``, nested ``message.role``, ``type``-tagged
-    records. Returns None for non-assistant lines or messages with no
-    speakable text (e.g. pure tool-use turns).
+    Only Claude's own reply records count: ``type`` "assistant", not a
+    subagent's (``isSidechain``), not one Claude Code makes up itself
+    ("No response requested."), though its API-error and limit notices are
+    kept. Other records carry text too, and used to be read out: a
+    ``queue-operation`` holds a prompt you typed while Claude was busy
+    (twice: enqueue and remove), and an ``api-request-blob`` repeats old
+    turns (an audit of two weeks of transcripts, 2026-11-03).
+
+    ``progress`` False: only the reply that ends Claude's turn, not the
+    notes it writes between tool calls ("Now I'll check the tests."), which
+    outnumber the replies four to one.
     """
-    if line_obj.get("type") not in (None, "assistant") and line_obj.get("role") != "assistant":
-        if line_obj.get("type") in ("user", "system", "tool_result", "tool_use", "summary"):
-            return None
-    msg = line_obj.get("message") if isinstance(line_obj.get("message"), dict) else line_obj
-    if msg.get("role") and msg.get("role") != "assistant":
+    if line_obj.get("type") != "assistant" or line_obj.get("isSidechain"):
+        return None
+    msg = line_obj.get("message")
+    if not isinstance(msg, dict) or msg.get("role") not in (None, "assistant"):
+        return None
+    if msg.get("model") == "<synthetic>" and not line_obj.get("isApiErrorMessage"):
         return None
     content = msg.get("content")
     if isinstance(content, str):
-        return content.strip() or None
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "text" and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-        joined = "".join(parts).strip()
-        return joined or None
-    return None
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return None
+    blocks = [b for b in content if isinstance(b, dict)]
+    if not progress and (msg.get("stop_reason") == "tool_use"
+                         or any(b.get("type") == "tool_use" for b in blocks)):
+        return None
+    joined = "".join(b["text"] for b in blocks
+                     if b.get("type") == "text" and isinstance(b.get("text"), str))
+    return joined.strip() or None
 
 
 class _Handler(FileSystemEventHandler):
@@ -254,6 +346,8 @@ class TtsService:
     # observer.join(timeout=…) is best-effort and can return with the
     # thread still alive on a slow filesystem, so we need this guard.
     _stopped: bool = False
+    # Numbers each utterance, for TurnCallback.
+    _utterance_seq: int = 0
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -545,8 +639,9 @@ class TtsService:
         if partial_len > 0:
             self._positions[path] = stat.st_size - partial_len
 
-        # Scope is constant for a batch of lines — load it once.
-        scope = app_config.load().tts.scope
+        # The settings are constant for a batch of lines — load them once.
+        cfg = app_config.load().tts
+        scope = cfg.scope
 
         for raw_line in complete.splitlines():
             if not raw_line.strip():
@@ -555,7 +650,9 @@ class TtsService:
                 obj = json.loads(raw_line)
             except json.JSONDecodeError:
                 continue
-            text = _extract_assistant_text(obj)
+            if not isinstance(obj, dict):
+                continue
+            text = _extract_assistant_text(obj, progress=cfg.progress)
             if text:
                 spoken = prepare_for_tts(text, scope)
                 log.info("tts: assistant turn detected "
@@ -613,19 +710,40 @@ class TtsService:
         # way; this just saves bandwidth on mobile uplinks.
         targets = [s for s in targets if not s.muted]
 
+        self._utterance_seq += 1
+        await self._deliver(text, targets, self._utterance_seq)
+
+    def speak_to(self, text: str, sub: "_Subscription") -> int | None:
+        """Speak ``text`` to one subscriber only — a question Claude is
+        asking, seen by that terminal's own watcher (claude_asks), so every
+        terminal on the session would otherwise speak it to all of them.
+        Returns the utterance id, or None when nothing will be spoken."""
+        text = speakable(text).strip()
+        if (not text or not self._enabled or self._http is None or sub.muted
+                or sub not in self._subscribers):
+            return None
+        if len(self._speak_tasks) >= 50:
+            return None
+        self._utterance_seq += 1
+        uid = self._utterance_seq
+        task = asyncio.create_task(self._deliver(text, [sub], uid), name=f"tts-ask-{uid}")
+        self._speak_tasks.add(task)
+        task.add_done_callback(self._speak_tasks.discard)
+        return uid
+
+    async def _deliver(self, text: str, targets: list["_Subscription"], uid: int) -> None:
         sentences = split_sentences(text)
         if not sentences:
             return
-
         if len(sentences) == 1:
             log.info("tts: speaking utterance (single sentence, %d targets) → kokoro",
                      len(targets))
-            await self._speak_one(sentences[0], targets)
+            await self._speak_one(sentences[0], targets, text, uid)
             return
 
         log.info("tts: speaking utterance (%d sentences, %d targets, pipelined) → kokoro",
                  len(sentences), len(targets))
-        await self._speak_pipelined(sentences, targets)
+        await self._speak_pipelined(sentences, targets, text, uid)
 
     @staticmethod
     async def _safe_sub_call(coro: Awaitable[None], what: str) -> None:
@@ -646,13 +764,15 @@ class TtsService:
         except Exception:
             log.exception("%s failed", what)
 
-    async def _speak_one(self, text: str, targets: list[_Subscription]) -> None:
+    async def _speak_one(self, text: str, targets: list[_Subscription],
+                         utterance: str = "", uid: int = 0) -> None:
         """Single Kokoro round-trip — used when there's only one sentence."""
         async for evt in self._kokoro_stream(text):
             kind, payload = evt
             if kind == "start":
                 for sub in targets:
-                    await self._safe_sub_call(sub.on_start(text), "on_start")
+                    await self._safe_sub_call(
+                        sub.on_start(text, utterance or text, uid), "on_start")
             elif kind == "chunk":
                 for sub in targets:
                     await self._safe_sub_call(sub.on_chunk(payload), "on_chunk")
@@ -661,7 +781,8 @@ class TtsService:
                     await self._safe_sub_call(sub.on_end(), "on_end")
 
     async def _speak_pipelined(self, sentences: list[str],
-                                targets: list[_Subscription]) -> None:
+                                targets: list[_Subscription],
+                                utterance: str = "", uid: int = 0) -> None:
         """Sentence-chunked TTS with depth-2 pipelining.
 
         Each sentence becomes its own Kokoro request and its own
@@ -745,7 +866,9 @@ class TtsService:
                         # here is purely defensive against a duplicate event.
                         if not sent_start:
                             for sub in targets:
-                                await self._safe_sub_call(sub.on_start(sentence), "on_start")
+                                await self._safe_sub_call(
+                                    sub.on_start(sentence, utterance or " ".join(sentences), uid),
+                                    "on_start")
                             sent_start = True
                     elif kind == "chunk":
                         for sub in targets:

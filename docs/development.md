@@ -69,7 +69,10 @@ backend/
     pty_relay.py       PTY spawn + async read/write
     mic.py             Mic pipe writer (PCM → /tmp/ccpipe_mic.pipe);
                        tracks bytes/drops and estimates drain time
-    tts.py             JSONL tail + Kokoro client + audio chunk fan-out
+    tts.py             JSONL tail + Kokoro client + audio chunk fan-out;
+                       which records are Claude's reply, markdown → speech
+    claude_asks.py     Notices Claude waiting on a question / permission
+                       prompt (its session file) and reads the dialog
     sticky.py          {name: {cwd}} JSON store for sticky sessions
     session_meta.py    Every remembered session: times, cwd, Claude
                        conversation id, stopped / why
@@ -170,7 +173,11 @@ Server → client text frames (JSON):
 - `draft` — the draft was changed on another device
 - `session_event` — tmux control-mode forwarded events
 - `session_gone` — tmux session closed
-- `tts_start` / `tts_end` — frame the audio that follows
+- `tts_start` / `tts_end` — frame the audio that follows; a reply is
+  spoken a sentence at a time, and `tts_start` carries the sentence
+  (`text`), the whole reply (`utterance`) and its number (`id`)
+- `claude_ask` — Claude is waiting on a question or permission prompt:
+  `kind`, `title`, `text`, and `id` of its spoken copy (or null)
 - `pong` — keepalive reply
 - `pty_exited` — PTY child closed
 

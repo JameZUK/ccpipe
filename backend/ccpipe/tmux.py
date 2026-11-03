@@ -324,6 +324,11 @@ async def _cached_claude_pid(name: str) -> int | None:
     return pid
 
 
+async def cached_claude_pid(name: str) -> int | None:
+    """The pid of the claude in session *name*, cached as for /history."""
+    return await _cached_claude_pid(name)
+
+
 async def claude_sid_and_cwd(name: str) -> tuple[str | None, str | None]:
     """Resolve the claude (sessionId, cwd) for a tmux session with a SINGLE
     pid lookup. ``claude_session_id`` and ``session_cwd`` each resolve the pid

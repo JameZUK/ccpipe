@@ -38,12 +38,15 @@ export async function requestPermission(): Promise<NotificationPermission> {
  *   - they've opted in via setEnabled(true),
  *   - the page is currently hidden (otherwise they're already watching it).
  */
-export function fireResponseReady(text: string, session?: string): void {
+export function fireResponseReady(text: string, session?: string, heading?: string): void {
   if (!isEnabled()) return;
   if (typeof document === "undefined") return;
   if (!document.hidden) return;
   const preview = (text || "").trim().slice(0, 140);
-  const title = session ? `claude · ${session}` : "claude responded";
+  // A reply that ends in a question is one too.
+  const what = heading ?? (/\?\s*$/.test(text || "") ? "Claude has a question" : "");
+  const title = what ? (session ? `${what} · ${session}` : what)
+    : session ? `claude · ${session}` : "claude responded";
   try {
     // Explicitly close the previous notification before creating a new
     // one. The `tag` collapses the *visible* notification, but each

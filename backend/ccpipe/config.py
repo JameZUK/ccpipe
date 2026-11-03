@@ -27,7 +27,8 @@ CONFIG_FILE_ENV = "CCPIPE_CONFIG_FILE"
 
 # Allowed values for TtsConfig.scope. Controls how much of the
 # assistant's response goes to TTS. See ccpipe.tts._apply_scope.
-VALID_SCOPES = ("full", "last_paragraph", "last_sentence", "last_question", "off")
+VALID_SCOPES = ("full", "first_paragraph", "first_sentence", "last_paragraph",
+                "last_sentence", "last_question", "off")
 
 
 @dataclass
@@ -36,6 +37,9 @@ class TtsConfig:
     speech_rate: float = 1.0  # Kokoro 'speed' param; clamped 0.5..2.0
     enabled: bool = True       # default mute state; UI can override per-session
     scope: str = "last_paragraph"  # see VALID_SCOPES
+    # Also read the notes Claude writes between tool calls ("Now I'll run
+    # the tests."), not only the reply that ends its turn.
+    progress: bool = False
 
 
 @dataclass
@@ -190,6 +194,8 @@ class AppConfig:
         scope = tts_data.get("scope")
         if isinstance(scope, str) and scope in VALID_SCOPES:
             tts.scope = scope
+        if isinstance(tts_data.get("progress"), bool):
+            tts.progress = tts_data["progress"]
         fs_data = data.get("fs", {}) if isinstance(data, dict) else {}
         if not isinstance(fs_data, dict):
             fs_data = {}

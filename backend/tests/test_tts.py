@@ -17,6 +17,7 @@ def test_extracts_text_from_message_content_list():
 
 def test_concatenates_multiple_text_blocks():
     line = {
+        "type": "assistant",
         "message": {
             "role": "assistant",
             "content": [
@@ -26,7 +27,9 @@ def test_concatenates_multiple_text_blocks():
             ],
         },
     }
-    assert _extract_assistant_text(line) == "Part one. Part two."
+    # A record with a tool call is a progress note: spoken only when asked.
+    assert _extract_assistant_text(line, progress=True) == "Part one. Part two."
+    assert _extract_assistant_text(line) is None
 
 
 def test_returns_none_for_user_role():
@@ -45,7 +48,7 @@ def test_returns_none_for_tool_only_turn():
 
 
 def test_handles_string_content():
-    line = {"role": "assistant", "content": "Just a string"}
+    line = {"type": "assistant", "message": {"role": "assistant", "content": "Just a string"}}
     assert _extract_assistant_text(line) == "Just a string"
 
 
@@ -60,7 +63,7 @@ def test_skips_summary_records():
 
 def _noop_subscribe_kwargs():
     return {
-        "on_start": lambda t: None,   # type: ignore[arg-type, return-value]
+        "on_start": lambda t, u, i: None,   # type: ignore[arg-type, return-value]
         "on_chunk": lambda c: None,   # type: ignore[arg-type, return-value]
         "on_end": lambda: None,       # type: ignore[arg-type, return-value]
     }

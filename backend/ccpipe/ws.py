@@ -22,7 +22,8 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import drafts, plan_usage, session_meta, tmux, tmux_ui, voice_ptt
+from . import claude_asks, drafts, plan_usage, session_meta, tmux, tmux_ui, voice_ptt
+from . import config as app_config
 from .auth import is_session_authed
 from .mic import MicWriter
 from .pty_relay import PtyProcess, pump
@@ -395,6 +396,8 @@ class _TerminalConnection:
         self.tile = tile or watch
         self.watch_size: tuple[int, int] | None = None
         self.watch_task: asyncio.Task[None] | None = None
+        # Watches for Claude stopping to ask something (main terminal only).
+        self.ask_task: asyncio.Task[None] | None = None
         # Track WS-send so we can serialize sends from multiple tasks safely.
         self.send_lock = asyncio.Lock()
         # Per-WS byte accounting. Registered in the global active list for
@@ -520,6 +523,9 @@ class _TerminalConnection:
         self.pty_task = asyncio.create_task(self._pty_lifecycle())
         if self.watch:
             self.watch_task = asyncio.create_task(self._follow_window_size())
+        if not self.tile:
+            self.ask_task = asyncio.create_task(
+                claude_asks.watch(self.session, self._on_claude_ask))
         try:
             if replay:
                 await self._send_history(cols, rows)
@@ -812,6 +818,8 @@ class _TerminalConnection:
         self._unregister()
         if self.watch_task is not None:
             self.watch_task.cancel()
+        if self.ask_task is not None:
+            self.ask_task.cancel()
         self.pty_task.cancel()
         # Await pump cancellation BEFORE tearing down the PTY so a pending
         # send_text/send_bytes doesn't race with the socket close.
@@ -1211,14 +1219,16 @@ class _TerminalConnection:
             "args": event.args,
         })
 
-    async def _on_tts_start(self, text: str) -> None:
+    async def _on_tts_start(self, text: str, utterance: str = "", uid: int = 0) -> None:
         if not self.alive:
             return
-        # Send up to 4000 chars so the frontend has enough text to send to
-        # /api/tts/speak for the "replay last response" pill. Longer
-        # utterances get truncated, replay won't capture the full thing in
-        # that case — Kokoro's own input limit is around the same.
-        if not await self.send_json({"type": "tts_start", "text": text[:4000]}):
+        # `text` is the sentence starting now; `utterance` the whole spoken
+        # reply it's part of and `id` its number, so the "replay" pill
+        # replays all of it and the page notifies once per reply. Up to
+        # 4000 chars, /api/tts/speak's limit.
+        if not await self.send_json({"type": "tts_start", "text": text[:4000],
+                                     "utterance": (utterance or text)[:4000],
+                                     "id": uid}):
             self._tts_dead()
 
     async def _on_tts_chunk(self, chunk: bytes) -> None:
@@ -1232,6 +1242,19 @@ class _TerminalConnection:
             return
         if not await self.send_json({"type": "tts_end"}):
             self._tts_dead()
+
+    async def _on_claude_ask(self, ask: claude_asks.Ask) -> None:
+        """Claude is waiting on a question or a permission prompt: tell the
+        page (for a notification) and say it, unless voice is muted or set
+        to read nothing. The id is the spoken copy's, so the page doesn't
+        notify a second time when it finishes playing."""
+        if not self.alive:
+            return
+        uid = None
+        if app_config.load().tts.scope != "off" and not isinstance(self.tts_sub, _NoTts):
+            uid = tts_service.speak_to(ask.spoken, self.tts_sub)
+        await self.send_json({"type": "claude_ask", "kind": ask.kind, "title": ask.title,
+                              "text": ask.body[:4000] or ask.spoken, "id": uid})
 
     def _tts_dead(self) -> None:
         self.alive = False

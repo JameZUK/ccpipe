@@ -328,6 +328,26 @@ recording, which looks to be why the mic occasionally failed to start
 there. It's on by default, because Claude hears you better with it; a
 switch in Settings → Voice turns it off on one device alone.
 
+**Spoken replies.** With TTS on, ccpipe reads out Claude's reply when it
+finishes a turn. Settings → Voice → *What to read aloud* picks how much:
+the full reply, its first or last paragraph, its first or last sentence,
+or its closing question. Only Claude's own reply is read. Your prompts,
+subagents' output and the notes Claude writes between tool calls ("Now
+I'll run the tests.") aren't; *Read progress notes too* adds those notes
+back. Markdown is read as a person would say it: no "asterisk" around
+bold text, a file path as its file name, and `→` as "to". The replay
+button repeats the whole reply.
+
+**When Claude asks you something.** When Claude stops on a question
+(its multiple-choice dialog) or a permission prompt, ccpipe reads it out:
+*"Claude asks: Which colour do you prefer? Red, or Blue."* or *"Claude
+needs your permission. Bash command: delete hello.txt…"*. With *Notify
+when backgrounded* on, it also shows a notification, even when voice is
+muted. A reply that ends in a question is notified as a question too.
+ccpipe sees the wait in Claude's session file and reads the dialog off
+the screen, since Claude only writes the question to its transcript after
+you answer.
+
 **Phones and tablets.** Installed to the home screen, ccpipe runs full
 screen:
 
@@ -415,7 +435,7 @@ the last three builds.
 |---|---|
 | **Display** | Text size and spacing; the terminal font (per device); the cursor's style, colour and blink; the WebGL renderer switch; and *status & graphs*. Applies as you change it. |
 | **Sessions** | How many sessions start at boot, and the idle stop times (above). |
-| **Voice** | Text-to-speech: voice, speed, what to read aloud, and a notification when the app is in the background. Voice input: when dictation stops and is sent, and voice processing on this device. |
+| **Voice** | Text-to-speech: voice, speed, what to read aloud (and whether to read Claude's progress notes), and a notification when the app is in the background. Voice input: when dictation stops and is sent, and voice processing on this device. |
 | **Account** | Change the username or password, sign out, sign out everywhere, set up two-factor (TOTP). |
 | **Debug** | A diagnostic snapshot (Ctrl+Shift+D) for terminal display bugs. |
 

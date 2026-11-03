@@ -134,9 +134,19 @@ Environment=CCPIPE_TTS_VOICE=bf_emma         # optional initial default
 
 The env-var name is historical — `CCPIPE_KOKORO_URL` can point at any
 OpenAI-compatible audio endpoint, not just Kokoro-FastAPI. TTS-related
-Settings (voice, speech rate, "what to read aloud", per-session mute)
-are then editable from Settings → Voice and persist in
-`~/.local/state/ccpipe/config.json`.
+Settings (voice, speech rate, "what to read aloud", progress notes,
+per-session mute) are then editable from Settings → Voice and persist in
+`~/.local/state/ccpipe/config.json` under `tts`:
+
+| Key | Default | |
+|---|---|---|
+| `voice` | `bf_emma` | Kokoro voice id |
+| `speech_rate` | `1.0` | 0.5–2.0 |
+| `scope` | `last_paragraph` | `full`, `first_paragraph`, `first_sentence`, `last_paragraph`, `last_sentence`, `last_question` or `off` |
+| `progress` | `false` | Also read the notes Claude writes between tool calls, not only the reply that ends its turn |
+
+Questions and permission prompts are read out whatever the scope,
+unless it is `off`.
 
 ## Voice-input behaviour (Settings → Voice → "voice input")
 

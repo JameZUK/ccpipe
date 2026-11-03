@@ -40,7 +40,21 @@ export type ServerSessionGone = {
 
 export type ServerTtsStart = {
   type: "tts_start";
+  /** The sentence starting now (a reply is spoken a sentence at a time). */
   text: string;
+  /** The whole spoken reply it belongs to, and that reply's number. */
+  utterance?: string;
+  id?: number;
+};
+
+/** Claude stopped to ask something: a question or a permission prompt. */
+export type ServerClaudeAsk = {
+  type: "claude_ask";
+  kind: "question" | "permission";
+  title: string;
+  text: string;
+  /** The spoken copy's utterance id, or null when it isn't spoken. */
+  id: number | null;
 };
 
 export type ServerTtsEnd = {
@@ -97,6 +111,7 @@ export interface TerminalSocketHandlers {
   onTtsStart?: (msg: ServerTtsStart) => void;
   onTtsAudio?: (chunk: Uint8Array) => void;
   onTtsEnd?: () => void;
+  onClaudeAsk?: (msg: ServerClaudeAsk) => void;
   /** The session's composer draft was changed on another device. */
   onDraft?: (text: string) => void;
   /** Answer to mic_start: Claude is recording (stream now), or why not. */
@@ -339,6 +354,7 @@ export class TerminalSocket {
             case "session_gone": this.handlers.onSessionGone?.(parsed as unknown as ServerSessionGone); return;
             case "tts_start": this.handlers.onTtsStart?.(parsed as unknown as ServerTtsStart); return;
             case "tts_end": this.handlers.onTtsEnd?.(); return;
+            case "claude_ask": this.handlers.onClaudeAsk?.(parsed as unknown as ServerClaudeAsk); return;
             case "draft":
               if (typeof parsed.text === "string") this.handlers.onDraft?.(parsed.text);
               return;
