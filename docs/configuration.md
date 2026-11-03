@@ -283,7 +283,7 @@ The landing page shows CPU and memory with ten minutes of history, the
 root filesystem's free space, how much memory the sessions use, and per
 session its memory (PSS of its whole process tree) and its project
 directory's size. Inside a session the same figures sit beside the ping
-(a three-bar meter on a phone — tap it for details). Per device, Settings
+(a bar meter on a phone — tap it for details). Per device, Settings
 → Display → *status & graphs* turns each part off and sets the refresh
 interval — switched off, a part stops asking the server too. Session
 memory is re-read at most once a minute per process; project sizes are

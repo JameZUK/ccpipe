@@ -30,10 +30,10 @@ Mobile (PWA, installable to the home screen):
 
 <table>
 <tr>
-<td align="center"><img src="docs/screenshots/Mobile-StartSession.jpg" width="200" alt="The session list on a phone: online status and ping, a summary of running, working and stopped sessions, CPU, memory and disk cards, a filter box, sort and view controls, and session rows showing Claude's task, working or idle state, the auto-stop countdown, memory, disk and when each was opened and created"></td>
+<td align="center"><img src="docs/screenshots/Mobile-StartSession.jpg" width="200" alt="The session list on a phone: online status and ping, a summary of running, working and stopped sessions, CPU, memory, disk and Claude plan cards, a filter box, sort and view controls, and session rows showing Claude's task, working or idle state, the auto-stop countdown, memory, disk and when each was opened and created"></td>
 <td align="center"><img src="docs/screenshots/Mobile-CreateSession.jpg" width="200" alt="The new session panel: a working directory with a browse button, three earlier Claude conversations from that directory to resume, each with its first prompt, age and a download button, and the session name"></td>
-<td align="center"><img src="docs/screenshots/Mobile-Session.jpg" width="200" alt="A live Claude Code session on a phone: the top bar with the back button, ping, three-bar status meter and toolbar icons, Claude's reply with a diff, the prompt box holding a draft, and the Esc / Tab / / / Ctrl / arrow key row"></td>
-<td align="center"><img src="docs/screenshots/Mobile-Status.jpg" width="200" alt="The status pop-up opened from the three-bar meter: a key naming the cpu, mem and disk bars and their colours, CPU and memory graphs, disk use, and this session's memory, CPU and project size"></td>
+<td align="center"><img src="docs/screenshots/Mobile-Session.jpg" width="200" alt="A live Claude Code session on a phone: the top bar with the back button, ping, four-bar status meter and toolbar icons, Claude's reply with a diff, the prompt box holding a draft, and the Esc / Tab / / / Ctrl / arrow key row"></td>
+<td align="center"><img src="docs/screenshots/Mobile-Status.jpg" width="200" alt="The status pop-up opened from the four-bar meter: a key naming the cpu, mem, disk and plan bars and their colours, CPU and memory graphs, disk use, the Claude plan's 5-hour, weekly and per-model meters with their reset times and pace ticks, usage credits, and this session's memory, CPU, project size and context fill"></td>
 </tr>
 <tr>
 <td align="center"><sub>Every session, running or stopped…</sub></td>
@@ -145,9 +145,9 @@ bar:
 
 - On a wide screen there's a CPU graph, memory and disk bars, and the
   project's size.
-- On a phone or a narrow window that becomes three thin bars: CPU,
-  memory and disk, from left to right. Each bar is amber below 70 %,
-  orange from 70 % and red from 90 %.
+- On a phone or a narrow window that becomes four thin bars: CPU,
+  memory, disk and Claude plan usage, from left to right. Each bar is
+  amber below 70 %, orange from 70 % and red from 90 %.
 
 Click or tap it for a pop-up with the graphs, the exact figures, and
 this session's own memory (the PSS of its whole process tree), CPU and
@@ -157,7 +157,7 @@ can be switched off per device, and the refresh interval set (2–30 s).
 A part that's switched off stops asking the server too.
 
 <p align="center">
-  <img src="docs/screenshots/Desktop-Status.png" width="620" alt="A session's top bar on a desktop: the inline CPU graph, memory and disk bars and project size, with the status pop-up open below showing CPU and memory graphs, disk use and this session's memory, CPU and project size">
+  <img src="docs/screenshots/Desktop-Status.png" width="620" alt="A session's top bar on a desktop: the inline CPU graph, memory, disk and plan bars and project size, with the status pop-up open below showing CPU and memory graphs, disk use, the Claude plan's meters with reset times and pace ticks, usage credits, and this session's memory, CPU, project size and context fill">
 </p>
 
 **Claude plan usage.** The top bar, its pop-up and the landing page also
@@ -426,7 +426,7 @@ screen size, and whether the page is an installed app. That's handy for
 checking the layout on a new device.
 
 <p align="center">
-  <img src="docs/screenshots/Desktop-Display-Settings.png" width="480" alt="Settings → Display: font size, line height and letter spacing; a grid of terminal fonts for this device; cursor style, unfocused style, colour, width and blink; the WebGL renderer switch; and status & graphs: the landing-page panel, the top-bar status, memory and disk per session, and the refresh interval; with the build id, Force reload and the screen readout in the footer">
+  <img src="docs/screenshots/Desktop-Display-Settings.png" width="480" alt="Settings → Display: font size, line height and letter spacing; a grid of terminal fonts for this device; cursor style, unfocused style, colour, width and blink; the WebGL renderer switch; and status & graphs: the landing-page panel, the top-bar status, memory and disk per session, Claude plan usage, and the refresh interval; with the build id, Force reload and the screen readout in the footer">
 </p>
 
 ## Architecture
