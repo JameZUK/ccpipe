@@ -94,6 +94,10 @@ export interface MobileMicAdapter {
    *    - "hold-end"   → push-to-talk released, stop + submit
    */
   onMicEvent(kind: MicEventKind): void;
+  /** Wake the audio context from inside the press, before the hold timer
+   * (mic.ts prime()); unprime when the press is cancelled. */
+  primeMic?(): void;
+  unprimeMic?(): void;
   /** Subscribes to recording-state changes. Returns an unsubscribe fn. */
   onStateChange(cb: (recording: boolean) => void): () => void;
   /** Lazy-construct a Waveform for the given canvas + the live AnalyserNode. */
@@ -593,6 +597,9 @@ export function mountMobileUI(parent: HTMLElement,
     e.preventDefault();
     activePointer = e.pointerId;
     try { micBtn.setPointerCapture(e.pointerId); } catch {}
+    // A hold starts recording from a timer, outside the gesture, so the
+    // audio context has to be woken here.
+    mic.primeMic?.();
     pressTimer = window.setTimeout(() => {
       isHolding = true;
       pressTimer = null;
@@ -626,6 +633,7 @@ export function mountMobileUI(parent: HTMLElement,
     } else {
       // System cancel without a release — don't fire tap, just unwind.
       cancelTimer();
+      mic.unprimeMic?.();
     }
   });
   // Keyboard activation (Tab + Enter / Space) — pointer events skip this.

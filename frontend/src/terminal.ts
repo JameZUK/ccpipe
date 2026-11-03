@@ -1559,6 +1559,8 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
   return {
     term, writeToTerm, sendResize, applyPrefs, resetBuffer, scrollToBottom, setFixedSize,
     getDebugState, dumpBuffer, dumpAllBuffers,
+    /** A brief message over the terminal (the copy toast). */
+    flash: flashToast,
     dispose: () => {
       disposed = true;
       document.removeEventListener("visibilitychange", onGlyphVisibility);

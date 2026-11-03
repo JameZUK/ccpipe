@@ -749,6 +749,9 @@ async function attachTerminal(session: string): Promise<void> {
   let micEventQueue: Promise<void> = Promise.resolve();
 
   const handleMicEvent = (kind: "tap" | "hold-start" | "hold-end"): void => {
+    // Still inside the tap / keydown: wake the audio context now, while the
+    // browser counts this as user input (mic.ts prime()).
+    if (kind !== "hold-end" && !recording && micAvailable) mic?.prime();
     micEventQueue = micEventQueue.then(async () => {
       if (!micAvailable) return;
       if (kind === "tap") {
@@ -799,6 +802,8 @@ async function attachTerminal(session: string): Promise<void> {
       // they click back into the terminal.
       terminalApi?.term.focus();
     } else {
+      // Synchronous when called straight from the desktop mic's click.
+      mic?.prime();
       setRecording(true);
       socket.send({ type: "input", data: VOICE_TRIGGER });
       void wakeLock.acquire();
@@ -817,6 +822,13 @@ async function attachTerminal(session: string): Promise<void> {
         setRecording(false);
         socket.send({ type: "input", data: VOICE_TRIGGER });  // unwind /voice
         void wakeLock.release();
+        const name = (err as { name?: string })?.name;
+        terminalApi?.flash(
+          name === "NotAllowedError" ? "Microphone access was refused"
+            : name === "NotFoundError" ? "No microphone found"
+            : "Couldn't start the microphone. Tap the mic to try again",
+          false,
+        );
       }
     }
   };
@@ -1141,6 +1153,8 @@ async function attachTerminal(session: string): Promise<void> {
     mobileUi = mountMobileUI(view, socket, {
       get available() { return micAvailable; },
       onMicEvent: (kind) => handleMicEvent(kind),
+      primeMic: () => { if (!recording && micAvailable) mic?.prime(); },
+      unprimeMic: () => { if (!recording) mic?.unprime(); },
       onStateChange: (cb) => {
         stateSubs.push(cb);
         return () => {

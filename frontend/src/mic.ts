@@ -76,6 +76,7 @@ export class MicStreamer {
   private diagFrames = 0;
   private diagBytes = 0;
   private diagTimer: number | null = null;
+  private diagFlush: (() => void) | null = null;
 
   constructor(private readonly socket: TerminalSocket) {}
 
@@ -116,9 +117,56 @@ export class MicStreamer {
     return this.analyser;
   }
 
+  // An AudioContext only starts if it's created or resumed from inside a
+  // user-input handler. start() runs after several awaits (the /voice
+  // trigger delay, getUserMedia), and Firefox on Android left a context
+  // created there suspended for good: the mic opened, but no audio was ever
+  // processed (2026-11-03; diag showed ctx "suspended", 0 frames). So the
+  // mic buttons call prime() synchronously in their tap / press / keydown
+  // handler, and start() takes that context. Unused, it's closed after 30 s
+  // (long enough for a first-time permission prompt).
+  private primed: AudioContext | null = null;
+  private primedTimer: number | null = null;
+
+  /** Create or wake the AudioContext. Call synchronously from the user's
+   * gesture, before anything async. A no-op while recording. */
+  prime(): void {
+    if (this.state === "running" || this.state === "starting" || this.state === "stopping") return;
+    try {
+      if (!this.primed || this.primed.state === "closed") this.primed = new AudioContext();
+      void this.primed.resume().catch(() => {});
+    } catch {
+      this.primed = null;
+      return;
+    }
+    if (this.primedTimer !== null) clearTimeout(this.primedTimer);
+    this.primedTimer = window.setTimeout(() => this.unprime(), 30_000);
+  }
+
+  /** Drop a primed context that won't be used (e.g. a cancelled press). */
+  unprime(): void {
+    const ctx = this._takePrimed();
+    if (ctx) void ctx.close().catch(() => {});
+  }
+
+  private _takePrimed(): AudioContext | null {
+    if (this.primedTimer !== null) {
+      clearTimeout(this.primedTimer);
+      this.primedTimer = null;
+    }
+    const ctx = this.primed;
+    this.primed = null;
+    return ctx && ctx.state !== "closed" ? ctx : null;
+  }
+
+  /** Start recording. Rejects if the mic can't start, so the caller can
+   * unwind /voice and say so; the serialising chain itself never breaks.
+   * (It used to resolve regardless, which left the UI "recording" with
+   * nothing captured.) */
   start(): Promise<void> {
-    this.pending = this.pending.then(() => this._start()).catch(() => {});
-    return this.pending;
+    const run = this.pending.then(() => this._start());
+    this.pending = run.catch(() => {});
+    return run;
   }
 
   stop(): Promise<void> {
@@ -143,12 +191,28 @@ export class MicStreamer {
       });
       diag.gumMs = Math.round(performance.now() - t0);
       stage = "ctx";
-      this.ctx = new AudioContext();
+      const primed = this._takePrimed();
+      diag.primed = !!primed;
+      this.ctx = primed ?? new AudioContext();
       diag.ctx0 = this.ctx.state;
       diag.rate = this.ctx.sampleRate;
       stage = "worklet";
       await this.ctx.audioWorklet.addModule("/mic-worklet.js");
       diag.ctx1 = this.ctx.state;
+      if (this.ctx.state !== "running") {
+        // Not started from a gesture, or the browser said no: one more try,
+        // then give up visibly rather than hold the mic open with no audio.
+        stage = "resume";
+        await Promise.race([
+          this.ctx.resume().catch(() => {}),
+          new Promise((r) => setTimeout(r, 1000)),
+        ]);
+        if ((this.ctx.state as AudioContextState) !== "running") {
+          const err = new Error(`audio context ${this.ctx.state}`);
+          err.name = "MicBlocked";
+          throw err;
+        }
+      }
       stage = "source";
       this.source = this.ctx.createMediaStreamSource(this.stream);
 
@@ -190,7 +254,7 @@ export class MicStreamer {
   }
 
   private _scheduleDiag(diag: Record<string, unknown>): void {
-    if (this.diagTimer !== null) clearTimeout(this.diagTimer);
+    this.diagFlush?.();
     const levels = new Uint8Array(this.analyser?.fftSize ?? 512);
     let peak = 0;
     const sampler = window.setInterval(() => {
@@ -198,8 +262,11 @@ export class MicStreamer {
       this.analyser.getByteTimeDomainData(levels);
       for (const v of levels) peak = Math.max(peak, Math.abs(v - 128) / 128);
     }, 100);
-    this.diagTimer = window.setTimeout(() => {
-      this.diagTimer = null;
+    // Sent at 2 s, or earlier if the recording stops first (_teardown).
+    const flush = (): void => {
+      if (this.diagFlush !== flush) return;
+      this.diagFlush = null;
+      if (this.diagTimer !== null) { clearTimeout(this.diagTimer); this.diagTimer = null; }
       clearInterval(sampler);
       diag.ctx2 = this.ctx?.state ?? "gone";
       diag.frames = this.diagFrames;
@@ -215,7 +282,9 @@ export class MicStreamer {
         };
       }
       this._sendDiag(diag);
-    }, 2000);
+    };
+    this.diagFlush = flush;
+    this.diagTimer = window.setTimeout(flush, 2000);
   }
 
   private _sendDiag(diag: Record<string, unknown>): void {
@@ -309,6 +378,7 @@ export class MicStreamer {
   }
 
   private async _teardown(): Promise<void> {
+    this.diagFlush?.();
     try { this.source?.disconnect(); } catch {}
     try { this.analyser?.disconnect(); } catch {}
     try { this.node?.disconnect(); } catch {}
