@@ -274,6 +274,7 @@ async def _warn_on_tls_misconfig(request: Request, call_next):
 # way). Routes that legitimately carry large bodies get explicit higher caps;
 # `None` exempts a route that streams + caps itself.
 _DEFAULT_BODY_CAP = 64 * 1024                          # control-plane JSON
+_UPLOAD_PIECE_CAP = 16 * 1024 * 1024                   # = fs_transfer.CHUNK_MAX
 _BODY_CAPS: dict[str, int | None] = {
     "/api/auth/login":     4 * 1024,                   # realistic body <500 B
     "/api/fs/write":       4 * 1024 * 1024,            # 1 MiB editor limit + JSON-escape slack
@@ -285,6 +286,10 @@ _BODY_CAPS: dict[str, int | None] = {
 def _body_cap_for(method: str, path: str) -> int | None:
     if method not in ("POST", "PUT", "PATCH"):
         return None
+    if method == "PUT" and path.startswith("/api/fs/uploads/"):
+        # One piece of a resumable upload (routes/fs_transfer.py), which
+        # also checks it against the upload's declared size.
+        return _UPLOAD_PIECE_CAP
     return _BODY_CAPS.get(path, _DEFAULT_BODY_CAP)
 
 
@@ -475,6 +480,7 @@ from .routes.auth import router as _auth_router
 from .routes.debug import router as _debug_router
 from .routes.system import router as _system_router
 from .routes.fs import router as _fs_router
+from .routes.fs_transfer import router as _fs_transfer_router
 from .routes.mic import router as _mic_router
 from .routes.sessions import router as _sessions_router
 from .routes.prompts import router as _prompts_router
@@ -489,6 +495,7 @@ app.include_router(_sessions_router)
 app.include_router(_prompts_router)
 app.include_router(_layouts_router)
 app.include_router(_fs_router)
+app.include_router(_fs_transfer_router)
 app.include_router(_debug_router)
 app.include_router(_system_router)
 app.include_router(_static_router)

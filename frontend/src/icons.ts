@@ -110,6 +110,16 @@ export const ICON_VIEW_COMPACT = icon(`<path d="M4 6h16M4 10h16M4 14h16M4 18h16"
 export const ICON_VIEW_DETAILED = icon(`<rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/>`);
 export const ICON_VIEW_GRID = icon(`<rect x="3" y="3" width="7.5" height="7.5" rx="1"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1"/>`);
 export const ICON_DOWNLOAD = icon(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>`);
+export const ICON_PREV = icon(`<path d="M19 12H7M11 6l-6 6 6 6"/>`);
+export const ICON_WRAP = icon(`<path d="M3 6h18M3 12h15a3 3 0 0 1 0 6h-4M3 18h7M16 16l-2 2 2 2"/>`);
+export const ICON_UPLOAD = icon(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>`);
+export const ICON_FILE = icon(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/>`);
+export const ICON_FILE_CODE = icon(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M10 12l-2 2 2 2M14 12l2 2-2 2"/>`);
+export const ICON_FILE_IMAGE = icon(`<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/>`);
+export const ICON_FILE_VIDEO = icon(`<rect x="3" y="5" width="13" height="14" rx="2"/><path d="M16 10l5-3v10l-5-3"/>`);
+export const ICON_FILE_AUDIO = icon(`<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>`);
+export const ICON_FILE_PDF = icon(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M8 13h8M8 17h5"/>`);
+export const ICON_FOLDER = icon(`<path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/>`);
 export const ICON_REFRESH = icon(`<path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/>`);
 
 /** One of the icon strings above as a DOM node — parsed as SVG, never as

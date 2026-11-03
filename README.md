@@ -166,13 +166,50 @@ leave none selected to start fresh. The ↓ beside each one downloads that
 conversation as Markdown.
 
 **File browser.** The toolbar **Files** button opens a file browser at
-the session's project folder: upload, create folders, rename, delete,
-edit text files in place, and download. A whole folder downloads as a
+the session's project folder: view, upload, create folders, rename,
+delete, edit text files in place, and download. A whole folder downloads as a
 **.zip**, from a folder's ⋮ menu or the **zip** button for the folder
 you're in. It first shows how many files and how much data that is, and
 leaves hidden files (`.git`, `.venv`, …) out unless you choose to include
 them. The zip is built as it downloads, so there's no wait for a big
 folder to be packed first.
+
+- **Upload** takes any number of files at once, from the picker or
+  dropped onto the panel. It asks before replacing files that are
+  already there.
+- **Built for bad connections.** Uploads go in pieces, and a piece that
+  fails is retried after a growing pause, from however much the server
+  says has arrived. A dropped signal costs only the piece in flight, and
+  coming back online retries at once. Downloads are fetched the same
+  way, in byte ranges. Each transfer shows its progress, speed and, on a
+  bad link, *retrying in 4 s*; cancel or retry it from the list. Closing
+  the panel doesn't stop a transfer, and the page won't reload itself
+  for an update while one is running.
+
+**File viewer.** Tapping a file opens it read-only, full screen; **✎**
+switches to the editor, and you're back in the viewer when you close it.
+
+- **Text and code:** syntax-highlighted, with line numbers and a wrap
+  toggle.
+- **Markdown:** rendered (the document viewer below), with a switch to
+  the source.
+- **Images:** fitted to the screen. Pinch, scroll or double-tap to zoom,
+  and drag to pan. SVGs show as images, so any script in one never runs.
+- **PDF, audio and video:** the browser's own viewer and players.
+  Seeking works.
+
+**‹ ›**, the arrow keys, or a swipe on an image step through the
+folder's files. **⤓** downloads the file, and **↗** opens it in a tab of
+its own.
+
+<p align="center">
+  <img src="docs/screenshots/Desktop-File-Viewer.png" width="640" alt="The file viewer showing a TypeScript file: syntax highlighting, line numbers, the file's size and line count in the bar, and buttons for previous and next file, wrap, edit, download and close">
+</p>
+<p align="center">
+  <img src="docs/screenshots/Mobile-File-Viewer-Image.jpg" width="200" alt="The file viewer on a phone showing an image fitted to the screen, its pixel size in the corner">
+  &nbsp;
+  <img src="docs/screenshots/Desktop-Transfers.png" width="380" alt="The file browser's transfer list: one upload retrying after a lost connection, two queued, each with a progress bar and cancel button, above the folder listing with an icon for each file type">
+</p>
 
 <p align="center">
   <img src="docs/screenshots/Desktop-Files.png" width="480" alt="The file browser beside a session: the project path, upload, new dir and zip buttons, the folder listing, and a folder's menu offering download .zip, rename and delete">
@@ -553,6 +590,19 @@ proxy host.
   etc. remain reachable because this is an admin tool. Folder downloads
   (.zip) walk the folder without following symlinks and leave out
   anything on the denylist, so zipping `$HOME` can't include `~/.claude`.
+- **Files shown in the browser.** The viewer gets files from
+  `/api/fs/inline`, which serves only a fixed list of image, SVG, PDF,
+  audio and video types (by extension). Everything but PDF comes with
+  `Content-Security-Policy: sandbox`, so a file opened in its own tab,
+  an SVG with a script in it say, gets no origin and runs nothing. PDFs
+  can't be sandboxed (browsers won't render them), but they render in
+  the browser's PDF viewer, not as a page of ccpipe, and only ccpipe
+  itself may frame one. Text is always fetched as data and shown as
+  text.
+- **Resumable uploads** write to a hidden `.ccpipe-….tmp` part-file
+  beside the target, checked against the jail at the start and again at
+  the finish, and renamed into place. Abandoned part-files are removed
+  after a day, even across a restart.
 - **TTS reads your Claude transcripts.** Only run ccpipe on a host
   where you trust everyone with access to those files.
 - **Drafts and saved prompts live on the server.** Unsent prompt-box

@@ -89,7 +89,9 @@ _VIEWER_CSP = (
     "connect-src 'self'; "
     "worker-src 'self' blob:; "
     "object-src 'none'; "
-    "frame-ancestors 'none'; "
+    # Same-origin framing only: the file viewer shows a rendered Markdown
+    # file by embedding this page (/view?…&embed=1).
+    "frame-ancestors 'self'; "
     "base-uri 'self'; "
     "form-action 'none'"
 )
@@ -99,6 +101,7 @@ _VIEWER_CSP = (
 async def markdown_viewer() -> FileResponse:
     resp = _serve_file("viewer.html")
     resp.headers["Content-Security-Policy"] = _VIEWER_CSP
+    resp.headers["X-Frame-Options"] = "SAMEORIGIN"
     return resp
 
 

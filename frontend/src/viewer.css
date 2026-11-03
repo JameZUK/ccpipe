@@ -30,6 +30,8 @@ html, body {
 }
 
 /* ── top bar ─────────────────────────────────────────────────────────── */
+.md-embedded .md-bar { display: none; }
+
 .md-bar {
   position: sticky;
   top: 0;

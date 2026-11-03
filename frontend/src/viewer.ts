@@ -97,6 +97,10 @@ const _params = new URLSearchParams(location.search);
 const filePath = _params.get("path") ?? "";
 const baseDir = dirOf(filePath);
 const rootDir = _params.get("root") || baseDir;
+// Shown inside the file viewer (file-viewer.ts), which has its own bar
+// with the name, download and close: drop this page's.
+const embedded = _params.get("embed") === "1" && window.parent !== window;
+if (embedded) document.documentElement.classList.add("md-embedded");
 
 /** /view URL for *absPath*, preserving the project root so the switcher
  *  stays scoped as the reader navigates between documents. */
@@ -378,7 +382,7 @@ async function main(): Promise<void> {
 
   statusEl?.remove();
   renderSource(body.content ?? "");
-  if (docsBtn) setupDocsDrawer({ button: docsBtn, rootDir, filePath, viewUrl });
+  if (docsBtn && !embedded) setupDocsDrawer({ button: docsBtn, rootDir, filePath, viewUrl });
 
   // Seed the change key from a stat call so its representation matches the
   // poll's (read returns an int mtime; stat a float — comparing the two

@@ -76,7 +76,8 @@ server ingest up to the proxy's `client_max_body_size` (64 MB) and
 `json.loads` it before the 401 — a memory/CPU amplification primitive,
 plus a slow-body connection-slot hold. `main.py`'s `_BodyCapMiddleware`
 caps every body-taking route (64 KiB default; explicit higher caps for
-`/api/fs/write`, `/api/debug/snapshot`; `/api/fs/upload` is exempt and
+`/api/fs/write`, `/api/debug/snapshot`, and 16 MiB for one piece of a
+resumable upload, `PUT /api/fs/uploads/{id}`; `/api/fs/upload` is exempt and
 self-caps while streaming). It counts bytes **as they stream**, so a
 chunked or Content-Length-spoofed body can't bypass it. The bundled
 nginx sample adds `client_header_timeout`/`client_body_timeout` (and a

@@ -28,11 +28,12 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from .. import config as app_config
 from .. import fs_zip
+from ..fs_range import ranged_response
 from ..safe_write import existing_mode, open_temp, temp_name
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 
@@ -711,61 +712,21 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
 
 
 @router.get("/api/fs/download", dependencies=[AuthDep, SameOriginDep])
-def fs_download(path: str) -> StreamingResponse:
-    """Stream a file back to the browser as
-    ``Content-Disposition: attachment``. No size cap — downloads are
-    operator-initiated, and capping them would block legitimate
-    workflows like grabbing a log."""
+def fs_download(request: Request, path: str) -> Response:
+    """Send a file as ``Content-Disposition: attachment``. No size cap —
+    downloads are operator-initiated, and capping them would block
+    legitimate workflows like grabbing a log. Byte ranges are honoured
+    (fs_range), so a download that breaks off can resume: the browser's
+    own, and the file panel's, which fetches big files in pieces."""
+    # Imported here: fs_transfer imports this module.
+    from .fs_transfer import open_readonly
     resolved = _resolve_fs_path(path)
-    try:
-        st = resolved.stat()
-    except OSError:
-        raise HTTPException(status_code=404, detail="path not found")
-    if not stat_mod.S_ISREG(st.st_mode):
-        raise HTTPException(status_code=400, detail="not a regular file")
-
-    # M1 fix: walk + open BEFORE returning the StreamingResponse, so an
-    # ELOOP at any intermediate component (or the leaf) surfaces as a
-    # 403 status — not as a silent empty body inside the generator. The
-    # generator below owns the fd and closes it via os.fdopen's context.
-    parent_fd, leaf = _walk_parent_nofollow(str(resolved))
-    try:
-        try:
-            fd = os.open(
-                leaf,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_fd,
-            )
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise HTTPException(status_code=403, detail="symlink at target")
-            if exc.errno == errno.ENOENT:
-                raise HTTPException(status_code=404, detail="path not found")
-            if exc.errno == errno.EACCES:
-                raise HTTPException(status_code=403, detail="permission denied")
-            raise HTTPException(status_code=500, detail=f"download failed: {exc}")
-    finally:
-        os.close(parent_fd)
-
-    def _gen():
-        try:
-            with os.fdopen(fd, "rb") as f:
-                while True:
-                    chunk = f.read(64 * 1024)
-                    if not chunk:
-                        return
-                    yield chunk
-        except OSError:
-            return
-
-    return StreamingResponse(
-        _gen(),
-        media_type="application/octet-stream",
-        headers={
-            "Content-Length": str(st.st_size),
-            "Content-Disposition": content_disposition_attachment(resolved.name),
-        },
-    )
+    # The walk + open happen BEFORE the response is returned (M1), so an
+    # ELOOP at any component surfaces as a 403, not an empty body.
+    fd, st = open_readonly(resolved)
+    return ranged_response(request, fd, st, "application/octet-stream", {
+        "Content-Disposition": content_disposition_attachment(resolved.name),
+    })
 
 
 def _open_dir_for_walk(path: str) -> tuple[Path, int]:

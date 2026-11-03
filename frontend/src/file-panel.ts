@@ -18,8 +18,11 @@
 // <textarea> for v1 (UTF-8, ≤1 MB enforced server-side).
 
 import { apiJson } from "./api";
-import { CLOSE_SVG, EYE_SVG, FOLDER_SVG, KEBAB_SVG } from "./icons";
+import { h } from "./dom";
+import { fileKind, fmtSize, kindIcon } from "./file-kinds";
+import { CLOSE_SVG, EYE_SVG, FOLDER_SVG, ICON_FOLDER, ICON_REFRESH, ICON_UPLOAD, ICON_X, KEBAB_SVG, iconNode } from "./icons";
 import { inlineChoice, inlinePrompt } from "./inline-prompt";
+import { clearFinished, downloadFile, onTransfers, uploadFiles, type Transfer } from "./transfers";
 import { mdViewUrl } from "./view-url";
 
 // Matches Markdown files for the "view rendered" affordances.
@@ -62,13 +65,6 @@ type FsListResponse = {
 };
 
 // apiJson moved to ./api.ts (shared with session-picker, settings, etc.)
-
-function fmtSize(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
 
 function fmtTime(unix: number): string {
   const d = new Date(unix * 1000);
@@ -211,9 +207,11 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
   const uploadLabel = document.createElement("label");
   uploadLabel.className = "btn btn--primary file-panel__upload";
-  uploadLabel.innerHTML = `<span>upload</span>`;
+  uploadLabel.append(iconNode(ICON_UPLOAD), h("span", "", "upload"));
+  uploadLabel.title = "Upload files here (or drop them on the panel)";
   const uploadInput = document.createElement("input");
   uploadInput.type = "file";
+  uploadInput.multiple = true;
   uploadInput.hidden = true;
   uploadLabel.append(uploadInput);
 
@@ -234,11 +232,19 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
   toolbar.append(uploadLabel, mkdirBtn, zipBtn, statusEl);
 
+  // ── Transfers (uploads / downloads in progress) ───────────────────
+  const transfersEl = h("div", "file-panel__transfers");
+  transfersEl.hidden = true;
+
   // ── Listing ────────────────────────────────────────────────────────
   const list = document.createElement("div");
   list.className = "file-panel__list";
 
-  sheet.append(head, pathBar, toolbar, list);
+  // Shown while files are dragged over the panel.
+  const dropHint = h("div", "file-panel__drop", "drop to upload here");
+  dropHint.hidden = true;
+
+  sheet.append(head, pathBar, toolbar, transfersEl, list, dropHint);
   shell.append(backdrop, sheet);
   parent.append(shell);
 
@@ -248,6 +254,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   // it's almost certainly outside the jail, but the next /api/fs/list
   // 403 surfaces in the status line rather than silently failing.
   let currentPath = opts.initialPath ?? "/";
+  let currentEntries: FsEntry[] = [];
   let uploadLimitMb = 50;
 
   const setStatus = (msg: string, isError = false) => {
@@ -257,11 +264,14 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
   const dismiss = () => {
     shell.remove();
+    unsubTransfers();
     document.removeEventListener("keydown", onKey);
     document.removeEventListener("click", onDocClick);
     opts.onClose?.();
   };
   const onKey = (e: KeyboardEvent) => {
+    // The viewer and editor, open over the panel, handle their own Escape.
+    if (e.defaultPrevented || document.querySelector(".file-viewer, .file-editor")) return;
     if (e.key === "Escape") {
       e.preventDefault();
       dismiss();
@@ -283,6 +293,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
       const data = await apiJson<FsListResponse>(
         `/api/fs/list?path=${encodeURIComponent(path ?? currentPath)}&files=1&show_hidden=1`);
       currentPath = data.path;
+      currentEntries = data.entries;
       pathInput.value = data.path;
       upBtn.disabled = data.parent === null;
       renderEntries(data.entries);
@@ -315,7 +326,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
     main.className = "file-panel__row__main";
     const icon = document.createElement("span");
     icon.className = "file-panel__row__icon";
-    icon.textContent = entry.type === "dir" ? "▸" : "·";
+    icon.append(iconNode(entry.type === "dir" ? ICON_FOLDER : kindIcon(entry.name)));
     const name = document.createElement("span");
     name.className = "file-panel__row__name";
     name.textContent = entry.name;
@@ -351,27 +362,20 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
       }));
     }
     if (entry.type === "file") {
-      if (MARKDOWN_RE.test(entry.name)) {
-        menu.append(menuItem("view", () => {
+      menu.append(menuItem("view", () => {
+        closeMenu();
+        void viewFile(entry.name);
+      }));
+      const kind = fileKind(entry.name);
+      if (kind === "text" || kind === "markdown") {
+        menu.append(menuItem("edit", () => {
           closeMenu();
-          openMarkdownView(fullPath, opts.initialPath);
+          openEditor(fullPath, opts.initialPath);
         }));
       }
-      menu.append(menuItem("edit", () => {
-        closeMenu();
-        openEditor(fullPath, opts.initialPath);
-      }));
       menu.append(menuItem("download", () => {
         closeMenu();
-        // Download via an anchor so the browser uses the
-        // Content-Disposition filename from the server.
-        const a = document.createElement("a");
-        a.href = `/api/fs/download?path=${encodeURIComponent(fullPath)}`;
-        a.download = entry.name;
-        a.style.display = "none";
-        document.body.append(a);
-        a.click();
-        setTimeout(() => a.remove(), 0);
+        downloadFile(fullPath, entry.name, entry.size);
       }));
     }
     menu.append(menuItem("rename", () => {
@@ -429,11 +433,26 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
 
     main.addEventListener("click", () => {
       if (entry.type === "dir") reload(fullPath);
-      else openEditor(fullPath, opts.initialPath);
+      else void viewFile(entry.name);
     });
 
     row.append(main, meta, actions);
     return row;
+  };
+
+  /** Open the viewer on *name*, stepping through this folder's files. */
+  const viewFile = async (name: string): Promise<void> => {
+    const files = currentEntries
+      .filter((e): e is Extract<FsEntry, { type: "file" }> => e.type === "file")
+      .map((e) => ({ name: e.name, path: joinPath(currentPath, e.name), size: e.size, mtime: e.mtime }));
+    const index = files.findIndex((f) => f.name === name);
+    if (index < 0) return;
+    const { openFileViewer } = await import("./file-viewer");
+    openFileViewer({
+      files, index, root: opts.initialPath,
+      edit: (f, closed) => openEditor(f.path, opts.initialPath, closed),
+      download: (f) => downloadFile(f.path, f.name, f.size),
+    });
   };
 
   /** Size the folder first ("120 files, 4.2 MB"), let the user include
@@ -506,38 +525,80 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
     }
   };
 
-  // Upload — PUT raw bytes against /api/fs/upload?path=…
-  uploadInput.addEventListener("change", async () => {
-    const file = uploadInput.files?.[0];
-    if (!file) return;
-    if (file.size > uploadLimitMb * 1024 * 1024) {
-      setStatus(`file exceeds upload limit (${uploadLimitMb} MB)`, true);
-      uploadInput.value = "";
-      return;
+  // Upload: any number of files, in resumable pieces (transfers.ts).
+  const startUploads = async (picked: File[]): Promise<void> => {
+    const dir = currentPath;
+    let files = picked;
+    const tooBig = files.filter((f) => f.size > uploadLimitMb * 1024 * 1024);
+    if (tooBig.length) {
+      setStatus(`over the ${uploadLimitMb} MB upload limit, skipped: ${tooBig.map((f) => f.name).join(", ")}`, true);
+      files = files.filter((f) => !tooBig.includes(f));
     }
-    const target = joinPath(currentPath, file.name);
-    setStatus(`uploading ${file.name} (${fmtSize(file.size)})…`);
-    try {
-      const res = await fetch(
-        `/api/fs/upload?path=${encodeURIComponent(target)}`,
-        {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {
-            "X-Requested-By": "ccpipe",
-            "Content-Type": file.type || "application/octet-stream",
-          },
-          body: file,
-        });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.detail || `status ${res.status}`);
+    const here = new Set(currentEntries.filter((e) => e.type === "file").map((e) => e.name));
+    const clash = files.filter((f) => here.has(f.name));
+    if (clash.length) {
+      const pick = await inlineChoice(
+        clash.length === 1 ? `${clash[0].name} is already here` : `${clash.length} of these files are already here`,
+        ["Replace", clash.length === files.length ? "Cancel" : "Skip them"],
+        clash.length === 1 ? "" : clash.map((f) => f.name).join(", ").slice(0, 400));
+      if (pick === null) return;
+      if (pick === 1) files = files.filter((f) => !here.has(f.name));
+    }
+    if (files.length) uploadFiles(dir, files);
+  };
+  uploadInput.addEventListener("change", () => {
+    const files = [...(uploadInput.files ?? [])];
+    uploadInput.value = "";
+    if (files.length) void startUploads(files);
+  });
+
+  // Drag and drop onto the panel.
+  let dragDepth = 0;
+  const hasFiles = (e: DragEvent): boolean => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+  sheet.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth++;
+    dropHint.hidden = false;
+  });
+  sheet.addEventListener("dragover", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = "copy";
+  });
+  sheet.addEventListener("dragleave", (e) => {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) dropHint.hidden = true;
+  });
+  sheet.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    dropHint.hidden = true;
+    const items = [...(e.dataTransfer!.items ?? [])];
+    const folders = items.filter((it) => it.webkitGetAsEntry?.()?.isDirectory).length;
+    const files = items
+      .filter((it) => it.kind === "file" && !it.webkitGetAsEntry?.()?.isDirectory)
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (folders) setStatus(`folders aren't uploaded (${folders} skipped): zip them first`, true);
+    if (files.length) void startUploads(files);
+  });
+
+  // The transfer list, and a refresh when an upload lands in this folder.
+  const seenDone = new Set<number>();
+  let refreshTimer: number | null = null;
+  const unsubTransfers = onTransfers((ts) => {
+    renderTransfers(transfersEl, ts);
+    for (const t of ts) {
+      if (t.state !== "done" || seenDone.has(t.id)) continue;
+      seenDone.add(t.id);
+      const dir = t.path.slice(0, t.path.lastIndexOf("/")) || "/";
+      if (t.kind === "upload" && dir === currentPath.replace(/\/+$/, "")) {
+        if (refreshTimer !== null) clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(() => { refreshTimer = null; void reload(); }, 300);
       }
-      await reload();
-    } catch (err) {
-      setStatus(`upload failed: ${(err as Error).message}`, true);
-    } finally {
-      uploadInput.value = "";
     }
   });
 
@@ -596,6 +657,71 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   void reload();
 }
 
+// ─── Transfer list ──────────────────────────────────────────────────
+
+function fmtRate(bps: number): string {
+  return bps > 0 ? `${fmtSize(Math.round(bps))}/s` : "";
+}
+
+/** The uploads and downloads (transfers.ts), newest first, with progress,
+ * what's going on when a link is bad, and cancel / retry. */
+function renderTransfers(box: HTMLElement, ts: readonly Transfer[]): void {
+  box.hidden = ts.length === 0;
+  box.replaceChildren();
+  if (!ts.length) return;
+  const head = h("div", "file-panel__transfers-head");
+  const live = ts.filter((t) => t.state === "queued" || t.state === "running" || t.state === "retrying").length;
+  head.append(h("span", "", live ? `${live} transfer${live === 1 ? "" : "s"} running` : "transfers"));
+  if (ts.some((t) => t.state === "done" || t.state === "cancelled")) {
+    const clear = h("button", "btn btn--ghost file-panel__transfers-clear", "clear finished");
+    clear.type = "button";
+    clear.addEventListener("click", () => clearFinished());
+    head.append(clear);
+  }
+  box.append(head);
+  for (const t of [...ts].reverse()) {
+    const row = h("div", `file-panel__transfer file-panel__transfer--${t.state}`);
+    const top = h("div", "file-panel__transfer-top");
+    const arrow = h("span", "file-panel__transfer-dir", t.kind === "upload" ? "↑" : "↓");
+    const name = h("span", "file-panel__transfer-name", t.name);
+    name.title = t.path;
+    const pct = t.size > 0 ? Math.min(100, (t.done / t.size) * 100) : (t.state === "done" ? 100 : 0);
+    let what: string;
+    switch (t.state) {
+      case "queued": what = "waiting"; break;
+      case "done": what = `${fmtSize(t.size)} · done`; break;
+      case "cancelled": what = "cancelled"; break;
+      case "failed": what = `failed at ${fmtSize(t.done)}`; break;
+      default: what = `${fmtSize(t.done)} / ${fmtSize(t.size)}${t.rate ? ` · ${fmtRate(t.rate)}` : ""}`;
+    }
+    const stat = h("span", "file-panel__transfer-stat", what);
+    top.append(arrow, name, stat);
+    if (t.state === "failed") {
+      const retry = h("button", "btn btn--ghost btn--icon file-panel__transfer-btn");
+      retry.type = "button";
+      retry.title = "Try again from where it stopped";
+      retry.append(iconNode(ICON_REFRESH));
+      retry.addEventListener("click", () => t.retry());
+      top.append(retry);
+    }
+    if (t.state === "queued" || t.state === "running" || t.state === "retrying" || t.state === "failed") {
+      const cancel = h("button", "btn btn--ghost btn--icon file-panel__transfer-btn");
+      cancel.type = "button";
+      cancel.title = "Cancel";
+      cancel.append(iconNode(ICON_X));
+      cancel.addEventListener("click", () => t.cancel());
+      top.append(cancel);
+    }
+    const bar = h("div", "file-panel__transfer-bar");
+    const fill = h("div", "file-panel__transfer-fill");
+    fill.style.width = `${pct.toFixed(1)}%`;
+    bar.append(fill);
+    row.append(top, bar);
+    if (t.note) row.append(h("div", "file-panel__transfer-note", t.note));
+    box.append(row);
+  }
+}
+
 // ─── Inline editor ──────────────────────────────────────────────────
 
 const LS_EDITOR_SIZE = "ccpipe.editorSize";
@@ -625,7 +751,8 @@ function saveEditorMaximised(v: boolean): void {
   try { localStorage.setItem(LS_EDITOR_MAX, v ? "1" : "0"); } catch {}
 }
 
-function openEditor(path: string, root?: string): void {
+/** *onClosed* runs once the editor has closed (the viewer reloads). */
+function openEditor(path: string, root?: string, onClosed?: () => void): void {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.setAttribute("role", "dialog");
@@ -807,6 +934,7 @@ function openEditor(path: string, root?: string): void {
     try { ro.disconnect(); } catch {}
     document.removeEventListener("keydown", onKey);
     overlay.remove();
+    onClosed?.();
   };
 
   // Load
