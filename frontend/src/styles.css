@@ -1549,6 +1549,14 @@ a:hover { color: var(--fg); }
   border-color: var(--accent);
   color: var(--accent);
 }
+/* Audio is waiting for a tap (Safari refused to play it on its own). */
+.pill.pill--tap {
+  border-color: var(--level-warn);
+  color: var(--level-warn);
+  animation: pill-tap 1.2s ease-in-out infinite;
+}
+@keyframes pill-tap { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .pill.pill--tap { animation: none; } }
 .pill[aria-pressed="false"] {
   /* Muted state. Previously used --fg-faint which is so close to the
      statusbar background that the pill effectively vanished. Bump to

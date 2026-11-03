@@ -338,6 +338,11 @@ back. Markdown is read as a person would say it: no "asterisk" around
 bold text, a file path as its file name, and `→` as "to". The replay
 button repeats the whole reply.
 
+On an iPad or iPhone, Safari plays sound only after you've tapped the
+page, and again after the app has been in the background. Speech that
+arrives before then isn't lost. The speaker button pulses, a note says
+*Tap anywhere to hear Claude*, and your next tap or key press plays it.
+
 **When Claude asks you something.** When Claude stops on a question
 (its multiple-choice dialog) or a permission prompt, ccpipe reads it out:
 *"Claude asks: Which colour do you prefer? Red, or Blue."* or *"Claude

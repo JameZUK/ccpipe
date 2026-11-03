@@ -311,10 +311,11 @@ whose), so its lazily-loaded code is still there. (`frontend/src/update.ts`,
 - **WS keeps reconnecting on mobile**: usually fine — the client treats
   the socket as stale after 45s of silence and re-dials. Check
   `journalctl --user -u ccpipe -f` for backend errors.
-- **TTS silent on mobile**: tap the page once after attaching to a
-  session. Browsers gate `AudioContext` resumption behind a user
-  gesture. The voice pill in the statusbar should turn amber once it's
-  wired.
+- **TTS silent on mobile**: browsers, Safari above all, play sound a
+  page starts by itself only after a tap (and Safari again after the
+  app has been in the background). Audio refused that way waits: the
+  speaker button pulses amber and the next tap or key press plays it.
+  Audio left waiting for over three minutes is dropped.
 - **Lost the generated initial password**: the credentials file stores
   only the hash. If you didn't capture the password from
   `~/.local/state/ccpipe/initial_password.txt` before deleting it,

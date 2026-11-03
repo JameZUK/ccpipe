@@ -713,6 +713,23 @@ async function attachTerminal(session: string): Promise<void> {
   };
   updateTtsBtn();
 
+  // Audio the browser refused to play (Safari on the iPad, before a tap)
+  // waits for one: the speaker button says so until then. The tap that
+  // plays it may land on the button itself, so its click right after
+  // doesn't count as "mute".
+  let unblockedAt = 0;
+  tts.onBlockedChange = (blocked) => {
+    ttsBtn.classList.toggle("pill--tap", blocked);
+    if (blocked) {
+      ttsBtn.title = "Tap anywhere to hear Claude";
+      ttsBtn.setAttribute("aria-label", ttsBtn.title);
+      terminalApi?.flash("Tap anywhere to hear Claude");
+    } else {
+      unblockedAt = performance.now();
+      updateTtsBtn();
+    }
+  };
+
   // ─── Recording state (single source of truth, both UIs subscribe) ─────
   // Claude's /voice (tap mode) toggles on each meta+k, and ignores the key
   // while it's still transcribing the last recording. Pressing it blind from
@@ -1266,7 +1283,9 @@ async function attachTerminal(session: string): Promise<void> {
 
   // TTS toggle
   ttsBtn.addEventListener("click", () => {
+    if (performance.now() - unblockedAt < 800) return;
     tts.setMuted(!tts.isMuted);
+    if (!tts.isMuted) tts.unlock();
     updateTtsBtn();
   });
 

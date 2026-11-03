@@ -14,9 +14,42 @@
 //
 // Browser autoplay quirks: createMediaElementSource binds the element to
 // Web Audio permanently and the element goes silent unless the graph is
-// connected to ctx.destination. We initialise lazily on first play so
-// the AudioContext starts after a user gesture (TTS toggle or mic press
-// counts as one).
+// connected to ctx.destination — or while the AudioContext is suspended.
+//
+// Safari (iPad, iPhone) is the strict one: it plays sound a page starts by
+// itself only on an element a tap has already played, and it resumes an
+// AudioContext only inside a tap (and suspends it again when the app goes
+// to the background). The element and context used to be made lazily, on
+// the first reply, outside any tap, so on the iPad replies played
+// "sometimes" (2026-11-03). Now the first tap or key press unlocks both,
+// and every tap after that resumes the context if Safari suspended it.
+// Audio the browser refuses isn't dropped: it waits, and the next tap
+// plays it (onBlockedChange lets the page say so). The visualiser's
+// analyser is only made inside a tap; until then audio plays without it.
+
+type Queued = { blob: Blob; at: number };
+
+// Audio refused for longer than this is dropped rather than played late.
+const KEEP_BLOCKED_MS = 3 * 60_000;
+// Events that count as the user's own action for autoplay.
+const GESTURES = ["pointerup", "touchend", "click", "keydown"] as const;
+
+let silentUrl: string | null = null;
+/** 50 ms of silence, played inside a tap to unlock the audio element. */
+function silence(): string {
+  if (silentUrl) return silentUrl;
+  const n = 400;
+  const buf = new ArrayBuffer(44 + n);
+  const v = new DataView(buf);
+  const tag = (o: number, t: string) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  tag(0, "RIFF"); v.setUint32(4, 36 + n, true); tag(8, "WAVE");
+  tag(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  tag(36, "data"); v.setUint32(40, n, true);
+  new Uint8Array(buf, 44).fill(128);
+  silentUrl = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+  return silentUrl;
+}
 
 import { loadTtsMuted, saveTtsMuted } from "./display-prefs";
 import * as wakeLock from "./wake-lock";
@@ -25,7 +58,15 @@ export class TtsPlayer {
   // Per-utterance chunk buffer (between onStart and onEnd).
   private current: Uint8Array[] = [];
   // Completed blobs waiting to play.
-  private queue: Blob[] = [];
+  private queue: Queued[] = [];
+  // A tap has played the element (Safari's condition for playing later).
+  private unlocked = false;
+  // Playing the unlocking silence: its events aren't a reply playing.
+  private priming = false;
+  // Between deciding to play and play() (waiting on the context).
+  private starting = false;
+  // The browser refused to play; the head of the queue waits for a tap.
+  private blocked = false;
 
   private audio: HTMLAudioElement | null = null;
   private audioCtx: AudioContext | null = null;
@@ -47,13 +88,15 @@ export class TtsPlayer {
   // attached via addEventListener anonymously stay reachable from the
   // audio element until GC, which transitively keeps `this` (the player)
   // alive longer than necessary.
-  private readonly onAudioPlaying = () => this.handlePlaybackStart();
-  private readonly onAudioPause = () => this.handlePlaybackEnd();
+  private readonly onAudioPlaying = () => { if (!this.priming) this.handlePlaybackStart(); };
+  private readonly onAudioPause = () => { if (!this.priming) this.handlePlaybackEnd(); };
   private readonly onAudioEnded = () => {
+    if (this.priming) return;
     this.handlePlaybackEnd();
     this.pumpQueue();
   };
   private readonly onAudioError = () => {
+    if (this.priming) return;
     this.handlePlaybackEnd();
     this.pumpQueue();
   };
@@ -66,10 +109,17 @@ export class TtsPlayer {
   // ``tts_mute`` WS message so the server can skip the Kokoro round-
   // trip while nobody's listening.
   onMutedChange: ((muted: boolean) => void) | null = null;
+  /** Audio is waiting for a tap (true), or the wait is over (false). */
+  onBlockedChange: ((blocked: boolean) => void) | null = null;
+
+  private readonly onGesture = () => this.unlock();
 
   constructor(session?: string) {
     this.session = session;
     this.muted = loadTtsMuted(session);
+    for (const g of GESTURES) {
+      document.addEventListener(g, this.onGesture, { capture: true, passive: true });
+    }
   }
 
   /** Web Audio node tapping the audio output. Valid only while audio is wired. */
@@ -85,6 +135,7 @@ export class TtsPlayer {
     saveTtsMuted(muted, this.session);
     if (muted) {
       this.queue = [];
+      this.setBlocked(false);
       this.current = [];
       // Any in-flight utterance must NOT be played back if the user
       // unmutes again before it ends — otherwise we'd assemble a blob
@@ -127,21 +178,75 @@ export class TtsPlayer {
     // — WS frames are always plain ArrayBuffer.
     const blob = new Blob(this.current as BlobPart[], { type: this.mimeType });
     this.current = [];
-    this.queue.push(blob);
+    this.queue.push({ blob, at: Date.now() });
     this.pumpQueue();
   }
 
   private pumpQueue(): void {
-    if (this.muted) return;
+    if (this.muted || this.blocked || this.starting || this.priming) return;
     if (this.audio && !this.audio.paused) return;
     if (this.queue.length === 0) return;
-    const blob = this.queue.shift()!;
-    this.playBlob(blob);
+    this.playBlob(this.queue.shift()!);
+  }
+
+  private setBlocked(blocked: boolean): void {
+    if (this.blocked === blocked) return;
+    this.blocked = blocked;
+    try { this.onBlockedChange?.(blocked); } catch (e) { console.warn(e); }
+  }
+
+  /** Wait for a tap to play `item` (the browser refused to). */
+  private blockUntilTap(item: Queued): void {
+    this.queue.unshift(item);
+    this.unlocked = false;
+    this.setBlocked(true);
+  }
+
+  /** On every tap or key press: wake a context Safari suspended, and the
+   * first time (or after a refusal) unlock the element — by playing what
+   * was waiting, or a moment of silence. Runs inside the gesture, which
+   * is what makes it count. Public for the unmute tap, which happens
+   * while still muted when the document listener sees it. */
+  unlock(): void {
+    if (this.muted) return;
+    this.ensureWebAudio();
+    this.ensureGraph();
+    const ctx = this.audioCtx;
+    if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+    if (this.unlocked && !this.blocked) return;
+    const a = this.audio;
+    if (!a || !a.paused || this.starting || this.priming) return;
+    if (this.blocked) {
+      this.setBlocked(false);
+      const now = Date.now();
+      this.queue = this.queue.filter((q) => now - q.at < KEEP_BLOCKED_MS);
+      const next = this.queue.shift();
+      if (next) { this.startPlayback(next); return; }
+    }
+    this.priming = true;
+    a.src = silence();
+    a.play().then(() => {
+      this.unlocked = true;
+      try { a.pause(); } catch {}
+    }).catch(() => {}).finally(() => {
+      this.priming = false;
+      this.pumpQueue();
+    });
   }
 
   private ensureWebAudio(): void {
     if (this.audio) return;
     this.audio = new Audio();
+    this.audio.addEventListener("playing", this.onAudioPlaying);
+    this.audio.addEventListener("pause", this.onAudioPause);
+    this.audio.addEventListener("ended", this.onAudioEnded);
+    this.audio.addEventListener("error", this.onAudioError);
+  }
+
+  /** The analyser for the visualiser. Only from unlock(), inside a tap, so
+   * the context starts running; made once. */
+  private ensureGraph(): void {
+    if (this.audioCtx || !this.audio) return;
     try {
       this.audioCtx = new AudioContext();
       const source = this.audioCtx.createMediaElementSource(this.audio);
@@ -159,10 +264,6 @@ export class TtsPlayer {
       this.audioCtx = null;
       this.analyser = null;
     }
-    this.audio.addEventListener("playing", this.onAudioPlaying);
-    this.audio.addEventListener("pause", this.onAudioPause);
-    this.audio.addEventListener("ended", this.onAudioEnded);
-    this.audio.addEventListener("error", this.onAudioError);
   }
 
   private playbackActive = false;
@@ -206,35 +307,48 @@ export class TtsPlayer {
     try { await wakeLock.release(); } catch {}
   }
 
-  private playBlob(blob: Blob): void {
+  private playBlob(item: Queued): void {
     this.ensureWebAudio();
     if (!this.audio) return;
-    if (this.playingUrl) URL.revokeObjectURL(this.playingUrl);
-    this.playingUrl = URL.createObjectURL(blob);
-    this.audio.src = this.playingUrl;
-
-    // Web Audio: an AudioContext created lazily (i.e. not inside a user
-    // gesture handler) starts in 'suspended' state on Chrome/Edge. While
-    // suspended, audio routed through MediaElementSource → AnalyserNode →
-    // destination produces no sound. resume() is fine here because there
-    // HAS been a user gesture (login, session pick, or the TTS toggle)
-    // earlier in this tab — autoplay policy permits resume() after any
-    // gesture in the page.
-    if (this.audioCtx && this.audioCtx.state === "suspended") {
-      this.audioCtx.resume().catch((e) =>
-        console.warn("tts: ctx resume failed:", e));
+    const ctx = this.audioCtx;
+    if (ctx && ctx.state !== "running") {
+      // Suspended (Safari does that in the background): the element would
+      // "play" silence. Outside a tap Safari won't resume it, so give it a
+      // moment and otherwise wait for a tap.
+      this.starting = true;
+      ctx.resume().catch(() => {});
+      window.setTimeout(() => {
+        this.starting = false;
+        if (this.muted) return;
+        if (ctx.state === "running") this.startPlayback(item);
+        else this.blockUntilTap(item);
+      }, 250);
+      return;
     }
+    this.startPlayback(item);
+  }
 
+  private startPlayback(item: Queued): void {
+    const audio = this.audio;
+    if (!audio) return;
+    if (this.playingUrl) URL.revokeObjectURL(this.playingUrl);
+    this.playingUrl = URL.createObjectURL(item.blob);
+    audio.src = this.playingUrl;
     // Acquire BEFORE play() so the screen doesn't dim during a long
     // sentence; release on every failure / end path below.
     void this._acquireWakeLock();
-    this.audio.play().catch((err) => {
-      console.warn("tts: playback failed:", err);
+    audio.play().then(() => { this.unlocked = true; }).catch((err) => {
       // play() rejection means "playing" will never fire, so
       // handlePlaybackStart was never called and the wake-lock would
       // otherwise leak. Force-release symmetrically.
       void this._releaseWakeLock();
       this.handlePlaybackEnd();
+      if ((err as DOMException)?.name === "NotAllowedError") {
+        // Autoplay refused: keep it for the next tap rather than lose it.
+        this.blockUntilTap(item);
+        return;
+      }
+      console.warn("tts: playback failed:", err);
       this.pumpQueue();
     });
   }
@@ -272,7 +386,7 @@ export class TtsPlayer {
     // still be queued and play as soon as they unmute, which feels
     // like the mute button "didn't work".
     if (this.muted) return;
-    this.queue.push(blob);
+    this.queue.push({ blob, at: Date.now() });
     this.pumpQueue();
   }
 
@@ -283,6 +397,10 @@ export class TtsPlayer {
    * interrupted stream can't bleed into a later utterance.
    */
   dispose(): void {
+    for (const g of GESTURES) {
+      document.removeEventListener(g, this.onGesture, { capture: true });
+    }
+    this.onBlockedChange = null;
     this.current = [];
     this.queue = [];
     this.discardCurrentUtterance = true;

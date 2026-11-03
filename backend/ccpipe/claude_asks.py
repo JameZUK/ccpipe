@@ -77,6 +77,12 @@ _GENERIC_Q_RE = re.compile(r"(?:Do you want|Would you like) to proceed\??", re.I
 _COLUMN_RE = re.compile(r"\s{3,}|│")
 
 
+def _text(line: str) -> str:
+    """A dialog line without its frame: some builds draw the question
+    inside a "│" bar (seen on 2.1.316)."""
+    return line.strip().strip("│┃║").strip()
+
+
 def _clip(text: str) -> str:
     text = " ".join(text.split())
     return text if len(text) <= _MAX_PART else text[: _MAX_PART - 1].rstrip() + "…"
@@ -104,14 +110,14 @@ def describe(lines: list[str], waiting_for: str | None) -> Ask:
     q_lines: list[str] = []
     while j >= 0 and lines[j].strip() and not _RULE_RE.match(lines[j]) \
             and not _TAB_RE.search(lines[j]):
-        q_lines.insert(0, lines[j].strip())
+        q_lines.insert(0, _text(lines[j]))
         j -= 1
     question = _clip(" ".join(q_lines))
 
     # The dialog: from the last full-width rule above the options.
     top = max((k for k in range(first) if _SOLID_RULE_RE.match(lines[k])), default=-1)
-    block = [ln.strip() for ln in lines[top + 1: first]
-             if ln.strip() and not _RULE_RE.match(ln)]
+    block = [_text(ln) for ln in lines[top + 1: first]
+             if _text(ln) and not _RULE_RE.match(ln)]
 
     if permission:
         if question and not _GENERIC_Q_RE.fullmatch(question):

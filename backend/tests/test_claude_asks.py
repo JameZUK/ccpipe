@@ -98,6 +98,17 @@ def test_a_numbered_list_above_the_dialog_is_not_the_question():
     assert describe(screen, "input needed").body.startswith("Which colour")
 
 
+def test_question_in_a_frame():
+    # As drawn in this repo's own session (2.1.316): the question has a "│" bar.
+    screen = [RULE, "←  ☐ Since reopen  ☐ Ever worked  ✔ Submit  →", "",
+              "│ Since you reopened ccpipe on the iPad, have you heard anything at all, including this question?",
+              "", "❯ 1. Heard this one", "     This question was read out.", "  2. Heard it twice",
+              "  3. Nothing at all", "  4. Type something.", RULE, "  5. Chat about this"]
+    assert describe(screen, "input needed").spoken == (
+        "Claude has 2 questions. The first: Since you reopened ccpipe on the iPad, have you heard "
+        "anything at all, including this question? Heard this one, Heard it twice, or Nothing at all.")
+
+
 def test_no_dialog_found():
     assert describe(["just text"], "input needed") == Ask("question", "Claude has a question", "")
     ask = describe([], "permission prompt")
