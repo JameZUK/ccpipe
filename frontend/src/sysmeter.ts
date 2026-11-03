@@ -101,12 +101,41 @@ export function mountSysMeter(session: string): SysMeter {
     return r;
   };
 
+  // A key for the three-bar meter (only when that's what the top bar shows —
+  // the wide readout labels itself): the bars as they are now, named, and
+  // what their colours mean.
+  const meterKey = (): HTMLElement => {
+    const k = h("div", "sysmeter-key");
+    const cols = h("div", "sysmeter-key__cols");
+    ["cpu", "mem", "disk"].forEach((name, i) => {
+      const col = h("span", "sysmeter__col");
+      col.dataset.level = bars[i].dataset.level ?? "ok";
+      const fill = h("span", "sysmeter__col-fill");
+      fill.style.height = (bars[i].firstElementChild as HTMLElement).style.height;
+      col.append(fill);
+      const item = h("span", "sysmeter-key__item");
+      item.append(col, h("span", "sysmeter-key__name", name));
+      cols.append(item);
+    });
+    const levels = h("div", "sysmeter-key__levels");
+    for (const [lvl, text] of [["ok", "under 70%"], ["warn", "70%+"], ["hot", "90%+"]]) {
+      const item = h("span", "sysmeter-key__level");
+      const sw = h("span", "sysmeter-key__swatch");
+      sw.dataset.level = lvl;
+      item.append(sw, text);
+      levels.append(item);
+    }
+    k.append(cols, levels);
+    return k;
+  };
+
   const paintPop = (): void => {
     if (!pop || !last) return;
     const s = last;
     const d = diskPct(s);
     const ses = s.session;
     const kids: HTMLElement[] = [
+      ...(compact.getClientRects().length ? [meterKey()] : []),
       row("cpu", fmtPct(s.cpu?.pct), sparkline(s.history.cpu),
         s.cpu ? `${s.cpu.cores} cores · load ${s.cpu.load.map((x) => x.toFixed(2)).join(" ")}` : ""),
       row("memory", fmtPct(s.mem?.pct), sparkline(s.history.mem, "sv-spark--mem"),

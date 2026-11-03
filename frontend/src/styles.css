@@ -4051,6 +4051,27 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
   box-shadow: var(--shadow-2);
   animation: frame-in var(--dur-med) var(--ease-out);
 }
+/* Key for the three-bar meter, top of the pop-up (compact layout only). */
+.sysmeter-key {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+}
+.sysmeter-key__cols { display: flex; align-items: flex-end; gap: var(--s-3); }
+.sysmeter-key__item { display: inline-flex; align-items: flex-end; gap: 5px; }
+.sysmeter-key__item .sysmeter__col { width: 5px; height: 18px; }
+.sysmeter-key__name { line-height: 1; }
+.sysmeter-key__levels { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px var(--s-2); }
+.sysmeter-key__level { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.sysmeter-key__swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
+.sysmeter-key__swatch[data-level="warn"] { background: var(--level-warn); }
+.sysmeter-key__swatch[data-level="hot"] { background: var(--critical); }
 .sysmeter-pop__head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-3); }
 .sysmeter-pop__k {
   color: var(--fg-muted);
