@@ -1967,6 +1967,10 @@ a:hover { color: var(--fg); }
   margin-top: var(--s-4);
   justify-content: flex-end;
 }
+/* The sign-out icons have no size of their own; unsized, flex scaled each
+   one to its button (a big arrow on "sign out everywhere"). */
+.modal__row-actions .btn { white-space: nowrap; }
+.modal__row-actions .btn svg { width: 1rem; height: 1rem; flex-shrink: 0; }
 .modal__status {
   flex: 1;
   font-size: var(--t-xs);
@@ -2212,6 +2216,9 @@ body.file-panel-resizing {
 .file-panel__upload {
   cursor: pointer;
 }
+/* "new dir" / "zip" icons have no size of their own (see .modal__row-actions). */
+.file-panel__toolbar .btn { white-space: nowrap; }
+.file-panel__toolbar .btn svg { width: 1rem; height: 1rem; flex-shrink: 0; }
 .file-panel__status {
   color: var(--fg-muted);
   font-size: var(--t-xs);
@@ -3160,7 +3167,9 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
    sibling so its click doesn't bubble into the row's selection logic. */
 .resume-row-wrap {
   display: grid;
-  grid-template-columns: 1fr auto;
+  /* minmax(0, …): a plain 1fr won't shrink below the unwrapped preview,
+     which pushed the row and its export button off a phone screen. */
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: var(--s-2);
   align-items: stretch;
 }
