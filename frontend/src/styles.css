@@ -4576,8 +4576,6 @@ html.window-buttons .file-viewer__bar { padding-left: max(var(--window-buttons-g
 .file-viewer__stage {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
   overflow: hidden;
   touch-action: none;
   cursor: zoom-in;
@@ -4585,9 +4583,14 @@ html.window-buttons .file-viewer__bar { padding-left: max(var(--window-buttons-g
     repeating-conic-gradient(#1b1912 0% 25%, #141209 0% 50%) 50% / 24px 24px;
 }
 .file-viewer__stage--zoomed { cursor: grab; }
+/* The box fills the stage and object-fit scales the picture inside it.
+ * (max-width/max-height: 100% on a centred grid item didn't bind the
+ * height: a picture limited by height ran off the bottom of the screen.) */
 .file-viewer__img {
-  max-width: 100%;
-  max-height: 100%;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   transform-origin: center;
   user-select: none;

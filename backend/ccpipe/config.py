@@ -44,7 +44,7 @@ class FsConfig:
     # Maximum size (megabytes) we'll accept for a single upload. Edit
     # this in ~/.local/state/ccpipe/config.json to change without a
     # restart. Hard floor of 1 MB so the inline editor still works.
-    upload_limit_mb: int = 50
+    upload_limit_mb: int = 500
 
 
 @dataclass

@@ -175,8 +175,10 @@ them. The zip is built as it downloads, so there's no wait for a big
 folder to be packed first.
 
 - **Upload** takes any number of files at once, from the picker or
-  dropped onto the panel. It asks before replacing files that are
-  already there.
+  dropped onto the panel, up to 500 MB each (`fs.upload_limit_mb` in
+  `config.json`). It asks before replacing files that are already
+  there. Files travel in pieces of at most 8 MB, so a proxy's limit on
+  request size (nginx, Cloudflare) doesn't cap them.
 - **Built for bad connections.** Uploads go in pieces, and a piece that
   fails is retried after a growing pause, from however much the server
   says has arrived. A dropped signal costs only the piece in flight, and

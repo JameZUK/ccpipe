@@ -255,7 +255,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   // 403 surfaces in the status line rather than silently failing.
   let currentPath = opts.initialPath ?? "/";
   let currentEntries: FsEntry[] = [];
-  let uploadLimitMb = 50;
+  let uploadLimitMb = 500;
 
   const setStatus = (msg: string, isError = false) => {
     statusEl.textContent = msg;
@@ -283,7 +283,7 @@ export function openFilePanel(parent: HTMLElement, opts: OpenFilePanelOptions = 
   // server's limit and the user sees the failure before transferring
   // megabytes that will be rejected anyway.
   void apiJson<{ upload_limit_mb: number }>("/api/fs/config").then((r) => {
-    uploadLimitMb = r.upload_limit_mb || 50;
+    uploadLimitMb = r.upload_limit_mb || 500;
   }).catch(() => { /* keep default */ });
 
   const reload = async (path?: string) => {
