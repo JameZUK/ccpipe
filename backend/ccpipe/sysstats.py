@@ -158,17 +158,19 @@ def _measure_sessions(panes: dict[str, list[int]]) -> dict[str, dict[str, Any]]:
     now = time.monotonic()
     for gone in set(_pss) - set(table.procs):
         _pss.pop(gone, None)
-    cores = os.cpu_count() or 1
     out: dict[str, dict[str, Any]] = {}
     for name, roots in panes.items():
         pids: set[int] = set()
         for r in roots:
             pids.update(table.subtree(r))
-        cpu_s = table.cpu_of(list(pids))
+        # Finished children too: a build's many short compiler runs would
+        # otherwise mostly fall between two samples and read as idle.
+        cpu_s = table.cpu_of(list(pids), reaped=True)
         prev = _tree_cpu.get(name)
         pct = None
         if prev and now > prev[0]:
-            pct = round(max(0.0, (cpu_s - prev[1]) / (now - prev[0]) * 100.0 / cores), 1)
+            # Like top: 100 = one core busy (a session on 3 cores = 300).
+            pct = round(max(0.0, (cpu_s - prev[1]) / (now - prev[0]) * 100.0), 1)
         _tree_cpu[name] = (now, cpu_s)
         out[name] = {"cpu": pct, "mem": sum(_pss_of(table.procs[p], now) for p in pids)}
     for gone in set(_tree_cpu) - set(panes):

@@ -28,6 +28,11 @@ class Proc:
     comm: str
     start: float          # seconds since boot
     cpu: float            # user + system CPU seconds so far
+    # CPU seconds of its children that have exited and been waited for
+    # (cutime + cstime). A finished child's time moves here, so a subtree's
+    # cpu + reaped keeps counting short-lived processes (compiler runs, a
+    # test suite) that start and end between two samples.
+    reaped: float = 0.0
 
     @cached_property
     def argv(self) -> list[str]:
@@ -65,8 +70,10 @@ class Table:
                 stack.extend(self.kids.get(p, ()))
         return out
 
-    def cpu_of(self, pids: list[int]) -> float:
-        return sum(self.procs[p].cpu for p in pids if p in self.procs)
+    def cpu_of(self, pids: list[int], reaped: bool = False) -> float:
+        """CPU seconds used by pids; reaped=True adds their finished children's."""
+        return sum(self.procs[p].cpu + (self.procs[p].reaped if reaped else 0.0)
+                   for p in pids if p in self.procs)
 
 
 def snapshot() -> Table:
@@ -91,6 +98,7 @@ def snapshot() -> Table:
                 pid=int(d), ppid=int(rest[1]), comm=comm,
                 start=int(rest[19]) / CLK_TCK,
                 cpu=(int(rest[11]) + int(rest[12])) / CLK_TCK,
+                reaped=(int(rest[13]) + int(rest[14])) / CLK_TCK,
             )
         except (ValueError, IndexError):
             continue

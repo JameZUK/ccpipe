@@ -30,7 +30,7 @@ Mobile (PWA, installable to the home screen):
 
 <table>
 <tr>
-<td align="center"><img src="docs/screenshots/Mobile-StartSession.jpg" width="200" alt="The session list on a phone: online status and ping, a summary of running, working and stopped sessions, CPU, memory, disk and Claude plan cards, a filter box, sort and view controls, and session rows showing Claude's task, working or idle state, the auto-stop countdown, memory, disk and when each was opened and created"></td>
+<td align="center"><img src="docs/screenshots/Mobile-StartSession.jpg" width="200" alt="The session list on a phone: online status and ping, a summary of running, working and stopped sessions, CPU, memory, disk and Claude plan cards, a filter box, sort and view controls, and session rows showing Claude's task, working or idle state, CPU, memory and disk with bars, and when each was opened and created"></td>
 <td align="center"><img src="docs/screenshots/Mobile-CreateSession.jpg" width="200" alt="The new session panel: a working directory with a browse button, three earlier Claude conversations from that directory to resume, each with its first prompt, age and a download button, and the session name"></td>
 <td align="center"><img src="docs/screenshots/Mobile-Session.jpg" width="200" alt="A live Claude Code session on a phone: the top bar with the back button, ping, four-bar status meter and toolbar icons, Claude's reply with a diff, the prompt box holding a draft, and the Esc / Tab / / / Ctrl / arrow key row"></td>
 <td align="center"><img src="docs/screenshots/Mobile-Status.jpg" width="200" alt="The status pop-up opened from the four-bar meter: a key naming the cpu, mem, disk and plan bars and their colours, CPU and memory graphs, disk use, the Claude plan's 5-hour, weekly and per-model meters with their reset times and pace ticks, usage credits, and this session's memory, CPU, project size and context fill"></td>
@@ -46,7 +46,7 @@ Mobile (PWA, installable to the home screen):
 Desktop:
 
 <p align="center">
-  <img src="docs/screenshots/Desktop-Sessions.png" width="720" alt="The session list on a desktop, as a detailed table: each running session with its state, Claude's task, directory, last activity, memory and disk bars, last opened and created times, and below it the stopped sessions, each saying whether it resumes its conversation or as a shell">
+  <img src="docs/screenshots/Desktop-Sessions.png" width="720" alt="The session list on a desktop, as a detailed table: each running session with its state, Claude's task, directory, last activity, CPU, memory and disk bars, last opened and created times, and below it the stopped sessions, each saying whether it resumes its conversation or as a shell">
 </p>
 
 <table>
@@ -81,20 +81,23 @@ session shows:
 - its state: **working** while Claude is on a turn, **task running**
   while a background shell task runs, idle otherwise, and **open**
   while a terminal is attached somewhere;
-- its directory, memory, project size, and when it was last active,
-  last opened and first created;
+- its directory, CPU, memory, project size, and when it was last
+  active, last opened and first created. CPU reads like `top`: 100% is
+  one core busy, so a session using three cores shows 300%. It covers
+  Claude and everything it started, including short-lived commands
+  that finished between two readings, averaged over about 15 seconds;
 - a pin if it's sticky, and how many windows it has;
 - **auto-stop in 1h 57m** when it's idle and will be stopped (see below).
 
 Filter by name, task or directory (`/` jumps to the filter box), sort by
-recent activity, last opened, newest, name, memory or disk, and pick a
-compact list, a detailed table, or a grid of live screen previews. Each
-session's `⋮` menu opens, renames, stops or forgets it, or makes it
+recent activity, last opened, newest, name, CPU, memory or disk, and
+pick a compact list, a detailed table, or a grid of live screen previews.
+Each session's `⋮` menu opens, renames, stops or forgets it, or makes it
 sticky. Settings → Display → *status & graphs* turns the system panel and
 the per-session figures off on that device.
 
 <p align="center">
-  <img src="docs/screenshots/Desktop-Sessions-Grid.png" width="720" alt="The session list as a grid: each card shows a live preview of the session's screen above its directory, state, memory, disk and times">
+  <img src="docs/screenshots/Desktop-Sessions-Grid.png" width="720" alt="The session list as a grid: each card shows a live preview of the session's screen above its directory, state, CPU, memory, disk and times">
 </p>
 
 **Sessions are remembered.** A session that isn't running stays on the
@@ -150,8 +153,8 @@ bar:
   amber below 70 %, orange from 70 % and red from 90 %.
 
 Click or tap it for a pop-up with the graphs, the exact figures, and
-this session's own memory (the PSS of its whole process tree), CPU and
-project size. On the compact meter the pop-up starts with a key to the
+this session's own memory (the PSS of its whole process tree), CPU (as
+in `top`, 100% per core) and project size. On the compact meter the pop-up starts with a key to the
 bars. Tapping it on a phone doesn't close the soft keyboard. Each part
 can be switched off per device, and the refresh interval set (2–30 s).
 A part that's switched off stops asking the server too.

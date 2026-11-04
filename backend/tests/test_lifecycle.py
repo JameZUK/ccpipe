@@ -517,3 +517,29 @@ def test_pss_is_reread_at_most_every_pss_s(monkeypatch):
     reused = Proc(pid=4242, ppid=1, comm="bash", start=9.0, cpu=0.0)     # pid reused
     assert sysstats._pss_of(reused, 100.0 + sysstats.PSS_S) == 3000
     assert reads == [4242, 4242, 4242]
+
+
+def test_session_cpu_is_per_core_and_counts_finished_children(monkeypatch):
+    """Like top (100 = one core), and a child that ran and exited between
+    two samples still counts: its time moves to the parent's cutime."""
+    from ccpipe import sysstats
+    clock = [1000.0]
+    tables: list[Table] = []
+
+    def table(shell_cpu, shell_reaped, *kids):
+        t = {1: Proc(pid=1, ppid=0, comm="bash", start=0.0, cpu=shell_cpu, reaped=shell_reaped)}
+        for pid, cpu in kids:
+            t[pid] = Proc(pid=pid, ppid=1, comm="cc1", start=1.0, cpu=cpu)
+        return Table(t, {1: [pid for pid, _ in kids]} if kids else {})
+
+    monkeypatch.setattr(proctree, "snapshot", lambda: tables.pop(0))
+    monkeypatch.setattr(proctree, "pss_bytes", lambda pid: 0)
+    monkeypatch.setattr(sysstats.time, "monotonic", lambda: clock[0])
+    sysstats._tree_cpu.clear()
+    tables.append(table(1.0, 0.0, (2, 4.0)))                  # a compiler has used 4 s
+    assert sysstats._measure_sessions({"s": [1]})["s"]["cpu"] is None   # first pass: no rate
+    clock[0] += 10
+    # It used 6 s more and exited; another ran 9 s and exited: 15 s in 10 s.
+    tables.append(table(1.0, 19.0))
+    assert sysstats._measure_sessions({"s": [1]})["s"]["cpu"] == 150.0  # 1.5 cores, not 150/cores
+    sysstats._tree_cpu.clear()

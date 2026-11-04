@@ -47,7 +47,8 @@ type SessionInfo = {
   /** The active pane's directory and title. */
   cwd?: string | null;
   title?: string | null;
-  /** CPU (% of the machine), memory and project disk use (bytes). */
+  /** CPU (% of one core, like top: 200 = two cores busy), memory and
+   * project disk use (bytes). */
   cpu?: number | null;
   mem?: number | null;
   disk?: number | null;
@@ -81,7 +82,7 @@ type ClaudeSession = {
 };
 
 type View = "compact" | "detailed" | "grid";
-type Sort = "activity" | "opened" | "created" | "name" | "memory" | "disk";
+type Sort = "activity" | "opened" | "created" | "name" | "cpu" | "memory" | "disk";
 type State = "working" | "task" | "open" | "idle" | "stopped";
 
 const VIEWS: ReadonlyArray<{ id: View; label: string; icon: string }> = [
@@ -94,6 +95,7 @@ const SORTS: ReadonlyArray<{ id: Sort; label: string }> = [
   { id: "opened", label: "last opened" },
   { id: "created", label: "newest" },
   { id: "name", label: "name" },
+  { id: "cpu", label: "cpu" },
   { id: "memory", label: "memory" },
   { id: "disk", label: "disk" },
 ];
@@ -102,6 +104,7 @@ const SORTERS: Record<Sort, (a: SessionInfo, b: SessionInfo) => number> = {
   opened: (a, b) => (b.opened ?? 0) - (a.opened ?? 0) || b.activity - a.activity,
   created: (a, b) => b.created - a.created || a.name.localeCompare(b.name),
   name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+  cpu: (a, b) => (b.cpu ?? -1) - (a.cpu ?? -1) || a.name.localeCompare(b.name),
   memory: (a, b) => (b.mem ?? -1) - (a.mem ?? -1) || a.name.localeCompare(b.name),
   disk: (a, b) => (b.disk ?? -1) - (a.disk ?? -1) || a.name.localeCompare(b.name),
 };
@@ -886,12 +889,29 @@ export function renderSessionPicker(
     return el;
   };
 
+  // CPU cell, like top: 100% is one core busy. The bar's full width is one
+  // core, or the busiest shown when that's more, so 300% vs 100% still reads.
+  const cpuCell = (pct: number | null | undefined, max: number): HTMLElement => {
+    const el = h("span", "sess__use sess__use--cpu");
+    if (pct === null || pct === undefined) {
+      el.append(h("span", "sess__use-k", "cpu"), h("span", "sess__use-v", "—"));
+      return el;
+    }
+    const v = pct >= 10 ? `${Math.round(pct)}%` : pct > 0 ? `${pct.toFixed(1)}%` : "0%";
+    el.append(h("span", "sess__use-k", "cpu"), h("span", "sess__use-v", v),
+      bar((pct / Math.max(100, max)) * 100, "sv-bar--rel"));
+    el.title = `${v} CPU over the last ~15 s, like top (100% = one core busy): `
+      + "Claude, its helpers and anything they started";
+    return el;
+  };
+
   const asInfo = (st: StoppedInfo): SessionInfo => ({
     name: st.name, windows: 1, attached: false, created: st.created, sticky: st.sticky,
     activity: st.stopped, opened: st.opened, clients: 0, cwd: st.cwd, title: null,
-    disk: st.disk, mem: null,
+    disk: st.disk, mem: null, cpu: null,
   });
 
+  let maxCpu = 0;
   let maxMem = 0;
   let maxDisk = 0;
 
@@ -959,6 +979,7 @@ export function renderSessionPicker(
     if (s.cwd) cwd.title = s.cwd;
     const dates = h("div", "sess__dates");
     dates.append(dateCell("opened", s.opened || undefined), dateCell("created", s.created || undefined));
+    const cpu = cpuCell(stopped ? undefined : s.cpu, maxCpu);
     const ram = useCell("ram", stopped ? undefined : s.mem, maxMem);
     const disk = useCell("disk", s.disk, maxDisk);
 
@@ -973,7 +994,7 @@ export function renderSessionPicker(
       // Two table columns on a wide screen (display: contents); one short
       // line on a phone.
       const uses = h("div", "sess__uses");
-      uses.append(ram, disk);
+      uses.append(cpu, ram, disk);
       item.append(dot, main, cwd, activity, uses, dates, actions);
     } else {
       const head = h("div", "sess__head");
@@ -993,7 +1014,7 @@ export function renderSessionPicker(
       const foot = h("div", "sess__foot");
       foot.append(cwd, activity);
       const use = h("div", "sess__uses");
-      use.append(ram, disk);
+      use.append(cpu, ram, disk);
       item.append(head, taskEl, preview, foot, use);
       if (stopEl) item.append(stopEl);
       item.append(dates);
@@ -1036,7 +1057,7 @@ export function renderSessionPicker(
       return b;
     };
     thead.append(col("session", "name"), col("directory", null), col("activity", "activity"),
-      col("memory", "memory", "picker__th--use"), col("disk", "disk", "picker__th--use"),
+      col("cpu", "cpu", "picker__th--use"), col("memory", "memory", "picker__th--use"), col("disk", "disk", "picker__th--use"),
       col("last opened", "opened"), col("created", "created"), h("span"));
   };
 
@@ -1109,6 +1130,7 @@ export function renderSessionPicker(
       .map((st) => ({ st, info: asInfo(st) }))
       .filter(({ info }) => matches(info, query))
       .sort((a, b) => SORTERS[sort](a.info, b.info));
+    maxCpu = Math.max(0, ...shown.map((s) => s.cpu ?? 0));
     maxMem = Math.max(0, ...shown.map((s) => s.mem ?? 0));
     maxDisk = Math.max(0, ...shown.map((s) => s.disk ?? 0), ...shownStopped.map(({ st }) => st.disk ?? 0));
 

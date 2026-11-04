@@ -291,9 +291,13 @@ conversation history Claude itself persists.
 
 The landing page shows CPU and memory with ten minutes of history, the
 root filesystem's free space, how much memory the sessions use, and per
-session its memory (PSS of its whole process tree) and its project
-directory's size. Inside a session the same figures sit beside the ping
-(a bar meter on a phone — tap it for details). Per device, Settings
+session its CPU, its memory (PSS of its whole process tree) and its
+project directory's size. Session CPU is read like `top` (100% = one core
+busy) every 15 s over the whole process tree, and includes the time of
+children that have already exited (`cutime`/`cstime`), so a build or test
+run made of many short processes doesn't read as idle. Inside a session
+the same figures sit beside the ping (a bar meter on a phone — tap it for
+details). Per device, Settings
 → Display → *status & graphs* turns each part off and sets the refresh
 interval — switched off, a part stops asking the server too. Session
 memory is re-read at most once a minute per process; project sizes are

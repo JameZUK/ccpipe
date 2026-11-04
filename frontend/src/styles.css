@@ -4228,9 +4228,11 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
 }
 .sess__use-k { color: var(--fg-faint); }
 .sess__use-v { color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.sess__use .sv-bar { flex: 1; min-width: 1.5rem; }
+.sess__use .sv-bar { flex: 1; min-width: 0.75rem; }
 .sess__uses { display: flex; gap: var(--s-4); }
-.sess__uses .sess__use { flex: 1; }
+/* Spare width goes to the bars after each figure's text: cpu, ram and disk
+   fit a 360 px phone's card without cutting the disk figure's bar. */
+.sess__uses .sess__use { flex: 1 1 auto; }
 .picker-shell[data-use="off"] .sess__use,
 .picker-shell[data-use="off"] .sess__uses,
 .picker-shell[data-use="off"] .picker__th--use { display: none; }
@@ -4245,13 +4247,13 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
   border-style: dashed;
 }
 
-/* Detailed table: + memory and disk columns (unless turned off). */
+/* Detailed table: + cpu, memory and disk columns (unless turned off). */
 .picker-shell[data-view="detailed"] { max-width: 1320px; }
 .picker-shell[data-use="on"] .picker__thead,
 .picker-shell[data-use="on"] .sess--detailed {
-  grid-template-columns: 0.6rem minmax(0, 2.2fr) minmax(0, 1.2fr) 6rem 6.5rem 6.5rem 9.5rem 9.5rem 2.25rem;
+  grid-template-columns: 0.6rem minmax(0, 2.2fr) minmax(0, 1.2fr) 6rem 5rem 6.5rem 6.5rem 9.5rem 9.5rem 2.25rem;
 }
-/* Wide: memory and disk are two table columns (the wrapper dissolves). */
+/* Wide: cpu, memory and disk are table columns (the wrapper dissolves). */
 .sess--detailed .sess__uses { display: contents; }
 .sess--detailed .sess__use { flex-direction: column; align-items: stretch; gap: 3px; }
 /* In the column layout flex: 1 would size the bar's HEIGHT to nothing. */
@@ -4266,10 +4268,13 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
       ".     uses  uses  uses"
       ".     dates dates dates";
   }
-  /* One short line — "ram 336 MB ▬   disk 1.2 GB ▬" — not bars across the row. */
-  .sess--detailed > .sess__uses { grid-area: uses; display: flex; gap: var(--s-4); }
-  .sess--detailed .sess__uses .sess__use { flex: none; flex-direction: row; align-items: center; }
-  .sess--detailed .sess__use .sv-bar { width: 2.5rem; min-width: 0; }
+  /* One short line — "cpu 4% ▬   ram 336 MB ▬   disk 1.2 GB ▬" — not bars
+     across the row. On a narrow phone (360 px) the bars give way first. */
+  .sess--detailed > .sess__uses { grid-area: uses; display: flex; gap: var(--s-4); min-width: 0; }
+  .sess--detailed .sess__uses .sess__use { flex: 0 1 auto; flex-direction: row; align-items: center; }
+  /* A definite width: an empty bar's flex-basis alone counts as nothing in
+     the cell's own size, so every bar sat at its minimum. */
+  .sess--detailed .sess__use .sv-bar { flex: 0 1 auto; width: 2.5rem; min-width: 0.75rem; }
   .sess--detailed .sess__use-k { display: inline; }
 }
 

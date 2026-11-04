@@ -78,7 +78,8 @@ class SessionInfo(BaseModel):
     # title to its current task, with a spinner glyph while it works).
     cwd: str | None = None
     title: str | None = None
-    # Resource use (sysstats.py): CPU as % of the whole machine, memory as
+    # Resource use (sysstats.py): CPU as % of one core like top (200 = two
+    # cores busy, averaged over the last ~15 s), memory as
     # bytes (PSS of the session's processes), disk as bytes used by its
     # directory. None until measured.
     cpu: float | None = None

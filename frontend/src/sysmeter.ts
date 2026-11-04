@@ -236,7 +236,7 @@ export function mountSysMeter(session: string): SysMeter {
       grid.append(c);
     };
     cell("memory", fmtBytes(ses?.mem), "its processes: Claude, MCP helpers, anything they started");
-    cell("cpu", ses?.cpu != null ? `${ses.cpu.toFixed(1)}%` : "—", "share of the whole machine");
+    cell("cpu", ses?.cpu != null ? `${ses.cpu.toFixed(1)}%` : "—", "like top: 100% is one core busy");
     cell("project", fmtBytes(ses?.disk), ses?.cwd ?? "");
     const ctx = prefs.plan ? ses?.context : null;
     if (ctx) {
