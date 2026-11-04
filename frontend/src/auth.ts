@@ -350,8 +350,10 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   const prepare = async (): Promise<void> => {
     try { ready = { options: await fetchSignInOptions(), at: Date.now() }; } catch { ready = null; }
   };
-  const prepTimer = setInterval(() => { if (done) clearInterval(prepTimer); else void prepare(); }, 240_000);
-  if (passkeysSupported()) void prepare();
+  if (passkeysSupported()) {
+    void prepare();
+    const prepTimer = setInterval(() => { if (done) clearInterval(prepTimer); else void prepare(); }, 240_000);
+  }
   pkBtn.addEventListener("click", async () => {
     const fresh = ready && Date.now() - ready.at < 240_000 ? ready.options : null;
     ready = null;
@@ -359,8 +361,17 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
     err.textContent = "";
     pkBtn.disabled = true;
     try {
-      const assertion = fresh ? await getAssertion(fresh) : await getAssertion(await fetchSignInOptions());
-      if (assertion) await usePasskey(assertion);
+      if (fresh) {
+        const assertion = await getAssertion(fresh);
+        if (assertion) await usePasskey(assertion);
+      } else {
+        // Nothing fetched yet (a very quick tap): fetching first can cost
+        // the tap its say (Safari), so the prompt may not open. Browsers
+        // that still allow it go ahead; otherwise ask for another tap.
+        const assertion = await getAssertion(await fetchSignInOptions());
+        if (assertion) await usePasskey(assertion);
+        else err.textContent = "tap “Sign in with a passkey” again";
+      }
     } catch (e) {
       err.textContent = (e as Error).message;
     } finally {

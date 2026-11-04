@@ -92,10 +92,12 @@ or a password manager works on your other devices too.
   5 minutes. Sign-in options name no credentials, so the login page
   reveals nothing about the account.
 - **Locked out?** The password always works when none of the chosen ways
-  can be used, for example after removing the last passkey. With shell
-  access to the host, delete the `signin` field (and `passkeys`, to drop
-  them all) from `~/.local/state/ccpipe/credentials` and restart ccpipe:
-  sign-in is back to password (+ code).
+  can be used, for example after removing the last passkey. But if every
+  ticked way needs a passkey and you lose every device holding one, the
+  password doesn't stand in (Settings warns before saving such a
+  choice). With shell access to the host, delete the `signin` field (and
+  `passkeys`, to drop them all) from `~/.local/state/ccpipe/credentials`
+  and restart ccpipe: sign-in is back to password (+ code).
 
 ## Voice setup
 

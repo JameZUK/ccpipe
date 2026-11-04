@@ -462,3 +462,75 @@ def test_signin_needs_and_totp_mapping_units():
     assert not auth.signin_satisfied({"password"}, cred)
     assert auth._signin_for_totp(cred.signin, enrolled=False) == (("passkey", "password"), ("passkey",), ("password",))
     assert auth._signin_for_totp((("password",), ("passkey",)), enrolled=True) == (("code", "password"), ("passkey",))
+
+
+# ─── Review fixes (2026-11-04) ─────────────────────────────────────────────
+
+def test_readding_a_passkey_keeps_the_chosen_ways(client):
+    """Chosen 'passkey + password', lost the only passkey (fallback: the
+    password), then a new one: back to 'passkey + password' — not loosened
+    to 'passkey' or 'password' alone."""
+    login_pw(client)
+    key_id = register(client, Authenticator()).json()["passkeys"][0]["id"]
+    assert set_methods(client, [["passkey", "password"]]).status_code == 200
+    _reset_throttle()
+    client.post("/api/auth/passkey/delete", headers=H, json={"id": key_id, "currentPassword": "letmein"})
+    assert methods_on(client) == {("password",)}            # the fallback
+    _reset_throttle()
+    register(client, Authenticator())
+    assert methods_on(client) == {("passkey", "password")}
+
+
+def test_ticket_dies_with_its_passkey(client):
+    """A passkey step parked for a password no longer counts once that
+    passkey is removed."""
+    login_pw(client)
+    a = Authenticator()
+    key_id = register(client, a).json()["passkeys"][0]["id"]
+    register(client, Authenticator(), name="spare")
+    set_methods(client, [["passkey", "password"]])
+    import ccpipe.main as m
+    thief = TestClient(m.app)
+    _reset_throttle()
+    assert login_passkey(thief, a).json()["need"] == [["password"]]
+    client.post("/api/auth/passkey/delete", headers=H, json={"id": key_id, "currentPassword": "letmein"})
+    _reset_throttle()
+    r = thief.post("/api/auth/login", headers=H, json={"password": "letmein"})
+    assert r.status_code == 401
+
+
+def test_a_flood_of_sign_in_options_cannot_push_out_others(client):
+    """Unauthenticated option requests from one address evict only that
+    address's own challenges — not another client's, nor a registration."""
+    import ccpipe.main as m
+    login_pw(client)
+    r = client.post("/api/auth/passkey/register/options", headers=H, json={"currentPassword": "letmein"})
+    reg_opts = r.json()
+    a = Authenticator()
+    other = TestClient(m.app, client=("10.0.0.2", 5000))
+    login_opts = other.post("/api/auth/passkey/options", headers=H).json()
+    flood = TestClient(m.app, client=("10.0.0.66", 5000))
+    for _ in range(600):
+        flood.post("/api/auth/passkey/options", headers=H)
+    r = client.post("/api/auth/passkey/register", headers=H,
+                    json={"name": "x", "credential": a.register(reg_opts)})
+    assert r.status_code == 200, r.text
+    logout(client)
+    _reset_throttle()
+    r = other.post("/api/auth/login", headers=H, json={"passkey": a.assert_(login_opts)})
+    assert r.json().get("authenticated") is True, r.text
+
+
+def test_page_origin_behind_tls_without_trusted_forwarded_proto(monkeypatch):
+    """Under CCPIPE_BEHIND_TLS=1 a GET's origin is https even when the
+    proxy's X-Forwarded-Proto isn't trusted (request scheme still http)."""
+    from starlette.requests import Request
+    from ccpipe import passkeys
+    scope = {"type": "http", "method": "GET", "path": "/", "scheme": "http", "query_string": b"",
+             "server": ("ccpipe", 8080), "headers": [(b"host", b"ccpipe.example.org")]}
+    monkeypatch.delenv("CCPIPE_BEHIND_TLS", raising=False)
+    assert passkeys.page_origin(Request(scope)) == "http://ccpipe.example.org"
+    monkeypatch.setenv("CCPIPE_BEHIND_TLS", "1")
+    assert passkeys.page_origin(Request(scope)) == "https://ccpipe.example.org"
+    scope["headers"].append((b"origin", b"https://other.example"))
+    assert passkeys.page_origin(Request(scope)) == "https://other.example"

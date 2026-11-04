@@ -212,10 +212,18 @@ report them as findings:
   filesystem reach the operator does (within the jail). Defence is
   the auth gate + TOTP, not the file ACL.
 - **Passkey challenges and tickets are in-memory.** A restart drops
-  them, so a sign-in in progress has to start again. At most 64
-  challenges are outstanding (the oldest is dropped first). An
-  unauthenticated flood of `POST /api/auth/passkey/options` can push out
-  a real user's challenge, but can't get past one.
+  them, so a sign-in in progress has to start again. Sign-in challenges
+  are capped at 8 per client address (512 in all), so a flood of
+  `POST /api/auth/passkey/options` from one address only pushes out its
+  own. Registration challenges are held per signed-in session, apart
+  from them. A flood from many addresses could still push out a real
+  user's sign-in challenge (they tap again), but never get past one. A
+  parked passkey ticket dies when its passkey is removed.
+- **Passkey-only sign-in can lock you out.** If every chosen way needs a
+  passkey and every device holding one is lost, the password doesn't
+  stand in (that's what choosing passkey-only means). Settings warns
+  before saving such a choice. Recovery is from the shell, as for a lost
+  TOTP authenticator (`docs/configuration.md`).
 - **TOTP burn-list is in-memory.** Survives the verify window but not
   a process restart. With uvicorn `--reload` (dev) the same code can
   be replayed; production restarts are rare enough that the trade-off

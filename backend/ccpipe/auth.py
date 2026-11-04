@@ -389,6 +389,18 @@ def _write_credentials_file(path: Path, cred: Credential) -> None:
     os.replace(tmp, path)
 
 
+def _write_cred(new_cred: Credential) -> tuple[bool, str]:
+    """Persist *new_cred* and drop the cached copy — every credential
+    change goes through here (callers hold _CRED_WRITE_LOCK)."""
+    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    try:
+        _write_credentials_file(path, new_cred)
+    except OSError as exc:
+        return False, f"failed to write credentials: {exc}"
+    reset_cached_credential()
+    return True, "updated"
+
+
 def _initial_password_sidecar_for(creds_path: Path) -> Path:
     # Sit next to the credentials file so an operator who overrides
     # CCPIPE_CREDENTIALS_FILE finds both in the same directory.
@@ -755,18 +767,14 @@ def set_totp_secret(secret: str | None) -> tuple[bool, str]:
     just-enrolled user to log back in fresh, and a just-disabled
     user to lose any pending-OTP session they might be carrying."""
     cred = get_credential()
-    new_cred = replace(
+    ok, msg = _write_cred(replace(
         cred,
         version=cred.version + 1,
         totp_secret=secret if secret else None,
         signin=_signin_for_totp(cred.signin, enrolled=bool(secret)),
-    )
-    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    try:
-        _write_credentials_file(path, new_cred)
-    except OSError as exc:
-        return False, f"failed to write credentials: {exc}"
-    reset_cached_credential()
+    ))
+    if not ok:
+        return ok, msg
     # Drop burn-list entries from the previous secret — they'd never
     # collide in practice (different secret → different code digits at
     # the same slot) but they'd sit in memory for 120s after every
@@ -822,19 +830,12 @@ def update_credential(*, current_password: str,
         return False, "username must be non-empty"
 
     # replace(): passkeys and sign-in methods carry over unchanged.
-    new_cred = replace(
+    return _write_cred(replace(
         cred,
         username=new_user,
         password_hash=new_hash,
         version=cred.version + 1,
-    )
-    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    try:
-        _write_credentials_file(path, new_cred)
-    except OSError as exc:
-        return False, f"failed to write credentials: {exc}"
-    reset_cached_credential()
-    return True, "updated"
+    ))
 
 
 # ─── Async wrappers (H3 — argon2 off the event loop) ───────────────────────
@@ -1012,23 +1013,7 @@ def bump_credential_version() -> tuple[bool, str]:
     close_stale_ws_sockets, every live socket) without changing the
     password or TOTP secret."""
     cred = get_credential()
-    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    try:
-        _write_credentials_file(path, replace(cred, version=cred.version + 1))
-    except OSError as exc:
-        return False, f"failed to write credentials: {exc}"
-    reset_cached_credential()
-    return True, "updated"
-
-
-def _write_cred(new_cred: Credential) -> tuple[bool, str]:
-    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
-    try:
-        _write_credentials_file(path, new_cred)
-    except OSError as exc:
-        return False, f"failed to write credentials: {exc}"
-    reset_cached_credential()
-    return True, "updated"
+    return _write_cred(replace(cred, version=cred.version + 1))
 
 
 # Passkey and sign-in-method changes keep the credential version: sessions
@@ -1051,16 +1036,18 @@ def webauthn_user_id() -> str:
 
 @_cred_write_serialised
 def add_passkey(key: Passkey) -> tuple[bool, str]:
-    """Save a new passkey. The first one also turns on "passkey alone" as
-    a way to sign in (on top of what was allowed), so it works straight
-    away; Settings can change that."""
+    """Save a new passkey. When no passkey way to sign in was ever chosen,
+    the first passkey turns on "passkey alone" (on top of what was
+    allowed), so it works straight away. Passkey ways chosen earlier —
+    idle while there were no passkeys — come back exactly as they were,
+    never loosened."""
     cred = get_credential()
     if any(k.id == key.id for k in cred.passkeys):
         return False, "that passkey is already registered"
     if len(cred.passkeys) >= 32:
         return False, "too many passkeys (32)"
     signin = cred.signin
-    if not cred.passkeys:
+    if not cred.passkeys and not any(PASSKEY in c for c in (signin or ())):
         current = list(effective_signin(cred))
         if (PASSKEY,) not in current:
             current.insert(0, (PASSKEY,))

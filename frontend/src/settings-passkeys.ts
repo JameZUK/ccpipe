@@ -170,16 +170,32 @@ export function buildPasskeySection(): HTMLElement {
     .map((c) => (c.dataset.factors ?? "").split(",") as Factor[]);
 
   const askToSave = (): void => {
-    if (!chosen().length) {
-      setStatus("tick at least one way to sign in", true);
+    const picked = chosen();
+    if (!picked.length) {
+      // Mid-edit (unticking the old way before ticking the new one): no
+      // Save until something is ticked. Nothing changes on the server, and
+      // reopening Settings shows what's saved.
       closeForm(methodsForm);
+      setStatus("tick at least one way to sign in — not saved", true);
       return;
     }
     setStatus("");
+    // Only passkeys will do: losing every device that holds one then
+    // needs the shell (docs/configuration.md → Passkeys → Locked out?).
+    const onlyPasskeys = picked.every((f) => f.includes("passkey"));
     reauth(methodsForm, {
+      lead: onlyPasskeys
+        ? el("div", "pk-form__lead pk-form__warn",
+          "Every way ticked needs a passkey. Keep a second passkey on another device: "
+          + "if you lose them all, getting back in needs shell access to this machine.")
+        : undefined,
       go: "Save",
       run: async (pw, code) => {
-        state = await setSigninMethods(chosen(), pw, code);
+        try {
+          state = await setSigninMethods(chosen(), pw, code);
+        } catch (e) {
+          throw new Error(`${(e as Error).message} — not saved`);
+        }
         closeForm(methodsForm);
         render();
         setStatus("ways to sign in saved");

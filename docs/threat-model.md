@@ -88,7 +88,8 @@ rate-limit bucket slot regardless of body (see `auth.py`).
 
 `POST /api/auth/passkey/options` is the other pre-auth endpoint that
 creates state: one 64-byte challenge per call, kept server-side for
-5 minutes, with at most 64 outstanding (the oldest is evicted). It
+5 minutes, at most 8 outstanding per client address and 512 in all (the
+oldest is evicted). It
 reveals nothing (no credential list), and a challenge only counts once
 an assertion signed by a registered passkey comes back for it.
 

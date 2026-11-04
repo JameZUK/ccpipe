@@ -2177,6 +2177,7 @@ a:hover { color: var(--fg); }
   color: var(--fg-muted);
 }
 .pk-form__name { flex: 1; min-width: 10rem; }
+.pk-form__warn { color: var(--accent-soft); }
 .pk-subtitle {
   margin: var(--s-4) 0 var(--s-2);
   font-size: var(--t-xs);

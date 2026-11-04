@@ -271,10 +271,15 @@ async def auth_login(request: Request) -> AuthStatus:
     verified: set[str] = set()
     failed = False
     # A passkey proven in an earlier step of this sign-in (one use).
-    verified |= passkeys.redeem(request.session.pop(PENDING_KEY, None))
+    held, key_id = passkeys.redeem(request.session.pop(PENDING_KEY, None))
+    verified |= held
     if body.passkey is not None:
-        if passkeys.verify_login(request, body.passkey):
+        # Off the loop: it writes the credentials file (counter + time)
+        # under the lock a password change holds through argon2.
+        proven = await asyncio.to_thread(passkeys.verify_login, request, body.passkey)
+        if proven:
             verified.add(PASSKEY)
+            key_id = proven
         else:
             failed = True
     cred = get_credential()
@@ -305,7 +310,7 @@ async def auth_login(request: Request) -> AuthStatus:
             otp_enrolled=bool(cred.totp_secret),
         )
     if not failed and PASSKEY in verified:
-        request.session[PENDING_KEY] = passkeys.hold(verified)
+        request.session[PENDING_KEY] = passkeys.hold(verified, key_id)
         return AuthStatus(required=True, authenticated=False,
                           need=signin_needs(verified, cred))
     await asyncio.sleep(1.0)
@@ -379,12 +384,8 @@ async def _reverify(request: Request, body: Reauth, endpoint: str) -> None:
 
 def _signin_state(request: Request) -> dict:
     cred = get_credential()
-    # A GET carries no Origin header: judge the page's own address, as
-    # the browser will see it (scheme from the proxy's X-Forwarded-Proto).
-    origin = request.headers.get("origin") \
-        or f"{request.url.scheme}://{request.headers.get('host', '')}"
     try:
-        here: str | None = passkeys.relying_party(request, origin)[0]
+        here: str | None = passkeys.relying_party(request, passkeys.page_origin(request))[0]
     except passkeys.PasskeyError:
         here = None
     on = set(effective_signin(cred))
@@ -409,7 +410,7 @@ async def signin_state(request: Request) -> dict:
 @router.post("/api/auth/signin", dependencies=[AuthDep, CsrfDep])
 async def signin_update(body: SigninBody, request: Request) -> dict:
     await _reverify(request, body, "signin")
-    ok, msg = set_signin(body.methods)
+    ok, msg = await asyncio.to_thread(set_signin, body.methods)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return _signin_state(request)
@@ -429,7 +430,9 @@ async def passkey_login_options(request: Request) -> dict:
 async def passkey_register_options(body: Reauth, request: Request) -> dict:
     await _reverify(request, body, "passkey_register")
     try:
-        return passkeys.registration_options(request, request.session.get("sid"))
+        # Off the loop: the first one saves the account's WebAuthn user id.
+        return await asyncio.to_thread(
+            passkeys.registration_options, request, request.session.get("sid"))
     except passkeys.PasskeyError as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
 
@@ -443,7 +446,7 @@ async def passkey_register(body: PasskeyRegisterBody, request: Request) -> dict:
             request, request.session.get("sid"), body.credential, body.name)
     except passkeys.PasskeyError as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
-    ok, msg = add_passkey(key)
+    ok, msg = await asyncio.to_thread(add_passkey, key)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     log.info("passkey %r registered for %s", key.name, key.rp_id)
@@ -453,7 +456,7 @@ async def passkey_register(body: PasskeyRegisterBody, request: Request) -> dict:
 @router.post("/api/auth/passkey/delete", dependencies=[AuthDep, CsrfDep])
 async def passkey_delete(body: PasskeyDeleteBody, request: Request) -> dict:
     await _reverify(request, body, "passkey_delete")
-    ok, msg = remove_passkey(body.id)
+    ok, msg = await asyncio.to_thread(remove_passkey, body.id)
     if not ok:
         raise HTTPException(status_code=404, detail=msg)
     return _signin_state(request)

@@ -672,7 +672,8 @@ proxy host.
   *passkey + password*, *passkey + code*, or all three. The device's
   biometric or PIN is required every time. The password stays as a
   fallback whenever no chosen way can be used, so removing your last
-  passkey can't lock you out. See
+  passkey can't lock you out (choosing passkey-only and then losing every
+  passkey device can; Settings warns). See
   [docs/configuration.md](docs/configuration.md#passkeys).
 - **Session hardening.** Signed session cookie with `Secure` +
   `__Host-` prefix under `CCPIPE_BEHIND_TLS=1`, expiring after 30 days
