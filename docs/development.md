@@ -1,5 +1,32 @@
 # Development
 
+## Architecture
+
+ccpipe runs as a `systemd --user` service on the host. There's no
+Docker: the backend is tightly coupled to host state (tmux, `~/.claude`,
+project files, PulseAudio, the mic pipe), and containerising it created
+more friction than it solved.
+
+```
+[Browser] ──WSS── [nginx] ── [uvicorn (user service)]
+                                   │
+                                   ├── tmux client (talks to user's tmux server)
+                                   ├── /tmp/ccpipe_mic.pipe (Pulse pipe-source)
+                                   ├── watches ~/.claude/projects/*.jsonl → Kokoro
+                                   ├── reads ~/.claude/sessions/<pid>.json (Claude's busy / idle)
+                                   └── reads /proc (system + per-session CPU, memory)
+```
+
+The terminal stack is unchanged: tmux owns the session, xterm.js renders
+it, and the unmodified `claude` CLI does the API work. ccpipe is the
+bridge in the middle.
+
+State it keeps (`~/.local/state/ccpipe`): credentials and passkeys,
+settings, the record of every session (directory, Claude conversation,
+times), sticky sessions, prompt-box drafts, saved prompts and tile
+layouts. See
+[Configuration → Where state lives](configuration.md#where-state-lives).
+
 ## Running without the systemd unit
 
 ```bash

@@ -34,7 +34,7 @@ WorkingDirectory=@REPO_ROOT@/backend
 #         --timeout-keep-alive 5 --limit-concurrency 200 \
 #         --proxy-headers --forwarded-allow-ips=<nginx-LAN-ip>
 #     EOF
-# See README §"Reverse proxy".
+# See docs/deployment.md (Step 2: wire the ccpipe TLS drop-in).
 #
 # Slowloris hardening (pass-3 review #19): cap simultaneous in-flight
 # requests so a single source can't saturate the worker by holding

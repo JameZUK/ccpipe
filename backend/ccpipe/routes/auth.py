@@ -221,7 +221,7 @@ async def auth_login(request: Request) -> AuthStatus:
     # peer. With `--proxy-headers --forwarded-allow-ips=<nginx-ip>` it's
     # the real client; without those flags it's the immediate TCP peer
     # (usually nginx itself), which collapses the per-IP throttle into
-    # a global one. See README §"Reverse proxy" for the recommended unit.
+    # a global one. See docs/deployment.md for the recommended drop-in.
     # ── Rate-limit BEFORE body parsing.
     # Pass-3 review finding #18: the previous code put the throttle
     # check after FastAPI's automatic ``body: LoginBody`` parsing, so

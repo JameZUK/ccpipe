@@ -89,11 +89,25 @@ deliverables that landed in this repository as a result:
   tripping the limiter — don't enable that flag against production
   unless you're OK locking your own IP out for a minute.
 
+## Claude subscription terms
+
+- **Pure PTY relay.** Subscription OAuth (Pro/Max) is fine for personal
+  use **only** because the unmodified `claude` binary makes the API
+  calls. ccpipe never originates a request to `api.anthropic.com`. See
+  <https://code.claude.com/docs/en/legal-and-compliance>.
+- **Plan usage without the token.** ccpipe never reads
+  `~/.claude/.credentials.json` or calls Anthropic's usage endpoint. The
+  plan figures come from `claude` itself: what it gives a status line,
+  and its own `/usage` command run headless, which makes no model call.
+
 ## Hardening summary
 
 What the current code does, so a report can say which property it
 breaks. Details live in the linked code and docs.
 
+- **Passwords.** Auth is always on. Passwords are argon2id-hashed on
+  disk; the generated first password exists in plaintext only in the
+  read-once `initial_password.txt` sidecar (`0400`).
 - **Login.** One `POST /api/auth/login` carrying any of username,
   password, code and a passkey assertion. Each factor given is
   verified, and the login succeeds when the verified ones cover an
@@ -132,6 +146,37 @@ breaks. Details live in the linked code and docs.
   device without changing the password; changing the password or
   enrolling/disabling TOTP does the same. Open WebSockets are
   re-checked and closed when their session is no longer valid.
+- **WebSockets and CSRF.** Terminal WebSockets need an allowed Origin
+  (`CCPIPE_ALLOWED_ORIGINS`, or the Host on plain-HTTP installs) and a
+  valid session; state-changing requests need the `X-Requested-By:
+  ccpipe` header.
+- **File panel scope.** `/api/fs/*` is jailed to `CCPIPE_FS_ROOT`
+  (default `$HOME`). The jail enforces `Path.is_relative_to(root)` after
+  symlink resolution, refuses non-regular files, and uses `O_NOFOLLOW` on
+  temp-file opens. The deny-list covers ccpipe's own state and Claude
+  Code's (see *Known limitations*). Folder downloads (.zip) walk the
+  folder without following symlinks and leave out anything on the
+  deny-list, so zipping `$HOME` can't include `~/.claude`.
+- **Files shown in the browser.** The viewer gets files from
+  `/api/fs/inline`, which serves only a fixed list of image, SVG, PDF,
+  audio and video types (by extension). Everything but PDF comes with
+  `Content-Security-Policy: sandbox`, so a file opened in its own tab (an
+  SVG with a script in it, say) gets no origin and runs nothing. PDFs
+  can't be sandboxed (browsers won't render them), but they render in the
+  browser's PDF viewer, not as a page of ccpipe, and only ccpipe itself
+  may frame one. Text is always fetched as data and shown as text. The
+  Markdown document viewer (`/view`) sanitises what it renders with
+  DOMPurify and is served with its own tighter Content-Security-Policy,
+  separate from the terminal app's.
+- **Resumable uploads** write to a hidden `.ccpipe-….tmp` part-file
+  beside the target, checked against the jail at the start and again at
+  the finish, and renamed into place. Abandoned part-files are removed
+  after a day, even across a restart.
+- **Session records.** So stopped sessions can resume, ccpipe keeps each
+  session's directory and Claude conversation id in `session_meta.json`
+  (`0600`, state directory) until you forget it. Resuming runs only
+  `claude --resume <id>` or `claude --continue` (or a shell), in a
+  directory inside `CCPIPE_FS_ROOT`.
 - **tmux.** ccpipe addresses sessions and panes with exact-match
   targets (`=name`), so a name can't prefix-match a different session,
   and session names are restricted to `[A-Za-z0-9_-]`. Processes ccpipe
@@ -224,6 +269,10 @@ report them as findings:
   stand in (that's what choosing passkey-only means). Settings warns
   before saving such a choice. Recovery is from the shell, as for a lost
   TOTP authenticator (`docs/configuration.md`).
+- **TTS reads your Claude transcripts.** Only run ccpipe on a host where
+  you trust everyone with access to those files.
+- **Drafts and saved prompts are stored in plain text** (`0600`, in the
+  state directory) so they can follow you between devices.
 - **TOTP burn-list is in-memory.** Survives the verify window but not
   a process restart. With uvicorn `--reload` (dev) the same code can
   be replayed; production restarts are rare enough that the trade-off
