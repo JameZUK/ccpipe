@@ -106,7 +106,17 @@ frontend/
     share.ts           PWA share-target capture + review helpers
     inline-prompt.ts   In-app prompt/confirm dialogs (PWAs suppress the
                        native ones)
-    file-panel.ts      Adaptive file browser + inline editor
+    file-panel.ts      Adaptive file browser + the editor (its footer:
+                       indent style, tab width, whitespace, wrap)
+    file-viewer.ts     Full-screen viewer: text, Markdown, images, PDF,
+                       audio, video
+    code-view.ts       CodeMirror 6 for the viewer (read-only) and the
+                       editor: language by name/#!, theme, indentation
+                       detection, CRLF + BOM kept; loaded on demand,
+                       each language its own chunk
+    hljs-extra.ts      highlight.js languages beyond "common" (PowerShell,
+                       batch, …) for Markdown code blocks; the rarer
+                       ones in hljs-extra-more.ts, for /view only
     viewer.ts          /view page: markdown-it + highlight.js + KaTeX +
                        Mermaid, DOMPurify-sanitised, live file reload
     docs-drawer.ts     Viewer's document drawer: search, tree, recents

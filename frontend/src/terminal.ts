@@ -1006,6 +1006,10 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
 
   const onTermKeyForSearch = (e: KeyboardEvent) => {
     if (opts.isActive && !opts.isActive()) return;
+    // Taken already (the file viewer's or editor's own find), or pressed
+    // in the viewer or editor over the terminal: not the terminal's.
+    if (e.defaultPrevented) return;
+    if ((e.target as Element | null)?.closest?.(".file-viewer, .file-editor, .modal-overlay")) return;
     const cmdLike = e.ctrlKey || e.metaKey;
     if (cmdLike && e.key.toLowerCase() === "f") {
       e.preventDefault();

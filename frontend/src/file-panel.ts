@@ -14,13 +14,18 @@
 // they're operating on.
 //
 // Hits the /api/fs/* endpoints for list + read + write + upload +
-// download + rename + delete + mkdir. Inline editor is a plain
-// <textarea> for v1 (UTF-8, ≤1 MB enforced server-side).
+// download + rename + delete + mkdir. The editor is CodeMirror
+// (code-view.ts, loaded when it opens): colours by language, Tab indents
+// the way the file does (UTF-8, ≤1 MB enforced server-side).
 
 import { apiJson } from "./api";
 import { h } from "./dom";
 import { fileKind, fmtSize, kindIcon } from "./file-kinds";
-import { CLOSE_SVG, EYE_SVG, FOLDER_SVG, ICON_FOLDER, ICON_REFRESH, ICON_UPLOAD, ICON_X, KEBAB_SVG, iconNode } from "./icons";
+import type { CodeView, IndentStyle } from "./code-view";
+import {
+  CLOSE_SVG, EYE_SVG, FOLDER_SVG, ICON_FOLDER, ICON_INDENT, ICON_OUTDENT, ICON_REFRESH, ICON_UPLOAD,
+  ICON_WHITESPACE, ICON_WRAP, ICON_X, KEBAB_SVG, iconNode,
+} from "./icons";
 import { inlineChoice, inlinePrompt } from "./inline-prompt";
 import { clearFinished, downloadFile, onTransfers, uploadFiles, type Transfer } from "./transfers";
 import { mdViewUrl } from "./view-url";
@@ -817,10 +822,10 @@ function openEditor(path: string, root?: string, onClosed?: () => void): void {
     head.append(title, maxBtn, closeBtn);
   }
 
-  const textarea = document.createElement("textarea");
-  textarea.className = "file-editor__area";
-  textarea.spellcheck = false;
-  textarea.autocapitalize = "none";
+  // The code editor (CodeMirror, from code-view.ts) goes in here once
+  // the file and the editor's chunk have loaded.
+  const area = h("div", "file-editor__area");
+  area.append(h("div", "file-editor__loading", "loading…"));
 
   const foot = document.createElement("div");
   foot.className = "file-editor__foot";
@@ -830,7 +835,11 @@ function openEditor(path: string, root?: string, onClosed?: () => void): void {
   saveBtn.type = "button";
   saveBtn.className = "btn btn--primary";
   saveBtn.textContent = "save";
-  foot.append(status, saveBtn);
+  saveBtn.disabled = true;
+  // Indentation and display controls, filled in once the file is in.
+  const tools = h("div", "file-editor__tools");
+  tools.hidden = true;
+  foot.append(status, tools, saveBtn);
 
   // Three drag affordances: a 24px corner handle (both axes), and
   // separate right-edge / bottom-edge strips for width-only and
@@ -848,7 +857,7 @@ function openEditor(path: string, root?: string, onClosed?: () => void): void {
   const cornerHandle = mkHandle("file-editor__handle--corner",  "Resize editor");
   const rightHandle  = mkHandle("file-editor__handle--right",   "Resize width");
   const bottomHandle = mkHandle("file-editor__handle--bottom",  "Resize height");
-  sheet.append(head, textarea, foot, rightHandle, bottomHandle, cornerHandle);
+  sheet.append(head, area, foot, rightHandle, bottomHandle, cornerHandle);
   overlay.append(sheet);
   document.body.append(overlay);
 
@@ -920,10 +929,10 @@ function openEditor(path: string, root?: string, onClosed?: () => void): void {
   ro.observe(sheet);
 
   // Baseline for the dirty check — the content as loaded (and as last
-  // saved). textarea.value diverging from this means unsaved edits.
-  let savedContent: string | null = null;
-  const isDirty = (): boolean =>
-    savedContent !== null && textarea.value !== savedContent;
+  // saved). The editor's text diverging from this means unsaved edits.
+  let editor: CodeView | null = null;
+  let closed = false;
+  const isDirty = (): boolean => editor !== null && editor.modified();
 
   const dismiss = (force = false): void => {
     // Guard against losing unsaved edits on close / Escape / backdrop.
@@ -931,34 +940,64 @@ function openEditor(path: string, root?: string, onClosed?: () => void): void {
         && !window.confirm("Discard unsaved changes?")) {
       return;
     }
+    closed = true;
     try { ro.disconnect(); } catch {}
     document.removeEventListener("keydown", onKey);
+    editor?.destroy();
     overlay.remove();
     onClosed?.();
   };
 
-  // Load
-  void apiJson<{ content: string; size: number }>(
-    `/api/fs/read?path=${encodeURIComponent(path)}`,
-  ).then((data) => {
-    textarea.value = data.content;
-    savedContent = data.content;
-    setStatus(`${fmtSize(data.size)} loaded`);
-    textarea.focus();
+  // Load the file and the editor together.
+  let loadedNote = "";
+  void Promise.all([
+    apiJson<{ content: string; size: number }>(`/api/fs/read?path=${encodeURIComponent(path)}`),
+    import("./code-view"),
+  ]).then(([data, cm]) => {
+    if (closed) return;
+    area.replaceChildren();
+    // "edited" while it differs from the file (undoing back clears it),
+    // checked a moment after typing stops.
+    let dirtyShown = false;
+    let dirtyTimer: number | undefined;
+    editor = cm.createCodeView({
+      parent: area, text: data.content, name: path,
+      onChange: () => {
+        window.clearTimeout(dirtyTimer);
+        dirtyTimer = window.setTimeout(() => {
+          const now = editor?.modified() ?? false;
+          if (now !== dirtyShown) { dirtyShown = now; setStatus(now ? "edited" : loadedNote); }
+        }, 200);
+      },
+    });
+    saveBtn.disabled = false;
+    const ed = editor;
+    loadedNote = [fmtSize(data.size), ed.lineEnding === "CRLF" ? "CRLF" : "", ed.bom ? "BOM" : ""]
+      .filter(Boolean).join(" · ");
+    setStatus(loadedNote);
+    void ed.language.then((lang) => {
+      if (lang && !dirtyShown) setStatus(`${lang} · ${loadedNote}`);
+      if (lang) loadedNote = `${lang} · ${loadedNote}`;
+    });
+    buildEditorTools(tools, ed, cm);
+    tools.hidden = false;
+    ed.focus();
   }).catch((err) => {
+    area.replaceChildren();
     setStatus(`load failed: ${(err as Error).message}`, true);
   });
 
   saveBtn.addEventListener("click", async () => {
+    if (!editor) return;
     setStatus("saving…");
     saveBtn.disabled = true;
     try {
-      const justSaved = textarea.value;
+      const justSaved = editor.text();
       await apiJson("/api/fs/write", {
         method: "POST",
         body: JSON.stringify({ path, content: justSaved }),
       });
-      savedContent = justSaved;        // no longer dirty
+      editor.markSaved();              // no longer dirty
       setStatus("saved");
       setTimeout(() => dismiss(true), 700);
     } catch (err) {
@@ -970,6 +1009,8 @@ function openEditor(path: string, root?: string, onClosed?: () => void): void {
 
   closeBtn.addEventListener("click", () => dismiss());
   function onKey(e: KeyboardEvent): void {
+    // The editor's own Escape (closing its search bar) comes first.
+    if (e.defaultPrevented) return;
     if (e.key === "Escape") {
       e.preventDefault();
       // dismiss() removes this listener itself once it actually closes;
@@ -982,4 +1023,112 @@ function openEditor(path: string, root?: string, onClosed?: () => void): void {
     }
   }
   document.addEventListener("keydown", onKey);
+}
+
+type CodeViewModule = typeof import("./code-view");
+
+/** A footer button that doesn't take focus (or the on-screen keyboard)
+ * from the editor. A touch acts on pointerup, since cancelling
+ * touchstart (what keeps the focus) also cancels its click. */
+function toolButton(svg: string, label: string, act: () => void, cls = ""): HTMLButtonElement {
+  const b = h("button", `btn btn--ghost btn--icon file-editor__tool ${cls}`.trim());
+  b.type = "button";
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  b.append(iconNode(svg));
+  let touchedAt = 0;
+  b.addEventListener("mousedown", (e) => e.preventDefault());
+  b.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+  b.addEventListener("pointerup", (e) => {
+    if (e.pointerType === "mouse") return;
+    touchedAt = performance.now();
+    act();
+  });
+  b.addEventListener("click", () => { if (performance.now() - touchedAt > 600) act(); });
+  return b;
+}
+
+function toolSelect(label: string, options: [string, string][], value: string): HTMLSelectElement {
+  const s = h("select", "select file-editor__select");
+  s.title = label;
+  s.setAttribute("aria-label", label);
+  for (const [v, text] of options) {
+    const o = h("option", "", text);
+    o.value = v;
+    s.append(o);
+  }
+  s.value = value;
+  return s;
+}
+
+/** The editor footer's controls: what Tab inserts (and re-indenting the
+ * file to match), how wide a tab is, showing tabs and spaces, wrapping,
+ * and on a touch screen, whose keyboard has no Tab key, indent and
+ * outdent buttons. */
+function buildEditorTools(box: HTMLElement, ed: CodeView, cm: CodeViewModule): void {
+  const prefs = cm.loadPrefs();
+  const outBtn = toolButton(ICON_OUTDENT, "Outdent (Shift+Tab)", () => ed.indentLess(), "file-editor__tool--touch");
+  const inBtn = toolButton(ICON_INDENT, "Indent (Tab)", () => ed.indentMore(), "file-editor__tool--touch");
+
+  const key = (s: IndentStyle): string => (s.tabs ? "tabs" : `s${s.size}`);
+  const sizes = [...cm.INDENT_SIZES];
+  if (!ed.indent.tabs && !sizes.includes(ed.indent.size)) sizes.push(ed.indent.size);
+  const indentSel = toolSelect("What Tab inserts", [
+    ["tabs", "tabs"], ...sizes.sort((a, b) => a - b).map((n): [string, string] => [`s${n}`, `${n} spaces`]),
+  ], key(ed.indent));
+  const parse = (v: string): IndentStyle => (v === "tabs" ? { tabs: true, size: 4 } : { tabs: false, size: Number(v.slice(1)) });
+
+  // Shown when the file is indented differently from what Tab inserts.
+  const convertBtn = h("button", "btn btn--ghost file-editor__convert");
+  convertBtn.type = "button";
+  let fileIndent = ed.detected;
+  const showConvert = (): void => {
+    const want = ed.indent;
+    convertBtn.hidden = !fileIndent || cm.sameIndent(fileIndent, want);
+    convertBtn.textContent = `convert to ${cm.indentLabel(want)}`;
+    convertBtn.title = fileIndent
+      ? `Re-indent the whole file with ${cm.indentLabel(want)} (it uses ${cm.indentLabel(fileIndent)})`
+      : "";
+  };
+  indentSel.addEventListener("change", () => {
+    const s = parse(indentSel.value);
+    ed.setIndent(s);
+    // A file with no indentation of its own: the choice is the default
+    // for the next such file.
+    if (!ed.detected) cm.savePrefs({ indent: s });
+    showConvert();
+  });
+  convertBtn.addEventListener("click", () => {
+    ed.reindent(ed.indent);
+    fileIndent = cm.detectIndent(ed.view.state.sliceDoc()) ?? ed.indent;
+    showConvert();
+    ed.focus();
+  });
+
+  const tabSel = toolSelect("How wide a tab is",
+    cm.TAB_WIDTHS.map((n): [string, string] => [String(n), `tab width ${n}`]), String(prefs.tabWidth));
+  tabSel.addEventListener("change", () => {
+    const n = Number(tabSel.value);
+    ed.setTabWidth(n);
+    cm.savePrefs({ tabWidth: n });
+  });
+
+  let whitespace = prefs.whitespace, wrap = prefs.wrap;
+  const wsBtn = toolButton(ICON_WHITESPACE, "Show tabs and spaces", () => {
+    whitespace = !whitespace;
+    ed.setWhitespace(whitespace);
+    cm.savePrefs({ whitespace });
+    wsBtn.setAttribute("aria-pressed", String(whitespace));
+  });
+  wsBtn.setAttribute("aria-pressed", String(whitespace));
+  const wrapBtn = toolButton(ICON_WRAP, "Wrap long lines", () => {
+    wrap = !wrap;
+    ed.setWrap(wrap);
+    cm.savePrefs({ wrap });
+    wrapBtn.setAttribute("aria-pressed", String(wrap));
+  });
+  wrapBtn.setAttribute("aria-pressed", String(wrap));
+
+  showConvert();
+  box.replaceChildren(outBtn, inBtn, indentSel, convertBtn, tabSel, wsBtn, wrapBtn);
 }

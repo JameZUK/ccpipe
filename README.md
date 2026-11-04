@@ -225,8 +225,14 @@ folder to be packed first.
 **File viewer.** Tapping a file opens it read-only, full screen; **✎**
 switches to the editor, and you're back in the viewer when you close it.
 
-- **Text and code:** syntax-highlighted, with line numbers and a wrap
-  toggle.
+- **Text and code:** coloured by language, with line numbers, a wrap
+  toggle, and **¶** to show tabs and spaces. About 150 languages are
+  known by the file's name, or by the `#!` line of a script with no
+  extension. They include PowerShell, batch files, JavaScript and
+  TypeScript, Python, Rust, C and C++, C#, Go, Java, shell, SQL, HTML,
+  CSS, YAML, TOML, Dockerfiles and Makefiles. The bar shows the
+  language, how the file is indented (tabs or *n* spaces), and CRLF line
+  endings. Ctrl+F searches the whole file.
 - **Markdown:** rendered (the document viewer below), with a switch to
   the source.
 - **Images:** fitted to the screen. Pinch, scroll or double-tap to zoom,
@@ -238,8 +244,27 @@ switches to the editor, and you're back in the viewer when you close it.
 folder's files. **⤓** downloads the file, and **↗** opens it in a tab of
 its own.
 
+**Editor.** **✎** opens the file for editing, with the same colours.
+Tab and Shift+Tab indent and outdent the line or the selected lines.
+Ctrl+F finds and replaces, and Ctrl+S saves.
+
+- **Tabs or spaces:** it indents the way the file already does, with
+  tabs or the file's own number of spaces. The footer shows which, and
+  you can change it there. **Convert** then re-indents the whole file to
+  match, as one undo step.
+- The footer also sets how wide a tab is (2, 3, 4 or 8), and has the
+  show-whitespace and wrap switches. These are remembered on the
+  device; on a phone, long lines wrap unless you turn it off.
+- Line endings (LF or CRLF) and a UTF-8 byte-order mark are kept as the
+  file had them.
+- On a touch screen, whose keyboard has no Tab key, the footer has
+  indent and outdent buttons.
+
 <p align="center">
-  <img src="docs/screenshots/Desktop-File-Viewer.png" width="640" alt="The file viewer showing a TypeScript file: syntax highlighting, line numbers, the file's size and line count in the bar, and buttons for previous and next file, wrap, edit, download and close">
+  <img src="docs/screenshots/Desktop-File-Viewer.png" width="640" alt="The file viewer showing a PowerShell script coloured by language, with line numbers; the bar reads 40 lines, PowerShell, 4 spaces, CRLF, and has buttons for wrap, show whitespace, edit, download and close">
+</p>
+<p align="center">
+  <img src="docs/screenshots/Desktop-File-Editor.png" width="640" alt="The editor on a C file indented with tabs, shown as arrows with spaces as dots; the footer has the indent choice set to tabs, the tab width set to 4, the show-whitespace and wrap switches, and save">
 </p>
 <p align="center">
   <img src="docs/screenshots/Mobile-File-Viewer-Image.jpg" width="200" alt="The file viewer on a phone showing an image fitted to the screen, its pixel size in the corner">

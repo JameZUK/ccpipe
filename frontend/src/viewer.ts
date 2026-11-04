@@ -23,6 +23,8 @@ import katex from "katex";
 import hljs from "highlight.js/lib/common";
 import DOMPurify from "dompurify";
 import { makeHighlight } from "./md-highlight";
+import { registerExtraLanguages } from "./hljs-extra";
+import { MORE_LANGUAGES } from "./hljs-extra-more";
 import { setupDocsDrawer } from "./docs-drawer";
 import { bindCloseButton } from "./close-page";
 import { mdViewUrl } from "./view-url";
@@ -34,6 +36,9 @@ import "./viewer.css";
 
 // A deploy can replace the lazily-loaded Mermaid chunk under an open page.
 installChunkRecovery();
+
+// PowerShell, batch files and the rest beyond highlight.js's common set.
+registerExtraLanguages(hljs, MORE_LANGUAGES);
 
 const md = new MarkdownIt({
   html: true,        // raw HTML is allowed through, then DOMPurify-sanitised

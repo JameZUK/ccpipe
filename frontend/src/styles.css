@@ -2390,26 +2390,73 @@ body.file-editor-resizing {
   user-select: none;
   -webkit-user-select: none;
 }
+/* The CodeMirror editor (code-view.ts) fills this; it scrolls itself. */
 .file-editor__area {
   flex: 1;
+  min-height: 0;
   width: 100%;
+  position: relative;
+  overflow: hidden;
   background: var(--bg);
-  color: var(--fg);
-  border: none;
-  outline: none;
-  padding: var(--s-3) var(--s-4);
-  font-family: var(--font-mono);
+}
+.file-editor__area > .cm-editor { height: 100%; }
+.file-editor__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--fg-muted);
   font-size: var(--t-sm);
-  resize: none;
-  tab-size: 4;
-  white-space: pre;
 }
 .file-editor__foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--s-3);
-  padding: var(--s-3) var(--s-4);
+  gap: var(--s-2) var(--s-3);
+  padding: var(--s-2) var(--s-4) calc(env(safe-area-inset-bottom, 0px) + var(--s-2));
   border-top: 1px solid var(--border);
+}
+.file-editor__foot .file-panel__status {
+  text-align: left;
+  min-width: 6rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Indentation, tab width, whitespace, wrap. */
+.file-editor__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1);
+}
+.file-editor__tools[hidden] { display: none; }
+.btn.file-editor__tool { width: 2.1rem; height: 2.1rem; padding: 0; }
+.btn.file-editor__tool svg { width: 1.05rem; height: 1.05rem; }
+.file-editor__tool[aria-pressed="true"] { color: var(--accent); background: var(--accent-bg); }
+/* Indent and outdent: for a touch screen's keyboard, which has no Tab. */
+.btn.file-editor__tool--touch { display: none; }
+@media (any-pointer: coarse) {
+  .btn.file-editor__tool--touch { display: inline-flex; }
+}
+.select.file-editor__select {
+  width: auto;
+  padding: var(--s-1) var(--s-2);
+  font-size: var(--t-xs);
+}
+.btn.file-editor__convert {
+  padding: var(--s-1) var(--s-2);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  border-color: var(--accent-soft);
+}
+.btn.file-editor__convert[hidden] { display: none; }
+/* A phone: the status and save on one row, the tools on the next. */
+@media (max-width: 600px) {
+  .file-editor__foot .file-panel__status { flex: 1; }
+  .file-editor__tools { order: 3; width: 100%; }
+  .file-editor__foot .btn--primary { padding: var(--s-2) var(--s-4); }
 }
 @media (max-width: 600px) {
   .file-editor {
@@ -4582,34 +4629,10 @@ html.window-buttons .file-viewer__bar { padding-left: max(var(--window-buttons-g
   text-align: center;
 }
 
-/* Text: line numbers beside the source; both unwrapped so they line up. */
-.file-viewer__code {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  min-width: 100%;
-  width: max-content;
-  font-size: var(--t-sm);
-  line-height: 1.5;
-}
-.file-viewer__gutter,
-.file-viewer__src { margin: 0; padding: var(--s-3) 0 calc(env(safe-area-inset-bottom, 0px) + var(--s-4)); font: inherit; }
-.file-viewer__gutter {
-  position: sticky;
-  left: 0;
-  z-index: 1;
-  padding-left: var(--s-3);
-  padding-right: var(--s-3);
-  text-align: right;
-  color: var(--fg-faint);
-  background: var(--bg-elev);
-  border-right: 1px solid var(--border);
-  user-select: none;
-}
-.file-viewer__src { padding-left: var(--s-3); padding-right: var(--s-4); white-space: pre; }
-.file-viewer__src code.hljs { display: block; padding: 0; background: transparent; font: inherit; overflow: visible; }
-.file-viewer__code--wrap { width: 100%; grid-template-columns: 1fr; }
-.file-viewer__code--wrap .file-viewer__gutter { display: none; }
-.file-viewer__code--wrap .file-viewer__src { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Text: a read-only CodeMirror (code-view.ts), which scrolls itself. */
+.file-viewer__body[data-kind="text"] { overflow: hidden; }
+.file-viewer__cm { height: 100%; }
+.file-viewer__cm > .cm-editor { height: 100%; }
 
 /* Images: fitted, zoom and pan by transform. */
 .file-viewer__stage {

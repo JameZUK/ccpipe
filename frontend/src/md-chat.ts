@@ -1,8 +1,9 @@
 // Lean markdown renderer for the /history chat view. Same trusted approach as
 // /view (markdown-it + highlight.js + DOMPurify, returning a sanitised DOM
 // fragment so it never touches an HTML-string sink) but built on
-// highlight.js/lib/core with only the languages Claude actually emits — far
-// smaller than lib/common's 37 — and no KaTeX/Mermaid (Claude Code's TUI
+// highlight.js/lib/core with the languages Claude actually emits plus
+// hljs-extra.ts's (PowerShell, batch, build and config files…), not the
+// rarer ones /view also has, and no KaTeX/Mermaid (Claude Code's TUI
 // doesn't render those either).
 import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
@@ -10,6 +11,7 @@ import hljs from "highlight.js/lib/core";
 import DOMPurify from "dompurify";
 import "highlight.js/styles/github-dark.css";
 import { makeHighlight } from "./md-highlight";
+import { registerExtraLanguages } from "./hljs-extra";
 
 import bash from "highlight.js/lib/languages/bash";
 import javascript from "highlight.js/lib/languages/javascript";
@@ -61,6 +63,8 @@ hljs.registerAliases(["cs"], { languageName: "csharp" });
 hljs.registerAliases(["kt"], { languageName: "kotlin" });
 hljs.registerAliases(["pl"], { languageName: "perl" });
 hljs.registerAliases(["text", "txt"], { languageName: "plaintext" });
+// PowerShell, batch files and the less common languages, as on /view.
+registerExtraLanguages(hljs);
 
 const md = new MarkdownIt({
   html: true,            // raw HTML allowed through, then DOMPurify-sanitised

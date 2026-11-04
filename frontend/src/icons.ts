@@ -112,6 +112,9 @@ export const ICON_VIEW_GRID = icon(`<rect x="3" y="3" width="7.5" height="7.5" r
 export const ICON_DOWNLOAD = icon(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>`);
 export const ICON_PREV = icon(`<path d="M19 12H7M11 6l-6 6 6 6"/>`);
 export const ICON_WRAP = icon(`<path d="M3 6h18M3 12h15a3 3 0 0 1 0 6h-4M3 18h7M16 16l-2 2 2 2"/>`);
+export const ICON_WHITESPACE = icon(`<path d="M13 4v16M17 4v16M19 4H9.5a4.5 4.5 0 0 0 0 9H13"/>`);
+export const ICON_INDENT = icon(`<path d="M3 8l4 4-4 4M21 12H11M21 6H11M21 18H11"/>`);
+export const ICON_OUTDENT = icon(`<path d="M7 8l-4 4 4 4M21 12H11M21 6H11M21 18H11"/>`);
 export const ICON_UPLOAD = icon(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>`);
 export const ICON_FILE = icon(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/>`);
 export const ICON_FILE_CODE = icon(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M10 12l-2 2 2 2M14 12l2 2-2 2"/>`);

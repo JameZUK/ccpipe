@@ -1,8 +1,9 @@
 // The file viewer: what tapping a file in the file panel opens. Read-only,
 // over the whole screen, with Edit to switch to the editor:
 //
-//   - text and code: highlighted, with line numbers (and a wrap toggle,
-//     which hides them, since wrapped lines no longer match the numbers);
+//   - text and code: coloured by language, with line numbers, a wrap
+//     toggle and a show-tabs-and-spaces toggle (CodeMirror, read-only:
+//     code-view.ts, shared with the editor);
 //   - Markdown: rendered, by embedding the /view page, with a toggle to
 //     the source;
 //   - images (SVG too, shown through <img>, so its scripts never run):
@@ -17,9 +18,10 @@
 // ✕, Escape or the Android back button close it.
 
 import { h } from "./dom";
-import { extOf, fileKind, fmtSize, inlineUrl, type FileKind } from "./file-kinds";
+import type { CodeView } from "./code-view";
+import { fileKind, fmtSize, inlineUrl, type FileKind } from "./file-kinds";
 import {
-  ICON_DOWNLOAD, ICON_NEXT, ICON_OPEN, ICON_PENCIL, ICON_PREV, ICON_WRAP, ICON_X, iconNode,
+  ICON_DOWNLOAD, ICON_NEXT, ICON_OPEN, ICON_PENCIL, ICON_PREV, ICON_WHITESPACE, ICON_WRAP, ICON_X, iconNode,
 } from "./icons";
 import { mdViewUrl } from "./view-url";
 
@@ -40,39 +42,6 @@ export interface FileViewerOptions {
   edit: (f: ViewerFile, closed: () => void) => void;
   download: (f: ViewerFile) => void;
   onClose?: () => void;
-}
-
-/** Highlighting a big file takes a while and the result is hard to read
- * anyway; past this it's shown plain. */
-const HIGHLIGHT_MAX = 256 * 1024;
-
-// highlight.js names for files its extension aliases don't cover.
-const LANG_BY_NAME: Record<string, string> = {
-  dockerfile: "dockerfile", makefile: "makefile", "cmakelists.txt": "cmake",
-  ".bashrc": "bash", ".zshrc": "bash", ".profile": "bash", ".gitignore": "plaintext",
-};
-const LANG_BY_EXT: Record<string, string> = {
-  tsx: "typescript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
-  toml: "ini", conf: "ini", cfg: "ini", env: "bash", svelte: "xml", vue: "xml",
-  service: "ini", timer: "ini", lock: "json",
-};
-
-type Hljs = typeof import("highlight.js/lib/common").default;
-let hljsLoad: Promise<Hljs> | null = null;
-function loadHljs(): Promise<Hljs> {
-  hljsLoad ??= Promise.all([
-    import("highlight.js/lib/common"),
-    import("highlight.js/styles/github-dark.css"),
-  ]).then(([m]) => m.default);
-  return hljsLoad;
-}
-
-function languageFor(hljs: Hljs, name: string): string | null {
-  const lower = name.toLowerCase();
-  if (LANG_BY_NAME[lower]) return LANG_BY_NAME[lower];
-  const ext = extOf(name);
-  const lang = LANG_BY_EXT[ext] ?? ext;
-  return lang && hljs.getLanguage(lang) ? lang : null;
 }
 
 function fmtTime(unix: number): string {
@@ -113,19 +82,24 @@ export function openFileViewer(o: FileViewerOptions): () => void {
   const modeBtn = h("button", "btn btn--ghost file-viewer__mode");
   modeBtn.type = "button";
   const wrapBtn = iconButton(ICON_WRAP, "Wrap long lines");
+  const wsBtn = iconButton(ICON_WHITESPACE, "Show tabs and spaces");
   const editBtn = iconButton(ICON_PENCIL, "Edit");
   const openBtn = iconButton(ICON_OPEN, "Open in a new tab");
   const dlBtn = iconButton(ICON_DOWNLOAD, "Download");
   const closeBtn = iconButton(ICON_X, "Close (Esc)");
   // ‹ › sit together on the right: top-left is where a phone's "back" is.
-  bar.append(titleBox, prevBtn, nextBtn, modeBtn, wrapBtn, editBtn, openBtn, dlBtn, closeBtn);
+  bar.append(titleBox, prevBtn, nextBtn, modeBtn, wrapBtn, wsBtn, editBtn, openBtn, dlBtn, closeBtn);
 
   const body = h("div", "file-viewer__body");
   root.append(bar, body);
   document.body.append(root);
 
-  let wrap = false;
   let mdSource = false;            // Markdown: show the source instead of rendered
+  let code: CodeView | null = null;  // the text view on screen
+  let codePrefs: typeof import("./code-view") | null = null;
+  // Wrap and whitespace are remembered on this device (shared with the
+  // editor); read once the code view's chunk is in.
+  let wrap = false, whitespace = false;
 
   const show = (): void => {
     teardown?.();
@@ -142,8 +116,9 @@ export function openFileViewer(o: FileViewerOptions): () => void {
     const many = o.files.length > 1;
     prevBtn.hidden = nextBtn.hidden = !many;
     const textual = kind === "text" || (kind === "markdown" && mdSource);
-    wrapBtn.hidden = !textual;
+    wrapBtn.hidden = wsBtn.hidden = !textual;
     wrapBtn.setAttribute("aria-pressed", String(wrap));
+    wsBtn.setAttribute("aria-pressed", String(whitespace));
     editBtn.hidden = kind !== "text" && kind !== "markdown";
     modeBtn.hidden = kind !== "markdown";
     modeBtn.textContent = mdSource ? "rendered" : "source";
@@ -185,26 +160,34 @@ export function openFileViewer(o: FileViewerOptions): () => void {
       if (want === index) placeholder("Couldn't load it: connection lost.");
       return;
     }
+    let cm: typeof import("./code-view");
+    try {
+      cm = await import("./code-view");
+    } catch {
+      if (want === index && !closed) placeholder("Couldn't load the code view: connection lost.", f);
+      return;
+    }
     if (want !== index || closed) return;
-    const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-    const view = h("div", `file-viewer__code${wrap ? " file-viewer__code--wrap" : ""}`);
-    const gutter = h("pre", "file-viewer__gutter");
-    gutter.setAttribute("aria-hidden", "true");
-    gutter.textContent = lines.map((_, i) => String(i + 1)).join("\n");
-    const pre = h("pre", "file-viewer__src");
-    const code = h("code", "hljs");
-    code.textContent = text;
-    pre.append(code);
-    view.append(gutter, pre);
-    body.replaceChildren(view);
-    metaEl.textContent = `${lines.length.toLocaleString()} line${lines.length === 1 ? "" : "s"} · ${fmtSize(f.size)} · ${fmtTime(f.mtime)}`;
-    if (text.length > HIGHLIGHT_MAX) return;
-    const hljs = await loadHljs();
-    if (want !== index || closed) return;
-    const lang = fileKind(f.name) === "markdown" ? "markdown" : languageFor(hljs, f.name);
-    if (!lang) return;
-    code.classList.add(`language-${lang}`);
-    hljs.highlightElement(code);       // escapes the text itself
+    if (!codePrefs) {
+      codePrefs = cm;
+      ({ wrap, whitespace } = cm.loadPrefs());
+      wrapBtn.setAttribute("aria-pressed", String(wrap));
+      wsBtn.setAttribute("aria-pressed", String(whitespace));
+    }
+    const box = h("div", "file-viewer__cm");
+    body.replaceChildren(box);
+    const cv = cm.createCodeView({ parent: box, text, name: f.name, readOnly: true });
+    code = cv;
+    teardown = () => { cv.destroy(); if (code === cv) code = null; };
+    const n = cv.lines();
+    const facts = (lang: string | null): string => [
+      `${n.toLocaleString()} line${n === 1 ? "" : "s"}`, lang,
+      cv.detected ? cm.indentLabel(cv.detected) : null,
+      cv.lineEnding === "CRLF" ? "CRLF" : null, cv.bom ? "BOM" : null,
+      fmtSize(f.size), fmtTime(f.mtime),
+    ].filter(Boolean).join(" · ");
+    metaEl.textContent = facts(null);
+    void cv.language.then((lang) => { if (code === cv && lang) metaEl.textContent = facts(lang); });
   };
 
   const showMedia = (f: ViewerFile, kind: FileKind): void => {
@@ -255,7 +238,14 @@ export function openFileViewer(o: FileViewerOptions): () => void {
   wrapBtn.addEventListener("click", () => {
     wrap = !wrap;
     wrapBtn.setAttribute("aria-pressed", String(wrap));
-    body.querySelector(".file-viewer__code")?.classList.toggle("file-viewer__code--wrap", wrap);
+    code?.setWrap(wrap);
+    codePrefs?.savePrefs({ wrap });
+  });
+  wsBtn.addEventListener("click", () => {
+    whitespace = !whitespace;
+    wsBtn.setAttribute("aria-pressed", String(whitespace));
+    code?.setWhitespace(whitespace);
+    codePrefs?.savePrefs({ whitespace });
   });
   modeBtn.addEventListener("click", () => { mdSource = !mdSource; show(); });
   editBtn.addEventListener("click", () => {
@@ -279,8 +269,17 @@ export function openFileViewer(o: FileViewerOptions): () => void {
 
   const onKey = (e: KeyboardEvent): void => {
     if (suspended || e.defaultPrevented) return;
-    if (e.key === "Escape") { e.preventDefault(); close(); return; }
     const t = e.target as HTMLElement | null;
+    // The code view's search bar has its own Escape (close the bar).
+    if (t?.closest?.(".cm-panels")) return;
+    if (e.key === "Escape") { e.preventDefault(); close(); return; }
+    // Find: the code view's search covers the whole file; the browser's
+    // only finds the lines drawn so far.
+    if (code && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      code.openSearch();
+      return;
+    }
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
     else if (e.key === "ArrowRight") { e.preventDefault(); step(1); }
