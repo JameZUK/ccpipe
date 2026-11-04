@@ -51,20 +51,20 @@ Desktop:
 
 <table>
 <tr>
-<td align="center"><img src="docs/screenshots/Desktop-Login.png" width="380" alt="Login screen"></td>
+<td align="center"><img src="docs/screenshots/Desktop-Login.png" width="380" alt="Login screen: username and password, or sign in with a passkey"></td>
 <td align="center"><img src="docs/screenshots/Desktop-Sessions-Settings.png" width="380" alt="Settings → Sessions: how many sticky and other sessions start at boot, and how long each kind may sit idle before it's stopped"></td>
 </tr>
 <tr>
-<td align="center"><sub>Login</sub></td>
+<td align="center"><sub>Login, with a passkey button</sub></td>
 <td align="center"><sub>Sessions — start at boot, idle stop</sub></td>
 </tr>
 <tr>
 <td align="center"><img src="docs/screenshots/Desktop-Voice-Settings.png" width="380" alt="Voice settings: voice, speed, what to read aloud, read progress notes too, background notification; voice input: auto-stop, timings and voice processing on this device"></td>
-<td align="center"><img src="docs/screenshots/Desktop-Account-Settings.png" width="380" alt="Account settings: change password or username, sign out, sign out everywhere, and two-factor setup"></td>
+<td align="center"><img src="docs/screenshots/Desktop-Account-Settings.png" width="380" alt="Account settings: change password or username, sign out, sign out everywhere, two-factor setup, two registered passkeys with an add button, and the ways to sign in as checkboxes"></td>
 </tr>
 <tr>
 <td align="center"><sub>Voice (TTS): what to read aloud + voice input</sub></td>
-<td align="center"><sub>Account, sign out everywhere, two-factor (TOTP)</sub></td>
+<td align="center"><sub>Account, two-factor (TOTP), passkeys, ways to sign in</sub></td>
 </tr>
 </table>
 
@@ -472,7 +472,7 @@ the last three builds.
 | **Display** | Text size and spacing; the terminal font (per device); the cursor's style, colour and blink; the WebGL renderer switch; and *status & graphs*. Applies as you change it. |
 | **Sessions** | How many sessions start at boot, and the idle stop times (above). |
 | **Voice** | Text-to-speech: voice, speed, what to read aloud (and whether to read Claude's progress notes), and a notification when the app is in the background. Voice input: when dictation stops and is sent, and voice processing on this device. |
-| **Account** | Change the username or password, sign out, sign out everywhere, set up two-factor (TOTP). |
+| **Account** | Change the username or password, sign out, sign out everywhere, set up two-factor (TOTP), add or remove passkeys, and choose the ways to sign in. |
 | **Debug** | A diagnostic snapshot (Ctrl+Shift+D) for terminal display bugs. |
 
 The footer shows the build the page is running, with **Force reload**
@@ -665,6 +665,15 @@ proxy host.
   single request carrying password + code (the UI asks for them on two
   screens; leave the code blank if TOTP isn't set up), with one uniform
   error for any wrong part.
+- **Passkeys.** Sign in with Face ID, Touch ID, Windows Hello, your
+  phone, a security key or a password manager (Settings → Account →
+  passkeys; needs ccpipe over HTTPS at a host name). You choose the
+  ways that sign in: any of *passkey*, *password + code*, *password*,
+  *passkey + password*, *passkey + code*, or all three. The device's
+  biometric or PIN is required every time. The password stays as a
+  fallback whenever no chosen way can be used, so removing your last
+  passkey can't lock you out. See
+  [docs/configuration.md](docs/configuration.md#passkeys).
 - **Session hardening.** Signed session cookie with `Secure` +
   `__Host-` prefix under `CCPIPE_BEHIND_TLS=1`, expiring after 30 days
   of disuse; logout revokes that login server-side and closes its

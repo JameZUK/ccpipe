@@ -24,7 +24,9 @@ Settings → Account in the UI. Deleting the file also wipes any enrolled
 TOTP secret, by design: "delete the file" = "wipe credential state".
 
 Stored passwords are argon2id hashes; the plaintext only exists in memory
-when verifying a login. Legacy credential files containing a cleartext
+when verifying a login. The same file holds the account's passkeys
+(public keys only; ceremonies in ``passkeys.py``) and which combinations
+of password / code / passkey may sign in (``effective_signin``). Legacy credential files containing a cleartext
 ``"password"`` field are migrated to ``"password_hash"`` on first read.
 
 The session secret used to sign cookies is handled separately in
@@ -54,6 +56,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError, VerificationError
 from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel
+from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocket
 
 from .paths import state_dir
@@ -155,6 +158,119 @@ class Credential:
     # disabled for this account. Enrolled via /api/auth/totp/* —
     # never returned to the client after the initial enroll exchange.
     totp_secret: str | None = None
+    # Registered passkeys (WebAuthn public keys — nothing secret).
+    passkeys: tuple["Passkey", ...] = ()
+    # WebAuthn user handle (base64url of 16 random bytes), made with the
+    # first passkey. Authenticators return it with a discoverable login.
+    webauthn_user_id: str | None = None
+    # Which factor combinations may sign in, e.g. (("passkey",),
+    # ("code", "password")). None = the default (see default_signin).
+    signin: tuple[tuple[str, ...], ...] | None = None
+
+
+@dataclass(frozen=True)
+class Passkey:
+    id: str                 # credential id, base64url
+    public_key: str         # COSE public key, base64url
+    sign_count: int = 0
+    name: str = "passkey"
+    created: int = 0        # unix seconds
+    last_used: int = 0
+    rp_id: str = ""         # the host it was made on; it only works there
+    transports: tuple[str, ...] = ()
+    backed_up: bool = False  # synced (iCloud / Google / a password manager)
+
+
+# ─── Sign-in methods ───────────────────────────────────────────────────────
+# A login proves some set of factors; it succeeds when that set covers one
+# of the account's allowed combinations. "code" alone is never offered: a
+# 6-digit code by itself is guessable within the throttle in about a day.
+PASSWORD, CODE, PASSKEY = "password", "code", "passkey"
+SIGNIN_CHOICES: tuple[tuple[str, ...], ...] = (
+    (PASSKEY,),
+    (CODE, PASSWORD),
+    (PASSWORD,),
+    (PASSKEY, PASSWORD),
+    (CODE, PASSKEY),
+    (CODE, PASSKEY, PASSWORD),
+)
+
+
+def _combo(factors) -> tuple[str, ...] | None:
+    """Normalise a combination (sorted tuple), or None when it isn't one
+    of SIGNIN_CHOICES."""
+    try:
+        c = tuple(sorted({str(f) for f in factors}))
+    except TypeError:
+        return None
+    return c if c in SIGNIN_CHOICES else None
+
+
+def default_signin(cred: "Credential") -> tuple[tuple[str, ...], ...]:
+    """What signs in when nothing was chosen: password, plus the code once
+    TOTP is enrolled (the behaviour before passkeys existed)."""
+    return ((CODE, PASSWORD),) if cred.totp_secret else ((PASSWORD,),)
+
+
+def combo_usable(combo: tuple[str, ...], cred: "Credential") -> bool:
+    return (CODE not in combo or bool(cred.totp_secret)) and \
+        (PASSKEY not in combo or bool(cred.passkeys))
+
+
+def effective_signin(cred: "Credential") -> tuple[tuple[str, ...], ...]:
+    """The allowed combinations that can actually be met right now. Never
+    empty: when every chosen one needs a factor that's gone (the last
+    passkey removed, say), the default applies — the password always
+    exists, so nobody is ever locked out."""
+    chosen = cred.signin if cred.signin is not None else default_signin(cred)
+    usable = tuple(c for c in chosen if combo_usable(c, cred))
+    return usable or default_signin(cred)
+
+
+def signin_satisfied(verified: set[str], cred: "Credential") -> bool:
+    return any(set(c) <= verified for c in effective_signin(cred))
+
+
+def signin_needs(verified: set[str], cred: "Credential") -> list[list[str]]:
+    """The smallest sets of further factors that would complete an allowed
+    combination, e.g. [["password"], ["code"]] = either one."""
+    missing = {tuple(sorted(set(c) - verified)) for c in effective_signin(cred)}
+    missing.discard(())
+    minimal = [m for m in missing if not any(set(o) < set(m) for o in missing)]
+    return [list(m) for m in sorted(minimal, key=lambda m: (len(m), m))]
+
+
+def _parse_passkey(raw: Any) -> "Passkey | None":
+    if not isinstance(raw, dict):
+        return None
+    pid, key = raw.get("id"), raw.get("public_key")
+    if not (isinstance(pid, str) and pid and isinstance(key, str) and key):
+        return None
+    def num(k: str) -> int:
+        v = raw.get(k, 0)
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else 0
+    name = raw.get("name")
+    transports = raw.get("transports")
+    return Passkey(
+        id=pid, public_key=key, sign_count=num("sign_count"),
+        name=name[:64] if isinstance(name, str) and name.strip() else "passkey",
+        created=num("created"), last_used=num("last_used"),
+        rp_id=raw.get("rp_id") if isinstance(raw.get("rp_id"), str) else "",
+        transports=tuple(t for t in transports if isinstance(t, str))[:8]
+        if isinstance(transports, list) else (),
+        backed_up=raw.get("backed_up") is True,
+    )
+
+
+def _parse_signin(raw: Any) -> tuple[tuple[str, ...], ...] | None:
+    if not isinstance(raw, list):
+        return None
+    out: list[tuple[str, ...]] = []
+    for item in raw:
+        c = _combo(item) if isinstance(item, list) else None
+        if c and c not in out:
+            out.append(c)
+    return tuple(out)
 
 
 def _system_username() -> str:
@@ -194,6 +310,15 @@ def _load_credentials_file(path: Path) -> tuple[Credential | None, bool]:
         totp = data.get("totp_secret")
         if not (isinstance(totp, str) and totp.strip()):
             totp = None
+        # Passkeys and sign-in methods are parsed leniently: a damaged
+        # entry is skipped, never a reason to call the whole file
+        # malformed (that path generates a new password).
+        raw_keys = data.get("passkeys")
+        passkeys = tuple(k for k in (_parse_passkey(r) for r in raw_keys) if k) \
+            if isinstance(raw_keys, list) else ()
+        uid = data.get("webauthn_user_id")
+        uid = uid if isinstance(uid, str) and uid else None
+        signin = _parse_signin(data.get("signin"))
         # Prefer the new field; fall back to the legacy plaintext field
         # and hash it. Either way we end up with a hash in memory.
         raw_hash = data.get("password_hash")
@@ -212,6 +337,9 @@ def _load_credentials_file(path: Path) -> tuple[Credential | None, bool]:
                 password_hash=pw_hash,
                 version=version,
                 totp_secret=totp,
+                passkeys=passkeys,
+                webauthn_user_id=uid,
+                signin=signin,
             ),
             needs_migration,
         )
@@ -244,6 +372,16 @@ def _write_credentials_file(path: Path, cred: Credential) -> None:
     }
     if cred.totp_secret:
         payload["totp_secret"] = cred.totp_secret
+    if cred.passkeys:
+        payload["passkeys"] = [
+            {"id": k.id, "public_key": k.public_key, "sign_count": k.sign_count,
+             "name": k.name, "created": k.created, "last_used": k.last_used,
+             "rp_id": k.rp_id, "transports": list(k.transports), "backed_up": k.backed_up}
+            for k in cred.passkeys]
+    if cred.webauthn_user_id:
+        payload["webauthn_user_id"] = cred.webauthn_user_id
+    if cred.signin is not None:
+        payload["signin"] = [list(c) for c in cred.signin]
     try:
         os.write(fd, json.dumps(payload, indent=2).encode() + b"\n")
     finally:
@@ -591,6 +729,25 @@ def _cred_write_serialised(fn):
     return wrapper
 
 
+def _signin_for_totp(signin: tuple[tuple[str, ...], ...] | None, *,
+                     enrolled: bool) -> tuple[tuple[str, ...], ...] | None:
+    """Keep chosen sign-in methods meaning the same across TOTP changes,
+    as before passkeys: enrolling makes "password" mean "password +
+    code"; disabling drops the code from every combination."""
+    if signin is None:
+        return None
+    out: list[tuple[str, ...]] = []
+    for c in signin:
+        if enrolled and c == (PASSWORD,):
+            c = (CODE, PASSWORD)
+        elif not enrolled and CODE in c:
+            c = tuple(f for f in c if f != CODE)
+        c = _combo(c)
+        if c and c not in out:
+            out.append(c)
+    return tuple(out)
+
+
 @_cred_write_serialised
 def set_totp_secret(secret: str | None) -> tuple[bool, str]:
     """Persist a TOTP secret (or clear it). Bumps the credential
@@ -598,11 +755,11 @@ def set_totp_secret(secret: str | None) -> tuple[bool, str]:
     just-enrolled user to log back in fresh, and a just-disabled
     user to lose any pending-OTP session they might be carrying."""
     cred = get_credential()
-    new_cred = Credential(
-        username=cred.username,
-        password_hash=cred.password_hash,
+    new_cred = replace(
+        cred,
         version=cred.version + 1,
         totp_secret=secret if secret else None,
+        signin=_signin_for_totp(cred.signin, enrolled=bool(secret)),
     )
     path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
     try:
@@ -664,11 +821,12 @@ def update_credential(*, current_password: str,
     if not new_user:
         return False, "username must be non-empty"
 
-    new_cred = Credential(
+    # replace(): passkeys and sign-in methods carry over unchanged.
+    new_cred = replace(
+        cred,
         username=new_user,
         password_hash=new_hash,
         version=cred.version + 1,
-        totp_secret=cred.totp_secret,
     )
     path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
     try:
@@ -714,11 +872,15 @@ async def update_credential_async(*, current_password: str,
 # ─── FastAPI types & deps ──────────────────────────────────────────────────
 
 class LoginBody(BaseModel):
-    username: str
-    password: str
-    # Second-factor code, required (and verified together with the
-    # password) when TOTP is enrolled; ignored otherwise.
+    # Any of the factors may be given; the login succeeds when the ones
+    # that verify cover an allowed sign-in combination. Blank = not given.
+    username: str = ""
+    password: str = ""
+    # Second-factor code; ignored when TOTP isn't enrolled.
     code: str | None = None
+    # A WebAuthn assertion (navigator.credentials.get() as JSON) for a
+    # challenge from /api/auth/passkey/options.
+    passkey: dict[str, Any] | None = None
 
 
 class AuthStatus(BaseModel):
@@ -729,6 +891,10 @@ class AuthStatus(BaseModel):
     # UI can show "two-factor: enrolled / disabled" without exposing
     # the secret itself.
     otp_enrolled: bool = False
+    # After a passkey verified but the account wants more: the smallest
+    # sets of further factors that would finish signing in, e.g.
+    # [["password"]]. Never set unless a passkey was proven first.
+    need: list[list[str]] | None = None
 
 
 def is_auth_enabled() -> bool:
@@ -855,6 +1021,92 @@ def bump_credential_version() -> tuple[bool, str]:
     return True, "updated"
 
 
+def _write_cred(new_cred: Credential) -> tuple[bool, str]:
+    path = Path(os.environ.get(CREDENTIALS_FILE_ENV) or _default_credentials_path())
+    try:
+        _write_credentials_file(path, new_cred)
+    except OSError as exc:
+        return False, f"failed to write credentials: {exc}"
+    reset_cached_credential()
+    return True, "updated"
+
+
+# Passkey and sign-in-method changes keep the credential version: sessions
+# signed in before them were legitimately signed in. ("Sign out
+# everywhere" is there for a lost device.)
+
+@_cred_write_serialised
+def webauthn_user_id() -> str:
+    """The account's WebAuthn user handle, made (and saved) on first use."""
+    cred = get_credential()
+    if cred.webauthn_user_id:
+        return cred.webauthn_user_id
+    import base64
+    uid = base64.urlsafe_b64encode(secrets.token_bytes(16)).rstrip(b"=").decode()
+    ok, msg = _write_cred(replace(cred, webauthn_user_id=uid))
+    if not ok:
+        raise OSError(msg)
+    return uid
+
+
+@_cred_write_serialised
+def add_passkey(key: Passkey) -> tuple[bool, str]:
+    """Save a new passkey. The first one also turns on "passkey alone" as
+    a way to sign in (on top of what was allowed), so it works straight
+    away; Settings can change that."""
+    cred = get_credential()
+    if any(k.id == key.id for k in cred.passkeys):
+        return False, "that passkey is already registered"
+    if len(cred.passkeys) >= 32:
+        return False, "too many passkeys (32)"
+    signin = cred.signin
+    if not cred.passkeys:
+        current = list(effective_signin(cred))
+        if (PASSKEY,) not in current:
+            current.insert(0, (PASSKEY,))
+        signin = tuple(current)
+    return _write_cred(replace(cred, passkeys=cred.passkeys + (key,), signin=signin))
+
+
+@_cred_write_serialised
+def remove_passkey(key_id: str) -> tuple[bool, str]:
+    cred = get_credential()
+    left = tuple(k for k in cred.passkeys if k.id != key_id)
+    if len(left) == len(cred.passkeys):
+        return False, "no such passkey"
+    return _write_cred(replace(cred, passkeys=left))
+
+
+@_cred_write_serialised
+def passkey_used(key_id: str, sign_count: int, backed_up: bool) -> None:
+    """Record a successful use: the authenticator's new signature counter
+    (a counter that goes backwards means a cloned key) and the time."""
+    cred = get_credential()
+    keys = tuple(replace(k, sign_count=max(k.sign_count, sign_count),
+                         last_used=int(time.time()), backed_up=backed_up)
+                 if k.id == key_id else k for k in cred.passkeys)
+    ok, msg = _write_cred(replace(cred, passkeys=keys))
+    if not ok:
+        log.error("could not record passkey use: %s", msg)
+
+
+@_cred_write_serialised
+def set_signin(combos: list[list[str]]) -> tuple[bool, str]:
+    """Choose the allowed sign-in combinations. Refused when none of them
+    could be met now — the fallback would quietly ignore the choice."""
+    cred = get_credential()
+    out: list[tuple[str, ...]] = []
+    for item in combos:
+        c = _combo(item) if isinstance(item, (list, tuple)) else None
+        if c is None:
+            return False, f"not a way to sign in: {item!r}"
+        if c not in out:
+            out.append(c)
+    if not any(combo_usable(c, cred) for c in out):
+        return False, "keep at least one way to sign in that you can use now"
+    return _write_cred(replace(cred, signin=tuple(out)))
+
+
 def is_session_authed(session: dict) -> bool:
     if not session.get("authed"):
         return False
@@ -924,7 +1176,12 @@ def _origin_allowed(websocket: WebSocket) -> bool:
 _logged_host_origin_fallback = False
 
 
-def _allowed_origins(websocket: WebSocket) -> set[str]:
+def allowed_origins(conn: HTTPConnection) -> set[str]:
+    """The origins ccpipe's pages may run on (WS upgrades, passkeys)."""
+    return _allowed_origins(conn)
+
+
+def _allowed_origins(websocket: HTTPConnection) -> set[str]:
     """Build the WS upgrade allowlist.
 
     When ``CCPIPE_ALLOWED_ORIGINS`` is set, use that exclusively — the

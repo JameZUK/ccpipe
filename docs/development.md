@@ -31,9 +31,14 @@ require live credentials or external services. Set
 backend/
   ccpipe/
     main.py            App factory: middleware, lifespan, /ws, router wiring
-    auth.py            Argon2id passwords, TOTP, session middleware
+    auth.py            Argon2id passwords, TOTP, passkey store, sign-in
+                       methods (which factor combinations sign in),
+                       session middleware
+    passkeys.py        WebAuthn ceremonies (py_webauthn): one-use
+                       challenges, relying party from the page's origin
     routes/
-      auth.py          /api/auth/* (login, logout, TOTP, credentials)
+      auth.py          /api/auth/* (login, logout, TOTP, credentials,
+                       passkey register/delete/options, sign-in methods)
       sessions.py      /api/sessions/*, /api/claude-sessions/*,
                        /api/sessions/{name}/sticky|stop|resume|forget,
                        /api/sessions/remembered, /api/sessions/previews,
@@ -128,6 +133,9 @@ frontend/
     md-chat.ts         Lean markdown renderer (markdown-it + highlight.js
                        + DOMPurify) shared by the /history prose blocks
     settings.ts        Tabbed settings dialog (Display / Voice / Account)
+    settings-passkeys.ts  Account → passkeys and ways to sign in
+    passkey.ts         WebAuthn in the browser (base64url ⇄ ArrayBuffer,
+                       options fetched before the tap for Safari)
     mic.ts             Mic capture: getUserMedia + AudioWorkletNode +
                        config-driven VAD + max-record cap
     tts.ts             Chunked audio player + per-session mute

@@ -86,6 +86,12 @@ nginx-only deployments; an edge proxy that buffers request bodies (e.g.
 Cloudflare) already absorbs the slow path. Login additionally costs a
 rate-limit bucket slot regardless of body (see `auth.py`).
 
+`POST /api/auth/passkey/options` is the other pre-auth endpoint that
+creates state: one 64-byte challenge per call, kept server-side for
+5 minutes, with at most 64 outstanding (the oldest is evicted). It
+reveals nothing (no credential list), and a challenge only counts once
+an assertion signed by a registered passkey comes back for it.
+
 ## WebSocket fuzz coverage
 
 T7 of the original pen-test ("WebSocket message-type abuse") is

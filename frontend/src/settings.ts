@@ -13,6 +13,7 @@
 // to the helpers it needs.
 
 import { getMicConfig, type MicConfig, setMicConfig } from "./api";
+import { buildPasskeySection, SIGNIN_CHANGED } from "./settings-passkeys";
 import { changeCredentials, logout as apiLogout, logoutEverywhere } from "./auth";
 import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
@@ -149,7 +150,7 @@ export function openSettings(opts: SettingsOpts): void {
   modal.setAttribute("aria-label", "Settings");
 
   // Tab structure: Display (local browser), Voice (server-side TTS),
-  // Account (credentials + two-factor). Each tab panel hosts one or two
+  // Account (credentials, two-factor, passkeys). Each tab panel hosts one or more
   // <section> blocks. Two-factor lives inside the Account panel so the
   // identity-related controls are co-located.
   const displayPanel = document.createElement("div");
@@ -170,7 +171,7 @@ export function openSettings(opts: SettingsOpts): void {
   const accountPanel = document.createElement("div");
   accountPanel.className = "modal__panel";
   accountPanel.dataset.tab = "account";
-  accountPanel.append(buildAccountSection(opts), buildTwoFactorSection());
+  accountPanel.append(buildAccountSection(opts), buildTwoFactorSection(), buildPasskeySection());
 
   const debugPanel = document.createElement("div");
   debugPanel.className = "modal__panel";
@@ -1105,24 +1106,29 @@ async function _wireTotpUi(statusEl: HTMLElement, actions: HTMLElement): Promise
       return;
     }
     if (s.otp_enrolled) {
-      statusEl.textContent = "enrolled — required at next login";
+      statusEl.textContent = "on — authenticator codes";
       statusEl.className = "totp-status totp-status--on";
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn btn--ghost";
       btn.textContent = "Disable two-factor";
-      btn.addEventListener("click", () => _renderDisableForm(actions, refresh));
+      btn.addEventListener("click", () => _renderDisableForm(actions, changed));
       actions.append(btn);
     } else {
-      statusEl.textContent = "disabled — password-only login";
+      statusEl.textContent = "off";
       statusEl.className = "totp-status";
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn btn--primary";
       btn.textContent = "Set up two-factor";
-      btn.addEventListener("click", () => _renderEnrollForm(actions, refresh));
+      btn.addEventListener("click", () => _renderEnrollForm(actions, changed));
       actions.append(btn);
     }
+  };
+  // TOTP on/off changes which ways to sign in can be used (passkeys section).
+  const changed = async (): Promise<void> => {
+    await refresh();
+    document.dispatchEvent(new Event(SIGNIN_CHANGED));
   };
   await refresh();
 }

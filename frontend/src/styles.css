@@ -546,6 +546,7 @@ a:hover { color: var(--fg); }
 .login__submit {
   display: flex;
   justify-content: flex-end;
+  gap: var(--s-2);
   margin-top: var(--s-1);
 }
 .login__submit .btn { min-width: 7rem; }
@@ -554,6 +555,31 @@ a:hover { color: var(--fg); }
   background: var(--bg-elev);
 }
 .login__form input::placeholder { color: var(--fg-faint); }
+
+/* "or" + Sign in with a passkey (auth.ts), under the password form. */
+.login__passkey {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.login__or {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  color: var(--fg-faint);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+}
+.login__or::before,
+.login__or::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+.login__passkey-btn { width: 100%; }
+.login__passkey-btn svg { width: 1.1rem; height: 1.1rem; flex-shrink: 0; }
+.login__form input[hidden] { display: none; }
 
 .login__hint {
   color: var(--fg-faint);
@@ -2084,6 +2110,95 @@ a:hover { color: var(--fg); }
   text-align: center;
   word-break: break-all;
 }
+/* Passkeys + ways to sign in (settings-passkeys.ts). */
+.pk-intro, .pk-hint {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+.pk-hint { margin: var(--s-2) 0 var(--s-3); }
+.pk-note {
+  margin-bottom: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-xs);
+  color: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-soft);
+  border-radius: var(--radius-sm);
+}
+.pk-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--s-3);
+}
+.pk-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  min-width: 0;
+}
+.pk-row + .pk-row { border-top: 1px solid var(--border); }
+.pk-row__icon { color: var(--accent); display: inline-flex; flex-shrink: 0; }
+.pk-row__icon svg { width: 1.1rem; height: 1.1rem; }
+.pk-row__main { flex: 1; min-width: 0; }
+.pk-row__name {
+  font-size: var(--t-sm);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pk-row__meta { font-size: var(--t-xs); color: var(--fg-muted); overflow-wrap: anywhere; }
+.pk-row__remove { flex-shrink: 0; padding: var(--s-1) var(--s-3); }
+.pk-empty { padding: var(--s-3); font-size: var(--t-xs); color: var(--fg-faint); }
+.pk-actions { display: flex; gap: var(--s-2); margin-bottom: var(--s-3); }
+.pk-actions .btn svg { width: 1rem; height: 1rem; flex-shrink: 0; }
+.pk-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  padding: var(--s-3);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.pk-form .btn svg { width: 1rem; height: 1rem; flex-shrink: 0; }
+.pk-form__lead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+}
+.pk-form__name { flex: 1; min-width: 10rem; }
+.pk-subtitle {
+  margin: var(--s-4) 0 var(--s-2);
+  font-size: var(--t-xs);
+  font-weight: normal;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+.pk-methods { display: flex; flex-direction: column; gap: var(--s-2); }
+.pk-method {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--fg);
+  cursor: pointer;
+}
+.pk-method.is-unusable { color: var(--fg-faint); cursor: default; }
+.pk-method__why { font-size: var(--t-xs); color: var(--fg-faint); }
+.pk-method__why::before { content: "— "; }
+
 .totp-enroll__secret code {
   background: var(--bg-elev);
   border: 1px solid var(--border);

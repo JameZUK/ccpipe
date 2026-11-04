@@ -61,6 +61,42 @@ Lost your authenticator? With shell access to the host, delete the
 ccpipe — the secret is wiped, two-factor is disabled, and password-only
 login works again.
 
+### Passkeys
+
+Optional. Open Settings → Account → **Add a passkey**, give it a name,
+confirm with your password (and code, with two-factor on), tap
+**Create passkey**, and your device asks for your face, fingerprint or
+PIN. Then use **Sign in with a passkey** on the login page, or pick the
+passkey from the username field's suggestions where the browser offers
+them. A passkey synced through iCloud Keychain, Google Password Manager
+or a password manager works on your other devices too.
+
+- **Ways to sign in.** Under the passkey list, tick which combinations
+  may sign in: *Passkey*, *Password + code*, *Password*, *Passkey +
+  password*, *Passkey + code*, *Passkey + password + code*. Your first
+  passkey turns on *Passkey* alongside what you had. For a combination
+  that starts with a passkey, use the passkey button: once the passkey
+  is accepted, the page asks for the rest.
+- **Changes need your password**, and the code when two-factor is on:
+  adding or removing a passkey, and changing the ways to sign in. A
+  stolen session alone can't add its own passkey or loosen sign-in.
+  These changes don't sign other devices out; use *sign out everywhere*
+  for a lost device after removing its passkey.
+- **Where they work.** Browsers only allow passkeys over HTTPS (or on
+  `localhost`), and never at an IP address. A passkey belongs to the
+  host it was made at: one made at `ccpipe.example.org` doesn't work at
+  `192.168.1.5:8080`. Under `CCPIPE_BEHIND_TLS=1` that host is the one
+  in `CCPIPE_ALLOWED_ORIGINS`.
+- **What's checked.** Every sign-in requires user verification (the
+  biometric or PIN). Each challenge is single-use and expires after
+  5 minutes. Sign-in options name no credentials, so the login page
+  reveals nothing about the account.
+- **Locked out?** The password always works when none of the chosen ways
+  can be used, for example after removing the last passkey. With shell
+  access to the host, delete the `signin` field (and `passkeys`, to drop
+  them all) from `~/.local/state/ccpipe/credentials` and restart ccpipe:
+  sign-in is back to password (+ code).
+
 ## Voice setup
 
 The virtual mic runs as a systemd user service
@@ -365,7 +401,7 @@ week · Fable 5% (13.2 s)`, or why it failed and when it tries again.
 ## Where state lives
 
 - `~/.local/state/ccpipe/credentials` — argon2id hash, TOTP secret,
-  `0600`.
+  passkeys (public keys only), the chosen ways to sign in, `0600`.
 - `~/.local/state/ccpipe/session_secret` — used to sign session
   cookies. Rotating it invalidates all sessions. (Settings → Account →
   "sign out everywhere" does the same without touching files.)

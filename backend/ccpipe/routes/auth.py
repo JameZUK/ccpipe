@@ -1,10 +1,18 @@
 """Authentication routes.
 
-Login is a single request carrying ``{username, password, code?}``: the
-password and (when TOTP is enrolled) the code are verified together and
-any failure returns the same uniform 401, so a response never reveals
-that the password alone was right. The UI shows a separate code step but
+Login is a single request carrying any of ``{username, password, code,
+passkey}``. Every factor given is verified; the login succeeds when the
+ones that verified cover an allowed sign-in combination
+(``auth.effective_signin``: password + code by default, passkey alone
+once one is registered, or whatever the user chose in Settings). Any
+failure returns the same uniform 401, so a response never reveals that
+the password alone was right. The UI shows a separate code step but
 still sends one request; accounts without TOTP leave the code blank.
+
+The one exception is after a **passkey** has verified: if the account
+wants more (passkey + password, say), the reply says what's still
+needed and parks the passkey in a one-use ticket for 5 minutes. That
+reveals nothing to anyone who doesn't hold the passkey.
 
 Sessions: see auth.start_session / touch_session / revoke_session (30-day
 idle timeout, server-side revocation on logout, "sign out everywhere").
@@ -26,13 +34,26 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from .. import passkeys
 from ..auth import (
+    CODE,
+    PASSKEY,
+    PASSWORD,
+    SIGNIN_CHOICES,
     AuthDep,
     AuthStatus,
     CsrfDep,
     LoginBody,
+    SameOriginDep,
+    add_passkey,
     bump_credential_version,
+    combo_usable,
+    effective_signin,
     get_credential,
+    remove_passkey,
+    set_signin,
+    signin_needs,
+    signin_satisfied,
     is_auth_enabled,
     is_session_authed,
     revoke_session,
@@ -243,40 +264,52 @@ async def auth_login(request: Request) -> AuthStatus:
         await asyncio.sleep(1.0)
         raise HTTPException(status_code=400, detail="invalid request")
 
-    # Single-step login. The previous two-step flow returned a 200 with
-    # `otp_required=true` once the password was correct but before any
-    # TOTP check — that response was a positive password-correctness
-    # oracle, useful for triaging credential-stuffing dumps. We now
-    # validate password AND code together and return a single uniform
-    # 401 on any failure (wrong password, missing/wrong code), so the
-    # response distinguishes only "authenticated" vs "not".
-    # Argon2 verify on a worker thread (H3) so the 50–200 ms hash cost
-    # doesn't freeze the event loop for every concurrent PTY / WS / TTS
-    # consumer while a login is in flight.
-    password_ok = await verify_credential_async(body.username, body.password)
+    # Verify every factor given. Any one failing fails the whole login
+    # with the uniform 401 below, so no response says which part was
+    # right. Argon2 runs on a worker thread (H3) so its 50–200 ms doesn't
+    # freeze every PTY / WS / TTS consumer while a login is in flight.
+    verified: set[str] = set()
+    failed = False
+    # A passkey proven in an earlier step of this sign-in (one use).
+    verified |= passkeys.redeem(request.session.pop(PENDING_KEY, None))
+    if body.passkey is not None:
+        if passkeys.verify_login(request, body.passkey):
+            verified.add(PASSKEY)
+        else:
+            failed = True
     cred = get_credential()
-    if cred.totp_secret:
-        # When TOTP is enrolled, a missing or wrong code is just another
-        # form of "invalid credentials" — no leak about which part was
-        # right. Note: totp_verify is called on a code-only when present
-        # so the burn-list isn't poked by empty submissions.
-        code = (body.code or "").strip()
-        code_ok = bool(code) and totp_verify(code)
-        if not (password_ok and code_ok):
-            await asyncio.sleep(1.0)
-            raise HTTPException(status_code=401, detail="invalid credentials")
-    else:
-        if not password_ok:
-            await asyncio.sleep(1.0)
-            raise HTTPException(status_code=401, detail="invalid credentials")
+    if body.password:
+        # After a passkey the account is known, so that step's form asks
+        # only for the password.
+        user = body.username or (cred.username if PASSKEY in verified else "")
+        if await verify_credential_async(user, body.password):
+            verified.add(PASSWORD)
+        else:
+            failed = True
+    code = (body.code or "").strip()
+    if code and cred.totp_secret:
+        # A code is only checked when TOTP is enrolled (the login page
+        # always shows the step; accounts without it leave it blank).
+        if totp_verify(code):
+            verified.add(CODE)
+        else:
+            failed = True
 
-    start_session(request.session, cred)
-    return AuthStatus(
-        required=True,
-        authenticated=True,
-        username=cred.username,
-        otp_enrolled=bool(cred.totp_secret),
-    )
+    cred = get_credential()
+    if not failed and signin_satisfied(verified, cred):
+        start_session(request.session, cred)
+        return AuthStatus(
+            required=True,
+            authenticated=True,
+            username=cred.username,
+            otp_enrolled=bool(cred.totp_secret),
+        )
+    if not failed and PASSKEY in verified:
+        request.session[PENDING_KEY] = passkeys.hold(verified)
+        return AuthStatus(required=True, authenticated=False,
+                          need=signin_needs(verified, cred))
+    await asyncio.sleep(1.0)
+    raise HTTPException(status_code=401, detail="invalid credentials")
 
 
 @router.post("/api/auth/logout", response_model=AuthStatus, dependencies=[CsrfDep])
@@ -302,6 +335,128 @@ async def auth_logout_all(request: Request) -> AuthStatus:
     from ..ws import close_stale_ws_sockets
     await close_stale_ws_sockets("signed out everywhere")
     return AuthStatus(required=True, authenticated=False, username=None)
+
+
+# ─── Passkeys and sign-in methods ──────────────────────────────────────
+
+# Session key holding a passkeys.hold() ticket between sign-in steps.
+PENDING_KEY = "login_pending"
+
+
+class Reauth(BaseModel):
+    """Changes to how the account signs in re-check the password (and the
+    code when TOTP is enrolled), as for a password change (H1): a stolen
+    session alone can't add its own passkey or loosen the sign-in."""
+    currentPassword: str
+    code: str | None = None
+
+
+class PasskeyRegisterBody(BaseModel):
+    name: str = ""
+    credential: dict
+
+
+class PasskeyDeleteBody(Reauth):
+    id: str
+
+
+class SigninBody(Reauth):
+    methods: list[list[str]]
+
+
+async def _reverify(request: Request, body: Reauth, endpoint: str) -> None:
+    await _enforce_throttle(request, endpoint)
+    cred = get_credential()
+    if not await verify_credential_async(cred.username, body.currentPassword):
+        await asyncio.sleep(1.0)
+        raise HTTPException(status_code=401, detail="current password is wrong")
+    if cred.totp_secret:
+        code = (body.code or "").strip()
+        if not (code and totp_verify(code)):
+            await asyncio.sleep(1.0)
+            raise HTTPException(status_code=401, detail="invalid code")
+
+
+def _signin_state(request: Request) -> dict:
+    cred = get_credential()
+    # A GET carries no Origin header: judge the page's own address, as
+    # the browser will see it (scheme from the proxy's X-Forwarded-Proto).
+    origin = request.headers.get("origin") \
+        or f"{request.url.scheme}://{request.headers.get('host', '')}"
+    try:
+        here: str | None = passkeys.relying_party(request, origin)[0]
+    except passkeys.PasskeyError:
+        here = None
+    on = set(effective_signin(cred))
+    return {
+        "otp_enrolled": bool(cred.totp_secret),
+        # The host passkeys are made for here; None = they can't be.
+        "rp_id": here,
+        "passkeys": [{"id": k.id, "name": k.name, "created": k.created,
+                      "last_used": k.last_used, "rp_id": k.rp_id,
+                      "backed_up": k.backed_up} for k in cred.passkeys],
+        "methods": [{"factors": list(c), "enabled": c in on,
+                     "usable": combo_usable(c, cred)} for c in SIGNIN_CHOICES],
+    }
+
+
+@router.get("/api/auth/signin", dependencies=[AuthDep, SameOriginDep])
+async def signin_state(request: Request) -> dict:
+    """Passkeys and the allowed sign-in combinations (Settings → Account)."""
+    return _signin_state(request)
+
+
+@router.post("/api/auth/signin", dependencies=[AuthDep, CsrfDep])
+async def signin_update(body: SigninBody, request: Request) -> dict:
+    await _reverify(request, body, "signin")
+    ok, msg = set_signin(body.methods)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return _signin_state(request)
+
+
+@router.post("/api/auth/passkey/options", dependencies=[CsrfDep])
+async def passkey_login_options(request: Request) -> dict:
+    """Sign-in options with a fresh one-use challenge. Pre-auth, and
+    reveals nothing: no credential list, the same for every caller."""
+    try:
+        return passkeys.login_options(request)
+    except passkeys.PasskeyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/api/auth/passkey/register/options", dependencies=[AuthDep, CsrfDep])
+async def passkey_register_options(body: Reauth, request: Request) -> dict:
+    await _reverify(request, body, "passkey_register")
+    try:
+        return passkeys.registration_options(request, request.session.get("sid"))
+    except passkeys.PasskeyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@router.post("/api/auth/passkey/register", dependencies=[AuthDep, CsrfDep])
+async def passkey_register(body: PasskeyRegisterBody, request: Request) -> dict:
+    """Finish a registration begun by /register/options in this session
+    (the challenge is bound to it), so no second password check."""
+    try:
+        key = passkeys.finish_registration(
+            request, request.session.get("sid"), body.credential, body.name)
+    except passkeys.PasskeyError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    ok, msg = add_passkey(key)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    log.info("passkey %r registered for %s", key.name, key.rp_id)
+    return _signin_state(request)
+
+
+@router.post("/api/auth/passkey/delete", dependencies=[AuthDep, CsrfDep])
+async def passkey_delete(body: PasskeyDeleteBody, request: Request) -> dict:
+    await _reverify(request, body, "passkey_delete")
+    ok, msg = remove_passkey(body.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=msg)
+    return _signin_state(request)
 
 
 # ─── TOTP (two-factor) enrollment ──────────────────────────────────────

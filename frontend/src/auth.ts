@@ -14,7 +14,15 @@
 // This keeps the dedicated "enter your code" surface the operator
 // prefers while preserving the single-call semantics that don't leak
 // the password-correctness oracle.
+//
+// Passkeys (passkey.ts): "Sign in with a passkey" (or picking one from
+// the username field's autofill) posts the assertion alone. If the
+// account wants more than the passkey (Settings → Account → ways to sign
+// in), the reply's `need` says what — only ever after a passkey has
+// verified — and a third screen asks for just that.
 import { sparkMark } from "./brand";
+import { ICON_PASSKEY, iconNode } from "./icons";
+import { fetchSignInOptions, getAssertion, passkeyAutofillAvailable, passkeysSupported } from "./passkey";
 
 
 export interface AuthStatus {
@@ -24,6 +32,17 @@ export interface AuthStatus {
   // Retained for backward compat with the wire model only — the server
   // no longer sets it, and the client never branches on it.
   otp_enrolled?: boolean;
+  /** After a passkey verified: further factors that would finish it,
+   * as alternatives — [["password"], ["code"]] = either one. */
+  need?: string[][] | null;
+}
+
+export interface LoginBody {
+  username?: string;
+  password?: string;
+  code?: string;
+  /** An assertion from passkeyAssertion(). */
+  passkey?: object;
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
@@ -35,8 +54,10 @@ export async function fetchAuthStatus(): Promise<AuthStatus> {
 export async function login(
   username: string, password: string, code?: string,
 ): Promise<AuthStatus & { error?: string }> {
-  const body: Record<string, string> = { username, password };
-  if (code) body.code = code;
+  return loginWith({ username, password, code: code || undefined });
+}
+
+export async function loginWith(body: LoginBody): Promise<AuthStatus & { error?: string }> {
   const res = await fetch("/api/auth/login", {
     method: "POST",
     credentials: "same-origin",
@@ -167,6 +188,50 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
 
   form.append(userInput, passInput, submitRow);
 
+  // ── Passkey: a button (and the username field's autofill) ────────
+  const pkWrap = document.createElement("div");
+  pkWrap.className = "login__passkey";
+  pkWrap.hidden = !passkeysSupported();
+  const orEl = document.createElement("div");
+  orEl.className = "login__or";
+  orEl.textContent = "or";
+  const pkBtn = document.createElement("button");
+  pkBtn.type = "button";
+  pkBtn.className = "btn btn--ghost login__passkey-btn";
+  pkBtn.append(iconNode(ICON_PASSKEY), document.createTextNode("Sign in with a passkey"));
+  pkWrap.append(orEl, pkBtn);
+
+  // ── After a passkey, when the account wants more ─────────────────
+  const finishForm = document.createElement("form");
+  finishForm.className = "login__form";
+  finishForm.hidden = true;
+  const finPass = document.createElement("input");
+  finPass.type = "password";
+  finPass.name = "password";
+  finPass.placeholder = "password";
+  finPass.autocomplete = "current-password";
+  finPass.spellcheck = false;
+  const finCode = document.createElement("input");
+  finCode.type = "text";
+  finCode.name = "code";
+  finCode.placeholder = "6-digit code";
+  finCode.autocomplete = "one-time-code";
+  finCode.inputMode = "numeric";
+  finCode.maxLength = 8;
+  finCode.pattern = "[0-9]*";
+  const finRow = document.createElement("div");
+  finRow.className = "login__submit";
+  const finBack = document.createElement("button");
+  finBack.type = "button";
+  finBack.className = "btn btn--ghost";
+  finBack.textContent = "back";
+  const finBtn = document.createElement("button");
+  finBtn.type = "submit";
+  finBtn.className = "btn btn--primary";
+  finBtn.textContent = "Sign in";
+  finRow.append(finBack, finBtn);
+  finishForm.append(finPass, finCode, finRow);
+
   // ── Step 2: TOTP code ───────────────────────────────────────────
   // Always rendered for everyone — we never ask the server pre-auth
   // whether TOTP is enrolled, so the UI can't branch on it. Users
@@ -208,18 +273,136 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   hint.className = "login__hint";
   hint.hidden = true;
 
-  wrap.append(legend, form, otpForm, err, hint);
+  wrap.append(legend, form, pkWrap, otpForm, finishForm, err, hint);
   inner.append(head, wrap);
   frame.append(inner);
   root.append(frame);
 
   setTimeout(() => userInput.focus(), 50);
 
+  // ── Passkey sign-in ──────────────────────────────────────────────
+  let done = false;
+  let need: string[][] = [];
+  let autofill: AbortController | null = null;
+  const stopAutofill = (): void => { autofill?.abort(); autofill = null; };
+  const succeed = (): void => { done = true; stopAutofill(); onSuccess(); };
+  const showStep1 = (message = ""): void => {
+    form.hidden = false;
+    pkWrap.hidden = !passkeysSupported();
+    otpForm.hidden = true;
+    finishForm.hidden = true;
+    legend.textContent = "Sign in";
+    hint.hidden = true;
+    hint.textContent = "";
+    err.textContent = message;
+    otpInput.value = "";
+    finPass.value = "";
+    finCode.value = "";
+  };
+  const needWords = (n: string[][]): string => n
+    .map((alt) => alt.map((f) => (f === "code" ? "the 6-digit code" : "your password")).join(" and "))
+    .join(", or ");
+  const showFinish = (n: string[][]): void => {
+    need = n;
+    const wants = new Set(n.flat());
+    finPass.hidden = !wants.has("password");
+    finCode.hidden = !wants.has("code");
+    form.hidden = true;
+    pkWrap.hidden = true;
+    otpForm.hidden = true;
+    finishForm.hidden = false;
+    legend.textContent = "Passkey accepted";
+    hint.textContent = `now enter ${needWords(n)}`;
+    hint.hidden = false;
+    err.textContent = "";
+    setTimeout(() => (wants.has("password") ? finPass : finCode).focus(), 50);
+  };
+  const usePasskey = async (assertion: object): Promise<void> => {
+    const status = await loginWith({ passkey: assertion });
+    if (status.authenticated) { succeed(); return; }
+    if (status.need?.length) { showFinish(status.need); return; }
+    showStep1(status.error === "invalid credentials" ? "that passkey wasn't accepted" : status.error || "sign-in failed");
+  };
+  // Passkeys in the username field's suggestions (iOS / Android keyboards,
+  // password managers). Its challenge lives 5 minutes, so renew it at 4.
+  const startAutofill = async (): Promise<void> => {
+    if (done || !(await passkeyAutofillAvailable())) return;
+    stopAutofill();
+    const ac = new AbortController();
+    autofill = ac;
+    userInput.autocomplete = "username webauthn";
+    const renew = setTimeout(() => { if (autofill === ac) void startAutofill(); }, 240_000);
+    try {
+      const options = await fetchSignInOptions();
+      if (autofill !== ac) return;
+      const assertion = await getAssertion(options, { autofill: true, signal: ac.signal });
+      if (assertion && autofill === ac) {
+        autofill = null;
+        await usePasskey(assertion);
+      }
+    } catch { /* a convenience only — the button still works */ } finally {
+      clearTimeout(renew);
+    }
+  };
+  // Options fetched ahead of the tap (Safari only opens the passkey
+  // prompt as the direct result of one), renewed before they expire.
+  let ready: { options: PublicKeyCredentialRequestOptions; at: number } | null = null;
+  const prepare = async (): Promise<void> => {
+    try { ready = { options: await fetchSignInOptions(), at: Date.now() }; } catch { ready = null; }
+  };
+  const prepTimer = setInterval(() => { if (done) clearInterval(prepTimer); else void prepare(); }, 240_000);
+  if (passkeysSupported()) void prepare();
+  pkBtn.addEventListener("click", async () => {
+    const fresh = ready && Date.now() - ready.at < 240_000 ? ready.options : null;
+    ready = null;
+    stopAutofill();
+    err.textContent = "";
+    pkBtn.disabled = true;
+    try {
+      const assertion = fresh ? await getAssertion(fresh) : await getAssertion(await fetchSignInOptions());
+      if (assertion) await usePasskey(assertion);
+    } catch (e) {
+      err.textContent = (e as Error).message;
+    } finally {
+      pkBtn.disabled = false;
+      if (!done) {
+        void prepare();
+        if (finishForm.hidden) void startAutofill();
+      }
+    }
+  });
+  finishForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const pw = finPass.hidden ? "" : finPass.value;
+    const code = finCode.hidden ? "" : finCode.value.trim();
+    const given = new Set([...(pw ? ["password"] : []), ...(code ? ["code"] : [])]);
+    if (!need.some((alt) => alt.every((f) => given.has(f)))) {
+      err.textContent = `enter ${needWords(need)}`;
+      return;
+    }
+    finBtn.disabled = true;
+    try {
+      const status = await loginWith({ password: pw || undefined, code: code || undefined });
+      if (status.authenticated) { succeed(); return; }
+      if (status.need?.length) { showFinish(status.need); return; }
+      // One try per passkey: start again from the passkey.
+      showStep1(`${status.error || "invalid credentials"} — use the passkey again`);
+      void startAutofill();
+    } catch (e2) {
+      err.textContent = (e2 as Error).message;
+    } finally {
+      finBtn.disabled = false;
+    }
+  });
+  finBack.addEventListener("click", () => { showStep1(); void startAutofill(); });
+  void startAutofill();
+
   // Step 1 → step 2 transition. NO API call here.
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     err.textContent = "";
     form.hidden = true;
+    pkWrap.hidden = true;
     otpForm.hidden = false;
     legend.textContent = "Enter the 6-digit code";
     hint.textContent = "from your authenticator app";
@@ -237,7 +420,7 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
       const code = otpInput.value.trim();
       const status = await login(userInput.value, passInput.value, code || undefined);
       if (status.authenticated) {
-        onSuccess();
+        succeed();
         return;
       }
       // Single uniform error path — no per-field reveal. Bounce the
@@ -246,6 +429,7 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
       err.textContent = status.error || "invalid credentials";
       otpForm.hidden = true;
       form.hidden = false;
+      pkWrap.hidden = !passkeysSupported();
       legend.textContent = "Sign in";
       hint.hidden = true;
       hint.textContent = "";
@@ -262,6 +446,7 @@ export function renderLogin(root: HTMLElement, onSuccess: () => void): void {
   otpBackBtn.addEventListener("click", () => {
     otpForm.hidden = true;
     form.hidden = false;
+    pkWrap.hidden = !passkeysSupported();
     legend.textContent = "Sign in";
     hint.textContent = "";
     hint.hidden = true;

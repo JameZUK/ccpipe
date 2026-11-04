@@ -123,6 +123,7 @@ export const ICON_FILE_VIDEO = icon(`<rect x="3" y="5" width="13" height="14" rx
 export const ICON_FILE_AUDIO = icon(`<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>`);
 export const ICON_FILE_PDF = icon(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M8 13h8M8 17h5"/>`);
 export const ICON_FOLDER = icon(`<path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/>`);
+export const ICON_PASSKEY = icon(`<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2"/>`);
 export const ICON_REFRESH = icon(`<path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/>`);
 
 /** One of the icon strings above as a DOM node — parsed as SVG, never as

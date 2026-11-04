@@ -94,12 +94,32 @@ deliverables that landed in this repository as a result:
 What the current code does, so a report can say which property it
 breaks. Details live in the linked code and docs.
 
-- **Login.** One `POST /api/auth/login` carrying username, password
-  and (when TOTP is enrolled) the code together; any failure is the
-  same `401`, so there is no password-correct-but-code-missing signal.
-  The two screens in the UI (password, then code) are client-side
-  only. Login and the four password re-verify endpoints share a
-  per-IP 5/min bucket plus a global 300/min cap.
+- **Login.** One `POST /api/auth/login` carrying any of username,
+  password, code and a passkey assertion. Each factor given is
+  verified, and the login succeeds when the verified ones cover an
+  allowed sign-in combination (`auth.effective_signin`). Any failure is
+  the same `401`, so there is no password-correct-but-code-missing
+  signal. The two screens in the UI (password, then code) are
+  client-side only. The **one exception** is after a passkey has
+  verified: if the account also wants a password or code, the reply
+  names what's missing and parks the passkey in a single-use,
+  5-minute, server-side ticket (its id is in the session cookie), so
+  the signal only reaches someone holding the passkey. Login and the
+  password re-verify endpoints share a per-IP 5/min bucket plus a
+  global 300/min cap.
+- **Passkeys (WebAuthn).** Verification is py_webauthn's. The relying
+  party is the page's own host, accepted only when its origin is in the
+  WebSocket origin allow-list; plain HTTP (except `localhost`) and IP
+  addresses are refused. User verification is required for every
+  registration and sign-in. Challenges are server-side, single-use,
+  expire after 5 minutes, and are bound to their purpose and origin
+  (and a registration's to the session that asked for it). Sign-in
+  options carry no credential list, so they're identical for every
+  caller. The signature counter is stored and must not go backwards.
+  Adding or removing a passkey and changing the ways to sign in re-check
+  the password, and the code when TOTP is enrolled. The password stays
+  a fallback whenever no chosen way can be met, so there is no lockout.
+  "Code alone" is never allowed as a way to sign in.
 - **Sessions.** A signed Starlette cookie (`__Host-` + `Secure` under
   `CCPIPE_BEHIND_TLS=1`) with a **30-day idle timeout**: it is
   re-issued at most hourly while in use, and lapses after 30 days
@@ -191,6 +211,11 @@ report them as findings:
   operator's own machine. An attacker with a valid session cookie has the same
   filesystem reach the operator does (within the jail). Defence is
   the auth gate + TOTP, not the file ACL.
+- **Passkey challenges and tickets are in-memory.** A restart drops
+  them, so a sign-in in progress has to start again. At most 64
+  challenges are outstanding (the oldest is dropped first). An
+  unauthenticated flood of `POST /api/auth/passkey/options` can push out
+  a real user's challenge, but can't get past one.
 - **TOTP burn-list is in-memory.** Survives the verify window but not
   a process restart. With uvicorn `--reload` (dev) the same code can
   be replayed; production restarts are rare enough that the trade-off
