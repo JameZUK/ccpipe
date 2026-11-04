@@ -465,6 +465,32 @@ terminal is scrolled back. A small toast offers to reload sooner. Until
 then the old page keeps working, because each build keeps the files of
 the last three builds.
 
+**Signing in.** Sign in with your password, plus a 6-digit code once
+two-factor is set up, or with a **passkey**: Face ID, Touch ID, Windows
+Hello, your phone, a security key or a password manager.
+
+- **Add a passkey** in Settings → Account → passkeys. Your device asks
+  for your face, fingerprint or PIN, both when you add it and every time
+  you sign in with it.
+- **On the login page,** tap **Sign in with a passkey**, or pick the
+  passkey from the username field's suggestions where the browser
+  offers them (iPhone and Android keyboards, password managers).
+- **You choose the ways in:** any of *passkey*, *password + code*,
+  *password*, *passkey + password*, *passkey + code*, or all three.
+  When a passkey isn't enough on its own, the login page asks for just
+  what's missing once the passkey is accepted.
+- **Changing sign-in needs your password** (and code): adding or
+  removing a passkey, or changing the ways in. A stolen session can't
+  add its own passkey or weaken sign-in.
+- **The password stays a fallback** whenever none of the ways you chose
+  can be used, so removing your last passkey doesn't lock you out.
+- **Passkeys need HTTPS at a host name.** They don't work at an IP
+  address or over plain HTTP, except on `localhost`.
+
+A login lasts until it goes 30 days unused. *Sign out everywhere* ends
+every login on every device. Setup and recovery are in
+[configuration](docs/configuration.md#passkeys).
+
 **Settings.** The gear opens Settings:
 
 | Tab | What's in it |
