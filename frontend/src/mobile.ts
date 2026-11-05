@@ -290,13 +290,18 @@ export function mountMobileUI(parent: HTMLElement,
     lastSynced = text;
     if (textarea.value === text) return;
     const focused = document.activeElement === textarea;
+    const wasEmpty = textarea.value === "";
     const start = textarea.selectionStart, end = textarea.selectionEnd;
     applyingRemote = true;
     textarea.value = text;
     autoresize();
     applyingRemote = false;
     if (focused) {
-      textarea.setSelectionRange(Math.min(start, text.length), Math.min(end, text.length));
+      // Filling an empty box (the saved draft arriving just after the box
+      // took the focus on open): carry on from the end of it. Otherwise
+      // the caret stays put under an edit from another device.
+      if (wasEmpty) textarea.setSelectionRange(text.length, text.length);
+      else textarea.setSelectionRange(Math.min(start, text.length), Math.min(end, text.length));
     }
   };
   // Leaving the session (or the socket otherwise being closed on purpose)
@@ -644,6 +649,25 @@ export function mountMobileUI(parent: HTMLElement,
     }
   });
 
+  // Focus the composer so the user can start typing immediately on
+  // session open — without this they have to tap the textarea first to
+  // get the soft keyboard up. It's disabled until the socket opens, and
+  // focus() on a disabled box does nothing, so this waits for it to become
+  // usable (normally a few hundred ms after the tap): within 10 s of
+  // opening, and only if the user hasn't put the focus somewhere else
+  // meanwhile. Not on desktop: there the terminal keeps the keyboard until
+  // the user clicks into the box.
+  const mountedAt = Date.now();
+  let focusWhenUsable = !desktop;
+  const focusIfUsable = (): void => {
+    if (!focusWhenUsable || textarea.disabled || !textarea.isConnected) return;
+    focusWhenUsable = false;
+    if (Date.now() - mountedAt > 10_000) return;
+    const a = document.activeElement;
+    if (a && a !== document.body && !a.classList.contains("xterm-helper-textarea")) return;
+    try { textarea.focus({ preventScroll: true }); } catch { /* not focusable after all */ }
+  };
+
   // Composer disable when WS is not open. Don't silently swallow typed
   // input — show the user the state of the world.
   const unsubConn = mic.onConnectionChange((connected) => {
@@ -653,6 +677,7 @@ export function mountMobileUI(parent: HTMLElement,
     enterBtn.disabled = !connected || composer.classList.contains("recording");
     lastConnected = connected;
     textarea.placeholder = placeholderText();
+    focusIfUsable();
   });
 
   // Mic visibility: hide when voice support hasn't arrived (or is gone).
@@ -1054,13 +1079,7 @@ export function mountMobileUI(parent: HTMLElement,
     discardBtn.focus({ preventScroll: true });
   }
 
-  // Focus the composer so the user can start typing immediately on
-  // session open — without this they have to tap the textarea first to
-  // get the soft keyboard up. We're inside a user-gesture context
-  // (session-pick tap) so iOS / Android browsers should honour focus().
-  // Not on desktop: there the terminal keeps the keyboard until the user
-  // clicks into the box.
-  if (!desktop) textarea.focus({ preventScroll: true });
+  focusIfUsable();       // already connected (a re-mount): now
 
   return {
     composer,

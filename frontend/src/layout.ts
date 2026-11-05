@@ -236,7 +236,14 @@ export class TileLayout {
     }
     if (!show) {
       this.root.classList.remove("tiles--on");
-      this.root.replaceChildren(this.deps.mainEl);
+      // No tiles (the usual case): the main terminal is normally the only
+      // thing here already. Leave it be; putting it back would drop its
+      // keyboard focus, so a session just opened wouldn't take typing
+      // until it was clicked.
+      if (this.root.childElementCount !== 1 || this.root.firstElementChild !== this.deps.mainEl) {
+        this.root.replaceChildren(this.deps.mainEl);
+      }
+      this.restoreFocus(hadFocus);
       this.setFocus(null);
       return;
     }
@@ -260,12 +267,17 @@ export class TileLayout {
     const max = this.maximized;
     const dom = max ? this.leafEl(max) : this.build(this.tree!);
     this.root.replaceChildren(dom ?? this.build(this.tree!));
+    this.restoreFocus(hadFocus);
+    this.setFocus(this.focused);
+    this.mainWrap.classList.toggle("tile--focused", this.focused === null);
+  }
+
+  /** Give the focus back to what had it before a re-render moved it. */
+  private restoreFocus(hadFocus: HTMLElement | null): void {
     if (hadFocus && hadFocus !== document.body && hadFocus.isConnected
         && document.activeElement !== hadFocus) {
       try { hadFocus.focus({ preventScroll: true }); } catch {}
     }
-    this.setFocus(this.focused);
-    this.mainWrap.classList.toggle("tile--focused", this.focused === null);
   }
 
   private leafEl(session: string): HTMLElement | null {
