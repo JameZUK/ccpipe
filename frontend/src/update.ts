@@ -40,6 +40,8 @@ const BUSY_SELECTOR = [
   ".modal-overlay", ".file-panel-shell", ".md-drawer", ".docs-menu",
   ".prompt-menu", ".tiles-menu__list", ".sess__menu:not([hidden])",
   ".sess__rename", ".select-view", ".file-viewer",
+  // The status and ping drop-downs: the ping's readings live only in the page.
+  ".sysmeter-pop",
 ].join(",");
 
 type BusyCheck = () => boolean;

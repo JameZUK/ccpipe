@@ -306,7 +306,6 @@ export function renderSessionPicker(
   const statusLink = h("button", "hero__link");
   statusLink.type = "button";
   statusLink.title = "Connection: round trips and outages";
-  statusLink.setAttribute("aria-label", "Connection");
   statusLink.append(statusDot, statusLabel, statusLatency);
   status.append(statusLink, statusCount);
   heroText.append(word, status);
@@ -500,11 +499,16 @@ export function renderSessionPicker(
     linkTitle: "the ccpipe server",
     dropsLabel: "outages",
     scheme: location.protocol === "https:" ? "https" : "http",
-    secure: location.protocol === "https:",
-    note: `A request goes to ccpipe every ${HEALTH_POLL_MS / 1000} s, and every 2 s while this is open.`,
+    what: "A request goes to ccpipe",
+    everyMs: HEALTH_POLL_MS,
+    // No terminal here, and a swipe that starts on it must scroll the page.
+    keepFocus: false,
     onOpenChange(open) {
       stopFastProbe();
       if (!open) return;
+      // Its click doesn't reach the document (and a tap's never fires), so
+      // close a session's menu here rather than leave both open.
+      closeMenus();
       // One probe at a time: a slow one isn't cut short by the next.
       const fast = (): void => { if (!activeProbe && !document.hidden) void probeHealth(); };
       fastProbeTimer = window.setInterval(fast, FAST_PING_MS);
@@ -522,7 +526,8 @@ export function renderSessionPicker(
     activeProbe?.abort();
     const ac = new AbortController();
     activeProbe = ac;
-    const timeout = window.setTimeout(() => ac.abort(), HEALTH_TIMEOUT_MS);
+    let timedOut = false;
+    const timeout = window.setTimeout(() => { timedOut = true; ac.abort(); }, HEALTH_TIMEOUT_MS);
     const t0 = performance.now();
     try {
       const res = await fetch("/api/health", { credentials: "same-origin", signal: ac.signal });
@@ -533,7 +538,10 @@ export function renderSessionPicker(
       healthLog.online();
       healthLog.add(rtt);
     } catch (err) {
-      // An abort is the timeout or a newer probe; the next tick tells.
+      // No answer in HEALTH_TIMEOUT_MS: a hung server, or a network that
+      // drops everything without saying so. Down, like a failed request.
+      // Any other abort is a newer probe (or the picker closing) taking over.
+      if (timedOut) { setStatus("err", "no answer", ""); healthLog.offline(); return; }
       if ((err as Error)?.name === "AbortError") return;
       setStatus("err", "offline", "");
       healthLog.offline();

@@ -204,11 +204,20 @@ export function planResets(m: PlanMeter, now: number): string {
 const svg = svgEl;
 let gradSeq = 0;
 
+// The sparkline's box: 0 % sits at y = 31 and 100 % at y = 2 of a 32-high
+// viewBox, leaving room for the stroke at either edge.
+const SPARK_H = 32;
+const sparkY = (pct: number): number => 31 - (Math.max(0, Math.min(100, pct)) / 100) * 29;
+
+/** Where `pct` sits up a sparkline, as a percentage of its height from the
+ * bottom: for guide lines laid over one. */
+export const sparkHeight = (pct: number): number => ((SPARK_H - sparkY(pct)) / SPARK_H) * 100;
+
 /** A 0–100 % series as a line with a fading fill. Gaps (null) break it.
  * The newest value sits at the right edge and a series shorter than
  * `capacity` fills in from the right, like a scrolling monitor. */
 export function sparkline(values: (number | null)[], cls = "", capacity = 120): SVGSVGElement {
-  const el = svg("svg", { class: `sv-spark ${cls}`.trim(), viewBox: "0 0 100 32", preserveAspectRatio: "none" });
+  const el = svg("svg", { class: `sv-spark ${cls}`.trim(), viewBox: `0 0 100 ${SPARK_H}`, preserveAspectRatio: "none" });
   el.setAttribute("aria-hidden", "true");
   values = values.slice(-capacity);
   const n = values.length;
@@ -229,14 +238,14 @@ export function sparkline(values: (number | null)[], cls = "", capacity = 120): 
       line += `M${pts.join("L")}`;
       const first = pts[0].split(",")[0];
       const last = pts[pts.length - 1].split(",")[0];
-      area += `M${first},32L${pts.join("L")}L${last},32Z`;
+      area += `M${first},${SPARK_H}L${pts.join("L")}L${last},${SPARK_H}Z`;
     }
     pts.length = 0;
   };
   values.forEach((v, i) => {
     if (v === null || v === undefined) { flush(); return; }
     const x = ((offset + i) / slots) * 100;
-    const y = 31 - (Math.max(0, Math.min(100, v)) / 100) * 29;
+    const y = sparkY(v);
     pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
   });
   flush();

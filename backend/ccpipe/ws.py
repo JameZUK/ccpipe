@@ -938,7 +938,8 @@ class _TerminalConnection:
         # lets the frontend detect dead-but-not-yet-closed sockets after
         # Android tab-freeze: it expects a pong (or any server message)
         # within ~45s of its keepalive ping; absence forces a reconnect.
-        if _is_ping(text):
+        ping = _parse_ping(text)
+        if ping is not None:
             if not await self._still_authed("ping"):
                 return False
             # DIAG: measure how long the server spends between observing the
@@ -948,7 +949,7 @@ class _TerminalConnection:
             # send_lock contention with the live PTY pump (and the fix is to
             # bypass / prioritise pong sends).
             t0 = time.monotonic()
-            await self.send_pong_unlocked()
+            await self.send_pong_unlocked(ping.get("id"))
             log.debug("ping→pong: %.1fms (session=%s frames=%d)",
                       (time.monotonic() - t0) * 1000, self.session,
                       self.counters.frames_forwarded)
@@ -1155,17 +1156,24 @@ class _TerminalConnection:
                 log.debug("send_json failed: %s", exc)
                 return False
 
-    async def send_pong_unlocked(self) -> bool:
+    async def send_pong_unlocked(self, ping_id: object = None) -> bool:
         """Send a pong WITHOUT acquiring send_lock.
 
-        Pongs are 14 bytes and the WS frame is atomic at the protocol layer
-        (no fragmentation), so they don't need to serialise against PTY /
-        TTS sends. Without this bypass a slow chunk send holding send_lock
-        can hold the pong past the client's 45s stale-check, forcing a
-        spurious reconnect of an otherwise-healthy socket.
+        Pongs are a few dozen bytes and the WS frame is atomic at the
+        protocol layer (no fragmentation), so they don't need to serialise
+        against PTY / TTS sends. Without this bypass a slow chunk send
+        holding send_lock can hold the pong past the client's 45s
+        stale-check, forcing a spurious reconnect of an otherwise-healthy
+        socket.
+
+        The ping's id, when it sent one, is echoed so the client times each
+        pong against its own ping: on a slow link several can be out at once.
         """
+        msg: dict[str, object] = {"type": "pong"}
+        if _valid_ping_id(ping_id):
+            msg["id"] = ping_id
         try:
-            await self.ws.send_json({"type": "pong"})
+            await self.ws.send_json(msg)
             return True
         except Exception as exc:
             log.debug("send_pong failed: %s", exc)
@@ -1666,20 +1674,29 @@ def _is_control_frame(text: str, needle1: str, needle2: str) -> bool:
     return len(text) <= _CONTROL_FRAME_MAX and (needle1 in text or needle2 in text)
 
 
-def _is_ping(text: str) -> bool:
-    """Cheap pre-parse check so the receive loop can dispatch pongs
-    without doing a full json.loads on every keystroke. The substring
-    check is tighter than ``"ping"`` alone so paste content containing
-    the word doesn't waste a parse — it has to look like our literal
-    ``{"type":"ping"}`` shape (modulo whitespace) to even be tested.
-    Plus the L3 size cap: a paste >256 bytes can't be a ping anyway.
+def _parse_ping(text: str) -> dict | None:
+    """The ping message, or None if *text* isn't one. A cheap pre-parse
+    check first, so the receive loop can dispatch pongs without doing a
+    full json.loads on every keystroke. The substring check is tighter
+    than ``"ping"`` alone so paste content containing the word doesn't
+    waste a parse — it has to look like our literal ``{"type":"ping"}``
+    shape (modulo whitespace) to even be tested. Plus the L3 size cap: a
+    paste >256 bytes can't be a ping anyway.
     """
     if not _is_control_frame(text, '"type":"ping"', '"type": "ping"'):
-        return False
+        return None
     try:
-        return _safe_json_loads(text).get("type") == "ping"
-    except (json.JSONDecodeError, ValueError, AttributeError):
-        return False
+        msg = _safe_json_loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return msg if isinstance(msg, dict) and msg.get("type") == "ping" else None
+
+
+def _valid_ping_id(ping_id: object) -> bool:
+    """A ping id worth echoing: a plain non-negative integer that survives
+    a round trip through a JS number. Anything else gets a bare pong."""
+    return (isinstance(ping_id, int) and not isinstance(ping_id, bool)
+            and 0 <= ping_id <= 2**53)
 
 
 def _handle_client_text(text: str, pty_proc: PtyProcess,

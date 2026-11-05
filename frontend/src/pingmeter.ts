@@ -7,7 +7,7 @@
 
 import { h } from "./dom";
 import { dropdown } from "./dropdown";
-import { fmtAgo, fmtSpan, sparkline } from "./sysviz";
+import { fmtAgo, fmtSpan, sparkHeight, sparkline } from "./sysviz";
 
 /** How often to measure while the drop-down is open. */
 export const FAST_PING_MS = 2000;
@@ -32,8 +32,6 @@ export interface LatencyStats {
   max: number;
   /** The average change from one reading to the next. */
   jitter: number | null;
-  /** ms from the oldest reading to now. */
-  span: number;
 }
 
 /** Round trips and the connection's history, for one page view. */
@@ -45,9 +43,11 @@ export class LatencyLog {
   up = false;
   /** When it last came up, or null before it first has. */
   since: number | null = null;
+  /** When it went down, while it's down (including never having come up). */
+  downSince: number | null = null;
   /** Times it went down after being up. */
   drops = 0;
-  /** The last time it went down, and for how long once it's back. */
+  /** The last time it went down after being up, and for how long once it's back. */
   lastDrop: { at: number; downFor: number | null } | null = null;
   private readonly subs = new Set<() => void>();
 
@@ -61,18 +61,25 @@ export class LatencyLog {
     const now = Date.now();
     this.up = true;
     this.since = now;
+    this.downSince = null;
     if (this.lastDrop && this.lastDrop.downFor === null) this.lastDrop.downFor = now - this.lastDrop.at;
     this.emit();
   }
 
-  /** Disconnected, or a check failed. Only counts after being up. */
+  /** Disconnected, or a check failed. A drop only counts after being up;
+   * before that it's just down, since the first failure. */
   offline(): void {
-    if (!this.up) return;
     const now = Date.now();
-    this.up = false;
-    this.drops += 1;
-    this.lastDrop = { at: now, downFor: null };
-    this.push({ at: now, ms: null });
+    if (this.up) {
+      this.up = false;
+      this.drops += 1;
+      this.lastDrop = { at: now, downFor: null };
+      this.downSince = now;
+      this.push({ at: now, ms: null });
+    } else if (this.downSince === null) {
+      this.downSince = now;
+      this.emit();
+    }
   }
 
   /** The newest reading while up; null while down or before the first. */
@@ -103,7 +110,6 @@ export class LatencyLog {
       median,
       max: sorted[sorted.length - 1],
       jitter: steps ? total / steps : null,
-      span: Date.now() - this.readings[0].at,
     };
   }
 
@@ -133,11 +139,14 @@ const fmtMs = (ms: number): string => `${ms < 10 && ms % 1 ? ms.toFixed(1) : Mat
 function fmtFor(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`;
   const s = ms / 1000;
-  if (s < 10) return `${Math.max(0, s).toFixed(1)} s`;
+  if (s < 10) return `${s.toFixed(1)} s`;
   if (s < 60) return `${Math.round(s)} s`;
   if (s < 3600) return `${Math.round(s / 60)} min`;
   return fmtSpan(s);
 }
+
+/** "2 s", "30 s", "1 min". */
+const fmtEvery = (ms: number): string => (ms < 60_000 ? `${ms / 1000} s` : `${ms / 60_000} min`);
 
 // The graph's top: the first of these at or above the highest reading,
 // with a little headroom. Never under 50 ms, so a quiet home network's
@@ -146,107 +155,87 @@ function fmtFor(ms: number): string {
 const SCALES = [50, 100, 200, 300, 500, 1000, 2000, 5000, 10000];
 const scaleFor = (max: number): number => SCALES.find((s) => s >= max * 1.15) ?? SCALES[SCALES.length - 1];
 
-// Where a value sits up the graph, as a share of its height: sysviz's
-// sparkline draws 0–100 % between y = 31 and y = 2 of a 32-high box.
-const heightAt = (pct: number): number => ((1 + 0.29 * Math.max(0, Math.min(100, pct))) / 32) * 100;
-
 // ─── the drop-down ────────────────────────────────────────────────────────
 
 export interface PingDropdownOptions {
   /** The connection section's title. */
   linkTitle: string;
-  /** What a drop is called here: "reconnects", "failed checks". */
+  /** What a drop is called here: "reconnects", "outages". */
   dropsLabel: string;
-  /** "wss", "https"… */
+  /** "wss", "ws", "https" or "http". */
   scheme: string;
-  /** Whether that's over TLS. */
-  secure: boolean;
-  /** A note on what's timed, and how often. */
-  note: string;
+  /** What's timed, for the note: "A ping goes to ccpipe …". */
+  what: string;
+  /** How often it's timed while the drop-down is shut, in ms. */
+  everyMs: number;
   /** Opened (true) or closed: measure every FAST_PING_MS meanwhile. */
   onOpenChange(open: boolean): void;
+  /** See DropdownOptions.keepFocus. */
+  keepFocus?: boolean;
 }
 
 export interface PingDropdown {
   dispose(): void;
 }
 
+interface Cell { k: HTMLElement; v: HTMLElement; sub: HTMLElement }
+
+function cell(grid: HTMLElement, label: string): Cell {
+  const c = h("div", "sysmeter-pop__cell");
+  const k = h("span", "sysmeter-pop__k", label);
+  const v = h("span", "sysmeter-pop__v", "—");
+  const sub = h("span", "sysmeter-pop__sub");
+  sub.hidden = true;
+  c.append(k, v, sub);
+  grid.append(c);
+  return { k, v, sub };
+}
+
+/** Text and colour (a latencyLevel, or none). */
+function show(el: HTMLElement, text: string, level = ""): void {
+  el.textContent = text;
+  if (level) el.dataset.ping = level;
+  else delete el.dataset.ping;
+}
+
+function showSub(c: Cell, text: string): void {
+  c.sub.textContent = text;
+  c.sub.hidden = !text;
+}
+
 export function pingDropdown(trigger: HTMLElement, log: LatencyLog, opts: PingDropdownOptions): PingDropdown {
+  const secure = opts.scheme === "wss" || opts.scheme === "https";
+  const note = `${secure ? "Encrypted" : "Not encrypted"} (${opts.scheme}). ${opts.what} every `
+    + `${fmtEvery(opts.everyMs)}, and every ${fmtEvery(FAST_PING_MS)} while this is open.`;
   let ticker: number | null = null;
   let unsub: (() => void) | null = null;
 
-  const cell = (grid: HTMLElement, k: string, v: string, sub = "", level = ""): void => {
-    const c = h("div", "sysmeter-pop__cell");
-    const val = h("span", "sysmeter-pop__v", v);
-    if (level) val.dataset.ping = level;
-    c.append(h("span", "sysmeter-pop__k", k), val);
-    if (sub) c.append(h("span", "sysmeter-pop__sub", sub));
-    grid.append(c);
-  };
-
-  const graph = (): HTMLElement => {
-    const viz = h("div", "sysmeter-pop__viz pingpop__viz");
-    const vals = log.readings.map((r) => r.ms);
-    const st = log.stats();
-    const scale = scaleFor(st?.max ?? 0);
-    // The readings so far fill the width (a page's first few would be a
-    // sliver at the edge of a 150-reading box); at least 20 slots, so two
-    // readings don't stretch to a full-width line.
-    viz.append(sparkline(vals.map((v) => (v === null ? null : (v / scale) * 100)), "sv-spark--ping",
-      Math.max(20, vals.length)));
-    // Guides where the ping changes colour, when they're inside the scale.
-    for (const t of [100, 300]) {
-      if (t >= scale) continue;
-      const line = h("span", `pingpop__guide pingpop__guide--${latencyLevel(t)}`);
-      line.style.bottom = `${heightAt((t / scale) * 100).toFixed(1)}%`;
-      line.append(h("span", "pingpop__guide-label", String(t)));
-      viz.append(line);
-    }
-    viz.append(h("span", "pingpop__scale", `${scale} ms`));
-    return viz;
-  };
-
-  const paint = (): void => {
-    const pop = dd.pop;
-    if (!pop) return;
-    const now = Date.now();
-    const cur = log.current();
-    const st = log.stats();
-
-    const top = h("div", "sysmeter-pop__row");
+  // Built once when it opens, then updated in place: a reading rebuilds
+  // only the graph, and the clock ticks only the times, so a hover tooltip
+  // or a selection in it survives.
+  const build = (pop: HTMLElement): { update(): void; tick(): void } => {
     const head = h("div", "sysmeter-pop__head");
-    const v = h("span", "sysmeter-pop__v", cur !== null ? fmtMs(cur) : log.up ? "—" : "down");
-    v.dataset.ping = cur !== null ? latencyLevel(cur) : log.up ? "" : "bad";
-    head.append(h("span", "sysmeter-pop__k", "round trip"), v);
-    top.append(head, graph());
-    top.append(h("div", "sysmeter-pop__sub",
-      st ? `last ${st.count} reading${st.count === 1 ? "" : "s"} · over ${fmtFor(st.span)}` : "waiting for the first reading…"));
+    const nowV = h("span", "sysmeter-pop__v");
+    head.append(h("span", "sysmeter-pop__k", "round trip"), nowV);
+    const viz = h("div", "sysmeter-pop__viz pingpop__viz");
+    const span = h("div", "sysmeter-pop__sub");
+    const top = h("div", "sysmeter-pop__row");
+    top.append(head, viz, span);
 
     const spread = h("div", "sysmeter-pop__grid sysmeter-pop__grid--4 pingpop__stats");
-    if (st) {
-      cell(spread, "min", fmtMs(st.min));
-      cell(spread, "median", fmtMs(st.median));
-      cell(spread, "max", fmtMs(st.max), "", latencyLevel(st.max));
-      cell(spread, "jitter", st.jitter !== null ? fmtMs(st.jitter) : "—");
-      spread.title = "jitter: how much one reading differs from the next, on average";
-    }
+    spread.title = "jitter: how much one reading differs from the next, on average";
+    const minC = cell(spread, "min");
+    const medC = cell(spread, "median");
+    const maxC = cell(spread, "max");
+    const jitC = cell(spread, "jitter");
 
     const link = h("div", "sysmeter-pop__mine");
-    link.append(h("div", "sysmeter-pop__title", opts.linkTitle));
     const grid = h("div", "sysmeter-pop__grid");
-    if (log.up && log.since !== null) cell(grid, "up for", fmtFor(now - log.since));
-    else if (!log.up && log.lastDrop) cell(grid, "down for", fmtFor(now - log.lastDrop.at), "", "bad");
-    else cell(grid, "up for", "—", "connecting…");
-    cell(grid, opts.dropsLabel, String(log.drops));
-    const ld = log.lastDrop;
-    if (ld) {
-      cell(grid, "last drop", fmtAgo((now - ld.at) / 1000),
-        ld.downFor !== null ? `out ${fmtFor(ld.downFor)}` : "");
-    } else {
-      cell(grid, "last drop", "none");
-    }
-    link.append(grid, h("div", "sysmeter-pop__sub pingpop__note",
-      `${opts.secure ? "Encrypted" : "Not encrypted"} (${opts.scheme}). ${opts.note}`));
+    const upC = cell(grid, "up for");
+    const dropsC = cell(grid, opts.dropsLabel);
+    const lastC = cell(grid, "last drop");
+    link.append(h("div", "sysmeter-pop__title", opts.linkTitle), grid,
+      h("div", "sysmeter-pop__sub pingpop__note", note));
 
     const key = h("div", "sysmeter-key__levels pingpop__key");
     for (const [lvl, text] of [["ok", "under 100 ms"], ["warn", "100 ms+"], ["bad", "300 ms+"]]) {
@@ -256,18 +245,85 @@ export function pingDropdown(trigger: HTMLElement, log: LatencyLog, opts: PingDr
       item.append(sw, text);
       key.append(item);
     }
+    pop.replaceChildren(top, spread, link, key);
 
-    pop.replaceChildren(top, ...(st ? [spread] : []), link, key);
+    let count = 0;
+
+    const graph = (max: number): void => {
+      const scale = scaleFor(max);
+      const vals = log.readings.map((r) => (r.ms === null ? null : (r.ms / scale) * 100));
+      // The readings so far fill the width (a page's first few would be a
+      // sliver at the edge of a 150-reading box); at least 20 slots, so two
+      // readings don't stretch to a full-width line.
+      const kids: Element[] = [sparkline(vals, "sv-spark--ping", Math.max(20, vals.length))];
+      // Guides where the ping changes colour, when they're inside the scale.
+      for (const t of [100, 300]) {
+        if (t >= scale) continue;
+        const line = h("span", `pingpop__guide pingpop__guide--${latencyLevel(t)}`);
+        line.style.bottom = `${sparkHeight((t / scale) * 100).toFixed(1)}%`;
+        line.append(h("span", "pingpop__guide-label", String(t)));
+        kids.push(line);
+      }
+      kids.push(h("span", "pingpop__scale", `${scale} ms`));
+      viz.replaceChildren(...kids);
+    };
+
+    const tick = (): void => {
+      const now = Date.now();
+      const first = log.readings[0];
+      span.textContent = count && first
+        ? `last ${count} reading${count === 1 ? "" : "s"} · over ${fmtFor(now - first.at)}`
+        : "waiting for the first reading…";
+      if (log.up && log.since !== null) {
+        upC.k.textContent = "up for";
+        show(upC.v, fmtFor(now - log.since));
+        showSub(upC, "");
+      } else if (log.downSince !== null) {
+        upC.k.textContent = "down for";
+        show(upC.v, fmtFor(now - log.downSince), "bad");
+        showSub(upC, "");
+      } else {
+        upC.k.textContent = "up for";
+        show(upC.v, "—");
+        showSub(upC, "connecting…");
+      }
+      const ld = log.lastDrop;
+      show(lastC.v, ld ? fmtAgo((now - ld.at) / 1000) : "none");
+      showSub(lastC, ld && ld.downFor !== null ? `out ${fmtFor(ld.downFor)}` : "");
+    };
+
+    const update = (): void => {
+      const cur = log.current();
+      if (cur !== null) show(nowV, fmtMs(cur), latencyLevel(cur));
+      else if (!log.up && log.downSince !== null) show(nowV, "down", "bad");
+      else show(nowV, "—");
+      const st = log.stats();
+      count = st?.count ?? 0;
+      spread.hidden = !st;
+      if (st) {
+        show(minC.v, fmtMs(st.min));
+        show(medC.v, fmtMs(st.median));
+        show(maxC.v, fmtMs(st.max), latencyLevel(st.max));
+        show(jitC.v, st.jitter !== null ? fmtMs(st.jitter) : "—");
+      }
+      graph(st?.max ?? 0);
+      show(dropsC.v, String(log.drops));
+      tick();
+    };
+
+    return { update, tick };
   };
 
   const dd = dropdown(trigger, {
     label: "Connection",
     cls: "sysmeter-pop pingpop",
-    onOpen() {
-      paint();
-      unsub = log.subscribe(paint);
+    keepFocus: opts.keepFocus,
+    onOpen(pop) {
+      const view = build(pop);
+      view.update();
+      unsub = log.subscribe(view.update);
       // The "up for" and "ago" times move on between readings.
-      ticker = window.setInterval(paint, 1000);
+      ticker = window.setInterval(view.tick, 1000);
       opts.onOpenChange(true);
     },
     onClose() {

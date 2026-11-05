@@ -17,7 +17,7 @@ import { addBusyCheck, installUpdater, onBeforeReload, recoverFromStaleBundle } 
 import * as notifications from "./notifications";
 import { attachOptionSpacePtt } from "./ptt";
 import { mdViewUrl } from "./view-url";
-import { TerminalSocket } from "./ws";
+import { KEEPALIVE_MS, TerminalSocket } from "./ws";
 // Heavy chunks loaded lazily on user gesture:
 //   - settings / file-panel / session-picker are large (758 + 752 + 629
 //     LOC) and gated behind a button or a no-last-session bootstrap.
@@ -223,16 +223,14 @@ async function attachTerminal(session: string): Promise<void> {
   linkBtn.type = "button";
   linkBtn.className = "statusbar__link";
   linkBtn.title = "Connection: round trips and reconnects";
-  linkBtn.setAttribute("aria-label", "Connection");
   linkBtn.append(dot, stateLabel, latencyLabel);
   const pingLog = new LatencyLog();
   const pingPop = pingDropdown(linkBtn, pingLog, {
     linkTitle: "this session's connection",
     dropsLabel: "reconnects",
     scheme: location.protocol === "https:" ? "wss" : "ws",
-    secure: location.protocol === "https:",
-    note: "A ping goes to ccpipe over this session's connection every 30 s, "
-      + "and every 2 s while this is open.",
+    what: "A ping goes to ccpipe over this session's connection",
+    everyMs: KEEPALIVE_MS,
     onOpenChange: (open) => socket.setFastPing(open ? FAST_PING_MS : null),
   });
 

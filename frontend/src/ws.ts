@@ -137,6 +137,9 @@ export interface TerminalSocketHandlers {
   onLatency?: (ms: number) => void;
 }
 
+/** How often a session's socket pings (keepalive, and the ping's reading). */
+export const KEEPALIVE_MS = 30_000;
+
 export class TerminalSocket {
   private ws: WebSocket | null = null;
   private closed = false;
@@ -166,7 +169,7 @@ export class TerminalSocket {
   // socket is dead at the TCP layer (or the JS was just frozen by a
   // background tab on mobile) and we force-reconnect.
   private keepaliveTimer: number | null = null;
-  private readonly keepaliveIntervalMs = 30_000;
+  private readonly keepaliveIntervalMs = KEEPALIVE_MS;
   private lastReceivedAt = 0;
   private static readonly STALE_AFTER_MS = 45_000;
   private staleCheckTimer: number | null = null;
@@ -180,12 +183,12 @@ export class TerminalSocket {
   // (content likely changed a lot) gets the full wipe+replay for correctness.
   seamlessReconnect = false;
   private static readonly SEAMLESS_MAX_GAP_MS = 15_000;
-  // Timestamp of the most recent ping we sent. Subtracting from the
-  // matching pong's arrival time gives us RTT. We only track a single
-  // in-flight ping because the keepalive interval is much longer than
-  // any realistic RTT, so the next ping always arrives well after the
-  // previous pong.
-  private lastPingSentAt = 0;
+  // Pings awaiting their pong: id → when it went (performance.now()).
+  // Each ping carries an id the server echoes in its pong, so every pong
+  // is timed against its own ping, however many are out on a slow link.
+  private pingSeq = 0;
+  private readonly pingsInFlight = new Map<number, number>();
+  private lastPingSentAt = 0;              // the newest, for the debug snapshot
   // Extra pings while the latency pop-up is open (setFastPing), and whether
   // this socket's server has reached its receive loop (stream_ready): a
   // ping before that would time the history replay, not the network.
@@ -277,9 +280,8 @@ export class TerminalSocket {
       this.retryAttempt = 0;
       this.hadOpenedOnce = true;
       this.lastReceivedAt = Date.now();
-      // A ping still unanswered on the old socket will never be: forget it,
-      // so it doesn't hold back this socket's first ping.
-      this.lastPingSentAt = 0;
+      // Pings still unanswered on the old socket never will be.
+      this.pingsInFlight.clear();
       this.streamReady = false;
       // Re-send the latest known viewport size BEFORE the status flips
       // to 'open'. Backend's PTY spawn waits briefly for this message
@@ -380,11 +382,13 @@ export class TerminalSocket {
                 this.handlers.onSize?.(parsed.cols, parsed.rows);
               }
               return;
-            case "pong":
+            case "pong": {
               // Surface round-trip latency so the statusbar can show
-              // it next to the connection dot. lastPingSentAt is 0 if
-              // we never sent the matching ping (e.g. the server sent
-              // an unsolicited pong); skip in that case.
+              // it next to the connection dot. The pong names its ping
+              // by id; a server from before ids answers pings in order,
+              // so an id-less pong answers the oldest one out. A pong
+              // for no ping we know of (already timed, or from before a
+              // reconnect) is skipped.
               //
               // Use `ev.timeStamp` (the browser's record of WHEN the
               // message event was created — close to when bytes hit
@@ -398,19 +402,16 @@ export class TerminalSocket {
               // long the tab took to notice".
               //
               // timeStamp is DOMHighResTimeStamp relative to
-              // performance.timeOrigin; lastPingSentAt is set via
-              // performance.now() on the send side so they're in the
-              // same time base.
-              if (this.lastPingSentAt) {
-                const rtt = ev.timeStamp - this.lastPingSentAt;
-                // Clear immediately so a duplicate/unsolicited pong
-                // doesn't produce a second, bogus RTT reading measured
-                // against a ping we already accounted for. Reset on the
-                // next sendPing().
-                this.lastPingSentAt = 0;
-                this.handlers.onLatency?.(Math.round(rtt));
+              // performance.timeOrigin; the send time is recorded with
+              // performance.now() so they're in the same time base.
+              const id = typeof parsed.id === "number" ? parsed.id : this.pingsInFlight.keys().next().value;
+              const sentAt = id === undefined ? undefined : this.pingsInFlight.get(id);
+              if (id !== undefined && sentAt !== undefined) {
+                this.pingsInFlight.delete(id);
+                this.handlers.onLatency?.(Math.round(ev.timeStamp - sentAt));
               }
               return;
+            }
           }
         } catch {
           // ignore non-JSON text frames
@@ -520,8 +521,8 @@ export class TerminalSocket {
                                               this.keepaliveIntervalMs);
   }
 
-  /** Ping every `ms` as well as the keepalive's 30 s, while the latency
-   * pop-up is open (one goes now); null goes back to the keepalive alone. */
+  /** Ping every `ms` as well as the keepalive, while the ping's drop-down
+   * is open (one goes now); null goes back to the keepalive alone. */
   setFastPing(ms: number | null): void {
     if (this.fastPingTimer !== null) {
       clearInterval(this.fastPingTimer);
@@ -529,9 +530,20 @@ export class TerminalSocket {
     }
     if (ms === null || this.closed) return;
     const ping = (): void => {
-      // Not before the server is in its receive loop, and not from a hidden
-      // tab (whose timers the browser delays anyway).
-      if (this.streamReady && !document.hidden) this.sendPing();
+      // Not before the server is in its receive loop, not from a hidden tab
+      // (whose timers the browser delays anyway), and while one is out for
+      // under 10 s, not another, so a slow link isn't sent a queue of them.
+      // (Waiting longer is harmless: each pong is matched by its id.)
+      if (!this.streamReady || document.hidden) return;
+      if (this.pingsInFlight.size && performance.now() - this.lastPingSentAt < 10_000) return;
+      // Wait for an idle moment, as the first ping does (stream_ready): a
+      // ping sent while xterm is still parsing a burst of output would have
+      // its pong queued behind that work.
+      if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(() => this.sendPing(), { timeout: 500 });
+      } else {
+        setTimeout(() => this.sendPing(), 0);
+      }
     };
     this.fastPingTimer = window.setInterval(ping, ms);
     ping();
@@ -539,18 +551,17 @@ export class TerminalSocket {
 
   private sendPing(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
-    // One ping in flight at a time: another would restart the clock, and
-    // the first one's pong would then be timed against it. One unanswered
-    // for 10 s is given up on. (A ping went out within the last 10 s, so
-    // skipping a keepalive here doesn't let the connection go idle.)
-    if (this.lastPingSentAt && performance.now() - this.lastPingSentAt < 10_000) return;
     // performance.now() is a monotonic high-resolution clock in the
     // same time base as the WebSocket message event's `timeStamp`
     // (both are DOMHighResTimeStamp relative to performance.timeOrigin).
     // Pairing them lets the pong-receive side measure RTT against a
     // consistent zero rather than mixing wall-clock with high-res.
+    const id = ++this.pingSeq;
     this.lastPingSentAt = performance.now();
-    this.ws.send(JSON.stringify({ type: "ping" }));
+    this.pingsInFlight.set(id, this.lastPingSentAt);
+    // A ping still out after eight newer ones isn't coming back.
+    if (this.pingsInFlight.size > 8) this.pingsInFlight.delete(this.pingsInFlight.keys().next().value as number);
+    this.ws.send(JSON.stringify({ type: "ping", id }));
   }
 
   private stopKeepalive(): void {
@@ -672,6 +683,7 @@ export class TerminalSocket {
       lastReceivedAt: this.lastReceivedAt,
       msSinceLastReceived: this.lastReceivedAt ? now - this.lastReceivedAt : null,
       lastPingSentAt: this.lastPingSentAt,
+      pingsInFlight: this.pingsInFlight.size,
       framesReceived: this.framesReceived,
       bytesReceived: this.bytesReceived,
       helloCount: this.helloCount,
