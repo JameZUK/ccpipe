@@ -4,6 +4,10 @@
   <img src="docs/logo.svg" alt="ccpipe" width="160">
 </p>
 
+<p align="center">
+  <strong>Use Claude Code from anywhere, on any device, as easily as at your desk.</strong>
+</p>
+
 ccpipe puts your [Claude Code](https://claude.com/claude-code) sessions
 in a browser. Install it on the machine where you already run `claude`
 in tmux, and your phone, tablet or laptop gets the same live terminal,
