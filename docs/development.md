@@ -200,7 +200,9 @@ docs/
 Client → server text frames (JSON):
 - `{"type":"input","data":"…"}` — raw bytes to the PTY
 - `{"type":"resize","cols":N,"rows":N}` — terminal size
-- `{"type":"ping"}` — keepalive
+- `{"type":"ping"}` — keepalive, and the round trip the ping shows:
+  every 30 s, every 2 s while the ping's drop-down is open, and never
+  two in flight
 - `{"type":"tts_mute","value":bool}` — mirror of client mute state so
   the server can skip Kokoro round-trips while the user isn't listening
 - `{"type":"mic_stop"}` — the client tore down its mic; server

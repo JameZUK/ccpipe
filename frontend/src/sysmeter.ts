@@ -6,6 +6,7 @@
 // CPU, memory, project size and context fill. Off with Settings → Display.
 
 import { h } from "./dom";
+import { dropdown } from "./dropdown";
 import {
   type PlanMeter, type PlanUsage, SysPoller, type StatsPrefs, type SysSnapshot, bar, fmtAgo, fmtBytes, fmtMoney,
   fmtPct, level, loadStatsPrefs, onStatsPrefs, paceBar, planHeadline, planLevel, planPace, planResets, refreshPlan,
@@ -29,16 +30,6 @@ export function mountSysMeter(session: string): SysMeter {
   el.type = "button";
   el.title = "System status";
   el.setAttribute("aria-label", "System status");
-  el.setAttribute("aria-haspopup", "dialog");
-  el.setAttribute("aria-expanded", "false");
-  // Keep the terminal's focus (and the soft keyboard) where it was. On a
-  // touch screen it's touchstart's default that moves focus (and hides the
-  // keyboard) — mousedown alone isn't enough (mobile.ts, the key strip).
-  // Cancelling touchstart also cancels the click, so a touch opens the
-  // pop-up on pointerup instead.
-  el.addEventListener("mousedown", (e) => e.preventDefault());
-  el.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
-  el.addEventListener("contextmenu", (e) => e.preventDefault());
 
   // Inline (wide) readout.
   const inline = h("span", "sysmeter__inline");
@@ -71,7 +62,6 @@ export function mountSysMeter(session: string): SysMeter {
   el.append(inline, compact);
 
   let last: SysSnapshot | null = null;
-  let pop: HTMLElement | null = null;
   let prefs = loadStatsPrefs();
   // The server's clock when the plan figures arrived, against ours: reset
   // countdowns run on the server's time.
@@ -120,7 +110,7 @@ export function mountSysMeter(session: string): SysMeter {
     el.title = `cpu ${fmtPct(c)} · memory ${fmtPct(m)} · disk ${fmtPct(d)}`
       + (head ? ` · plan ${head.label} ${fmtPct(head.percent)}` : "")
       + (proj != null ? ` · project ${fmtBytes(proj)}` : "");
-    if (pop) paintPop();
+    if (dd.pop) paintPop();
   };
 
   const row = (label: string, value: string, viz: Element | null, sub: string): HTMLElement => {
@@ -210,6 +200,7 @@ export function mountSysMeter(session: string): SysMeter {
   };
 
   const paintPop = (): void => {
+    const pop = dd.pop;
     if (!pop || !last) return;
     const s = last;
     const d = diskPct(s);
@@ -250,66 +241,30 @@ export function mountSysMeter(session: string): SysMeter {
     pop.replaceChildren(...kids, mine);
   };
 
-  const closePop = (): void => {
-    pop?.remove();
-    pop = null;
-    el.setAttribute("aria-expanded", "false");
-    document.removeEventListener("pointerdown", onAway, true);
-    document.removeEventListener("keydown", onKey, true);
-  };
-  function onAway(e: Event): void {
-    const t = e.target as Node;
-    if (pop && !pop.contains(t) && !el.contains(t)) closePop();
-  }
-  function onKey(e: KeyboardEvent): void {
-    if (e.key === "Escape") closePop();
-  }
-  let touchedAt = 0;
-  el.addEventListener("pointerup", (e) => {
-    if (e.pointerType !== "touch") return;
-    touchedAt = Date.now();
-    toggle();
+  const dd = dropdown(el, {
+    label: "System status",
+    onOpen(pop) {
+      paintPop();
+      if (!last) pop.append(h("div", "sysmeter-pop__sub", "loading…"));
+      // The plan figures may be a quarter of an hour old: ask for a fresh
+      // check (the server only runs one when they're over five minutes old).
+      if (prefs.plan && last?.plan) {
+        void refreshPlan().then((res) => {
+          if (!res?.plan || !last) return;
+          last.plan = { ...res.plan, checking: res.plan.checking || res.checking };
+          planClock = { server: res.plan.now, local: Date.now() };
+          paintPlan();
+          if (dd.pop) paintPop();
+        });
+      }
+    },
   });
-  el.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (Date.now() - touchedAt < 700) return;      // already handled on pointerup
-    toggle();
-  });
-  function toggle(): void {
-    if (pop) { closePop(); return; }
-    pop = h("div", "sysmeter-pop");
-    pop.setAttribute("role", "dialog");
-    pop.setAttribute("aria-label", "System status");
-    const r = el.getBoundingClientRect();
-    pop.style.top = `${Math.round(r.bottom + 6)}px`;
-    pop.style.maxHeight = `${Math.round(window.innerHeight - r.bottom - 14)}px`;
-    const width = Math.min(340, window.innerWidth - 16);
-    pop.style.width = `${width}px`;
-    pop.style.left = `${Math.round(Math.max(8, Math.min(window.innerWidth - width - 8, r.left + r.width / 2 - width / 2)))}px`;
-    document.body.append(pop);
-    el.setAttribute("aria-expanded", "true");
-    paintPop();
-    if (!last) pop.append(h("div", "sysmeter-pop__sub", "loading…"));
-    document.addEventListener("pointerdown", onAway, true);
-    document.addEventListener("keydown", onKey, true);
-    // The plan figures may be a quarter of an hour old: ask for a fresh
-    // check (the server only runs one when they're over five minutes old).
-    if (prefs.plan && last?.plan) {
-      void refreshPlan().then((res) => {
-        if (!res?.plan || !last) return;
-        last.plan = { ...res.plan, checking: res.plan.checking || res.checking };
-        planClock = { server: res.plan.now, local: Date.now() };
-        paintPlan();
-        if (pop) paintPop();
-      });
-    }
-  }
 
   const poller = new SysPoller(session, loadStatsPrefs().interval, paint);
   const apply = (p: StatsPrefs): void => {
     prefs = p;
     el.hidden = !p.sessionBar;
-    if (!p.sessionBar) closePop();
+    if (!p.sessionBar) dd.close();
     poller.setInterval(p.interval);
     poller.setActive(p.sessionBar);
     if (last) paint(last);
@@ -322,7 +277,7 @@ export function mountSysMeter(session: string): SysMeter {
     dispose() {
       poller.stop();
       unsub();
-      closePop();
+      dd.close();
     },
   };
 }

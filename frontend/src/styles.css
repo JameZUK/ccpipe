@@ -4319,6 +4319,73 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
 .sysmeter-pop__cell .sysmeter-pop__v { font-size: var(--t-sm); }
 .sysmeter-pop__cwd { word-break: break-all; margin-top: var(--s-2); }
 
+/* ─── The ping and its drop-down (pingmeter.ts) ─────────────────────────── */
+/* The connection dot, state and ping, as one button in the top bar and on
+   the landing page; it looks just as the three did on their own. */
+.statusbar__link,
+.hero__link {
+  display: inline-flex;
+  align-items: center;
+  gap: inherit;
+  min-width: 0;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+/* The full height of the top bar, so it's a fair target for a thumb. */
+.statusbar__link { align-self: stretch; }
+.statusbar__link:focus-visible,
+.hero__link:focus-visible { outline: 1px solid var(--accent-soft); outline-offset: 4px; border-radius: 999px; }
+.statusbar__link:hover .statusbar__latency,
+.statusbar__link[aria-expanded="true"] .statusbar__latency,
+.hero__link:hover .hero__latency,
+.hero__link[aria-expanded="true"] .hero__latency { background: var(--bg-hover); }
+.hero__link:hover .hero__state,
+.hero__link[aria-expanded="true"] .hero__state { color: var(--accent); }
+.pingpop__viz { position: relative; height: 44px; }
+/* The graph's top value, and dashed guides where the ping turns amber
+   (100 ms) and red (300 ms). */
+.pingpop__scale,
+.pingpop__guide-label {
+  position: absolute;
+  font-size: 0.58rem;
+  line-height: 1;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.pingpop__scale { top: 0; left: 0; }
+.pingpop__guide {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed rgba(245, 165, 36, 0.4);
+  pointer-events: none;
+}
+.pingpop__guide--bad { border-top-color: rgba(239, 106, 90, 0.45); }
+.pingpop__guide-label { right: 0; bottom: 2px; }
+.sysmeter-pop__v[data-ping="ok"] { color: var(--ok); }
+.sysmeter-pop__v[data-ping="warn"] { color: var(--accent); }
+.sysmeter-pop__v[data-ping="bad"] { color: var(--critical); }
+.pingpop__key {
+  justify-content: flex-start;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-muted);
+}
+.pingpop__swatch[data-ping="ok"] { background: var(--ok); }
+.pingpop__swatch[data-ping="warn"] { background: var(--accent); }
+.pingpop__swatch[data-ping="bad"] { background: var(--critical); }
+.pingpop__note { margin-top: var(--s-2); }
+.sysmeter-pop__cell .sysmeter-pop__sub { margin-top: 0; }
+
 /* ─── Session picker: lifecycle states, per-session use, stopped list ──── */
 .sess[data-state="task"] .sess__dot {
   background: var(--ok);

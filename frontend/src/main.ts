@@ -153,13 +153,15 @@ async function attachTerminal(session: string): Promise<void> {
       import("./waveform"),
       import("./layout"),
       import("./sysmeter"),
+      import("./pingmeter"),
     ]);
   } catch (e) {
     console.warn("terminal code failed to load:", e);
     if (!recoverFromStaleBundle()) renderBootstrapError(() => location.reload(), "Couldn’t load the app’s code.");
     return;
   }
-  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }, { TileLayout }, { mountSysMeter }] = modules;
+  const [{ createTerminal }, { MicStreamer }, { TtsPlayer }, { Waveform }, { TileLayout }, { mountSysMeter },
+    { FAST_PING_MS, LatencyLog, latencyLevel, pingDropdown }] = modules;
 
   // Fire dispose on whatever is currently mounted (session picker or a
   // prior terminal view) before wiping it, so its timers/listeners
@@ -200,21 +202,39 @@ async function attachTerminal(session: string): Promise<void> {
   const divider1 = document.createElement("div");
   divider1.className = "statusbar__divider";
 
-  const dot = document.createElement("div");
+  const dot = document.createElement("span");
   dot.className = "statusbar__dot";
 
-  const stateLabel = document.createElement("div");
+  const stateLabel = document.createElement("span");
   stateLabel.className = "statusbar__state";
   stateLabel.textContent = "connecting";
 
   // Latency pip — sits next to the connection dot, shows the most
   // recent ping→pong RTT. Colour-coded so a glance tells you whether
   // the connection is comfortable, draggy, or about to wobble.
-  const latencyLabel = document.createElement("div");
+  const latencyLabel = document.createElement("span");
   latencyLabel.className = "statusbar__latency";
-  latencyLabel.title = "Most recent ping round-trip";
   latencyLabel.textContent = "";
   latencyLabel.hidden = true;
+
+  // The dot, the state and the ping are one button: it drops down the
+  // round-trip graph and the connection's history (pingmeter.ts).
+  const linkBtn = document.createElement("button");
+  linkBtn.type = "button";
+  linkBtn.className = "statusbar__link";
+  linkBtn.title = "Connection: round trips and reconnects";
+  linkBtn.setAttribute("aria-label", "Connection");
+  linkBtn.append(dot, stateLabel, latencyLabel);
+  const pingLog = new LatencyLog();
+  const pingPop = pingDropdown(linkBtn, pingLog, {
+    linkTitle: "this session's connection",
+    dropsLabel: "reconnects",
+    scheme: location.protocol === "https:" ? "wss" : "ws",
+    secure: location.protocol === "https:",
+    note: "A ping goes to ccpipe over this session's connection every 30 s, "
+      + "and every 2 s while this is open.",
+    onOpenChange: (open) => socket.setFastPing(open ? FAST_PING_MS : null),
+  });
 
   const sessionLabel = document.createElement("div");
   sessionLabel.className = "statusbar__session";
@@ -481,7 +501,7 @@ async function attachTerminal(session: string): Promise<void> {
   // System status beside the ping (sysmeter.ts): inline on wide screens, a
   // three-bar meter on the phone; tap for the details.
   const sysMeter = mountSysMeter(session);
-  statusbar.append(brand, divider1, dot, stateLabel, latencyLabel, sysMeter.el, sessionLabel, controls);
+  statusbar.append(brand, divider1, linkBtn, sysMeter.el, sessionLabel, controls);
 
   // ─── Terminal ─────────────────────────────────────────────────────────
   const terminalContainer = document.createElement("div");
@@ -973,6 +993,8 @@ async function attachTerminal(session: string): Promise<void> {
       // Latency reading goes stale once the WS isn't open; hide it
       // rather than letting "423 ms" linger over a closed connection.
       if (status !== "open") latencyLabel.hidden = true;
+      if (status === "open") pingLog.online();
+      else if (status === "reconnecting" || status === "closed") pingLog.offline();
       // Any non-open status means mic frames are no longer being
       // delivered. Drop recording state + tear the device down so a
       // dropped WS in the middle of dictation doesn't leave the UI
@@ -1124,9 +1146,9 @@ async function attachTerminal(session: string): Promise<void> {
       // measurement yet so it doesn't flash garbage at connect time.
       latencyLabel.hidden = false;
       latencyLabel.textContent = `${ms} ms`;
-      latencyLabel.classList.toggle("statusbar__latency--ok", ms < 100);
-      latencyLabel.classList.toggle("statusbar__latency--warn", ms >= 100 && ms < 300);
-      latencyLabel.classList.toggle("statusbar__latency--bad", ms >= 300);
+      const lvl = latencyLevel(ms);
+      for (const l of ["ok", "warn", "bad"]) latencyLabel.classList.toggle(`statusbar__latency--${l}`, l === lvl);
+      pingLog.add(ms);
     },
   });
 
@@ -1230,6 +1252,7 @@ async function attachTerminal(session: string): Promise<void> {
     unsubPrefs();
     unbusy();
     sysMeter.dispose();
+    pingPop.dispose();
     window.removeEventListener("resize", syncTilesBtn);
     if (tmuxRefreshTimer !== null) clearTimeout(tmuxRefreshTimer);
     tmuxBar?.dispose();

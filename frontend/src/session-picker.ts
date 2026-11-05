@@ -25,6 +25,7 @@ import {
   ICON_VIEW_DETAILED, ICON_VIEW_GRID, ICON_X, KEBAB_SVG, PIN_SVG, iconNode,
 } from "./icons";
 import { loadRecentDirs, pushRecentDir } from "./recent-dirs";
+import { FAST_PING_MS, LatencyLog, latencyLevel, pingDropdown } from "./pingmeter";
 import { mountSysPanel } from "./syspanel";
 import { bar, fmtBytes, loadStatsPrefs, onStatsPrefs } from "./sysviz";
 // `./settings` is dynamically imported in the gear click handler so it
@@ -300,7 +301,14 @@ export function renderSessionPicker(
   const statusLatency = h("span", "hero__latency");
   statusLatency.hidden = true;
   const statusCount = h("span", "hero__count");
-  status.append(statusDot, statusLabel, statusLatency, statusCount);
+  // The dot, state and round trip are one button: it drops down the
+  // round-trip graph and the server's ups and downs (pingmeter.ts).
+  const statusLink = h("button", "hero__link");
+  statusLink.type = "button";
+  statusLink.title = "Connection: round trips and outages";
+  statusLink.setAttribute("aria-label", "Connection");
+  statusLink.append(statusDot, statusLabel, statusLatency);
+  status.append(statusLink, statusCount);
   heroText.append(word, status);
   const gear = iconButton(GEAR_SVG, "Settings", "hero__gear");
   gear.addEventListener("click", async () => {
@@ -480,7 +488,29 @@ export function renderSessionPicker(
   // ─── Backend reachability (hero status line) ────────────────────────────
   // Polls /api/health: green < 100 ms, amber < 300 ms, red on failure. The
   // first probe waits for idle so page-boot work doesn't inflate the RTT
-  // (see [[feedback-rtt-measurement-pitfalls]]).
+  // (see [[feedback-rtt-measurement-pitfalls]]). The readings feed the
+  // drop-down, which probes every FAST_PING_MS while it's open.
+  const healthLog = new LatencyLog();
+  let fastProbeTimer: number | null = null;
+  const stopFastProbe = (): void => {
+    if (fastProbeTimer !== null) clearInterval(fastProbeTimer);
+    fastProbeTimer = null;
+  };
+  const healthPop = pingDropdown(statusLink, healthLog, {
+    linkTitle: "the ccpipe server",
+    dropsLabel: "outages",
+    scheme: location.protocol === "https:" ? "https" : "http",
+    secure: location.protocol === "https:",
+    note: `A request goes to ccpipe every ${HEALTH_POLL_MS / 1000} s, and every 2 s while this is open.`,
+    onOpenChange(open) {
+      stopFastProbe();
+      if (!open) return;
+      // One probe at a time: a slow one isn't cut short by the next.
+      const fast = (): void => { if (!activeProbe && !document.hidden) void probeHealth(); };
+      fastProbeTimer = window.setInterval(fast, FAST_PING_MS);
+      fast();
+    },
+  });
   const setStatus = (cls: "ok" | "warn" | "err" | "", label: string, latency: string): void => {
     statusDot.className = "hero__dot" + (cls ? " " + cls : "");
     statusLabel.textContent = label;
@@ -497,12 +527,16 @@ export function renderSessionPicker(
     try {
       const res = await fetch("/api/health", { credentials: "same-origin", signal: ac.signal });
       const rtt = Math.round(performance.now() - t0);
-      if (!res.ok) { setStatus("err", `backend ${res.status}`, ""); return; }
-      setStatus(rtt < 100 ? "ok" : rtt < 300 ? "warn" : "err", "online", `${rtt} ms`);
+      if (!res.ok) { setStatus("err", `backend ${res.status}`, ""); healthLog.offline(); return; }
+      const lvl = latencyLevel(rtt);
+      setStatus(lvl === "bad" ? "err" : lvl, "online", `${rtt} ms`);
+      healthLog.online();
+      healthLog.add(rtt);
     } catch (err) {
       // An abort is the timeout or a newer probe; the next tick tells.
       if ((err as Error)?.name === "AbortError") return;
       setStatus("err", "offline", "");
+      healthLog.offline();
     } finally {
       clearTimeout(timeout);
       if (activeProbe === ac) activeProbe = null;
@@ -517,9 +551,11 @@ export function renderSessionPicker(
   }
   const healthTimer = window.setInterval(() => {
     if (!frame.isConnected) { teardown(); return; }
-    if (!document.hidden) void probeHealth();
+    if (!document.hidden && fastProbeTimer === null) void probeHealth();
   }, HEALTH_POLL_MS);
   cleanups.push(() => {
+    healthPop.dispose();
+    stopFastProbe();
     clearInterval(healthTimer);
     if (firstProbeTimer !== null) clearTimeout(firstProbeTimer);
     if (idleHandle !== null && typeof window.cancelIdleCallback === "function") {

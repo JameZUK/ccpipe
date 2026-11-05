@@ -59,8 +59,9 @@ software one and speech plays in your browser.
 - **Voice.** Dictate into Claude's `/voice`, hear replies read aloud, and
   hear when Claude asks a question or needs permission.
   [Voice →](docs/guide/voice.md)
-- **Status.** The machine's CPU, memory and disk, and how much of your
-  Claude plan you've used. [Status →](docs/guide/status.md)
+- **Status.** The machine's CPU, memory and disk, how much of your
+  Claude plan you've used, and the connection's round trips and
+  reconnects. [Status →](docs/guide/status.md)
 - **Secure sign-in.** Always on: a password, two-factor codes and
   passkeys, in whatever combination you choose.
   [Signing in →](docs/guide/account.md)

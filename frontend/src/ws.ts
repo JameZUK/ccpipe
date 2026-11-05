@@ -186,6 +186,11 @@ export class TerminalSocket {
   // any realistic RTT, so the next ping always arrives well after the
   // previous pong.
   private lastPingSentAt = 0;
+  // Extra pings while the latency pop-up is open (setFastPing), and whether
+  // this socket's server has reached its receive loop (stream_ready): a
+  // ping before that would time the history replay, not the network.
+  private fastPingTimer: number | null = null;
+  private streamReady = false;
   // Pending retry handle so reconnectNow() can cancel an in-flight backoff
   // and dial immediately when the network/tab comes back.
   private pendingRetry: number | null = null;
@@ -272,6 +277,10 @@ export class TerminalSocket {
       this.retryAttempt = 0;
       this.hadOpenedOnce = true;
       this.lastReceivedAt = Date.now();
+      // A ping still unanswered on the old socket will never be: forget it,
+      // so it doesn't hold back this socket's first ping.
+      this.lastPingSentAt = 0;
+      this.streamReady = false;
       // Re-send the latest known viewport size BEFORE the status flips
       // to 'open'. Backend's PTY spawn waits briefly for this message
       // (see ws.py::handle_terminal_ws) so the tmux client attaches at
@@ -325,6 +334,7 @@ export class TerminalSocket {
                 this.receivingHistory = false;
               }
               this.lastStreamReadyAt = Date.now();
+              this.streamReady = true;
               // Server has finished history-send and is one statement
               // from `while True: await receive()`. But on the CLIENT
               // side xterm.js is probably still parsing the history-
@@ -510,8 +520,30 @@ export class TerminalSocket {
                                               this.keepaliveIntervalMs);
   }
 
+  /** Ping every `ms` as well as the keepalive's 30 s, while the latency
+   * pop-up is open (one goes now); null goes back to the keepalive alone. */
+  setFastPing(ms: number | null): void {
+    if (this.fastPingTimer !== null) {
+      clearInterval(this.fastPingTimer);
+      this.fastPingTimer = null;
+    }
+    if (ms === null || this.closed) return;
+    const ping = (): void => {
+      // Not before the server is in its receive loop, and not from a hidden
+      // tab (whose timers the browser delays anyway).
+      if (this.streamReady && !document.hidden) this.sendPing();
+    };
+    this.fastPingTimer = window.setInterval(ping, ms);
+    ping();
+  }
+
   private sendPing(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // One ping in flight at a time: another would restart the clock, and
+    // the first one's pong would then be timed against it. One unanswered
+    // for 10 s is given up on. (A ping went out within the last 10 s, so
+    // skipping a keepalive here doesn't let the connection go idle.)
+    if (this.lastPingSentAt && performance.now() - this.lastPingSentAt < 10_000) return;
     // performance.now() is a monotonic high-resolution clock in the
     // same time base as the WebSocket message event's `timeStamp`
     // (both are DOMHighResTimeStamp relative to performance.timeOrigin).
@@ -602,6 +634,7 @@ export class TerminalSocket {
     this.closed = true;
     this.clearConnectTimer();
     this.stopKeepalive();
+    this.setFastPing(null);
     this.stopStaleCheck();
     if (this.pendingRetry !== null) {
       clearTimeout(this.pendingRetry);

@@ -3,6 +3,7 @@
 [← Documentation](../README.md)
 
 - [System status](#system-status)
+- [The connection](#the-connection)
 - [Claude plan usage](#claude-plan-usage)
 
 ## System status
@@ -31,6 +32,28 @@ switched off stops asking the server too.
 <p align="center">
   <img src="../screenshots/Mobile-Status.jpg" width="220" alt="The status pop-up opened from the four-bar meter: a key naming the cpu, mem, disk and plan bars and their colours, CPU and memory graphs, disk use, the Claude plan's 5-hour, weekly and per-model meters with their reset times and pace ticks, usage credits, and this session's memory, CPU, project size and context fill">
 </p>
+
+## The connection
+
+The coloured dot and the ping beside it (green under 100 ms, amber to
+300 ms, red beyond) show how the connection to ccpipe is doing: in a
+session's top bar it's this session's connection, and on the landing
+page it's the server. Click or tap them for a drop-down with:
+
+- **A graph of the round trips,** scaled to fit them, with dashed lines
+  where the ping turns amber and red once the readings reach that high.
+  A break in the line is a drop.
+- **The spread:** the lowest, median and highest round trip, and the
+  jitter (how much one reading differs from the next, on average).
+- **The connection's ups and downs:** how long it's been up (or down),
+  how many times it has reconnected (on the landing page, how many
+  outages there have been), and when it last dropped and for how long.
+  It also says whether the connection is encrypted.
+
+A session pings every 30 s and the landing page checks every 5 s; while
+the drop-down is open, both measure every 2 s so the graph moves. The
+readings start when the page opens. As with the status pop-up, tapping
+the ping on a phone doesn't close the soft keyboard.
 
 ## Claude plan usage
 
