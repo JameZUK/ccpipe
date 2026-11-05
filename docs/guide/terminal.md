@@ -72,6 +72,10 @@ app. A connection attempt stuck on a network that's gone is abandoned
 after 10 seconds and retried, and returning to the app redials straight
 away, so you shouldn't need to reload.
 
+To see how the connection is doing, tap the ping in the top bar: a graph
+of its round trips, and how often and for how long it has dropped. See
+[Status → The connection](status.md#the-connection).
+
 ## Updates without a reload
 
 After a deploy, open pages move to the new build by themselves, at a
