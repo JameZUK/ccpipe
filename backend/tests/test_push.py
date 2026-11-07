@@ -218,6 +218,14 @@ def sent(monkeypatch):
     return out
 
 
+def test_topics_are_letters_and_digits():
+    import re
+    for level in ("ask", "done", "test"):
+        for item in (None, _item(level if level != "test" else "ask", session="a_b-c")):
+            t = notify._topic(item, level)
+            assert re.fullmatch(r"[A-Za-z0-9]{1,32}", t), t
+
+
 async def test_pushed_straight_away_when_no_page_is_on_screen(store, sent):
     _subscribe(Device(), device="phone")
     _subscribe(Device(MOZ + "2"), device="laptop", ask=False)

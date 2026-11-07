@@ -276,9 +276,12 @@ def _subject(sub: dict[str, Any]) -> str:
 
 
 def _topic(item: attention.Item | None, level: str) -> str:
-    # Replaces one still waiting at the push service (≤ 32 URL-safe chars).
+    """Replaces a notification still waiting at the push service. Letters
+    and digits only, ≤ 32: RFC 8030 allows "-" and "_" too, but Apple
+    refused "test-…" (400 BadWebPushTopic, the user's iPad, 2026-11-07)
+    and Mozilla's autopush documents [A-Za-z0-9] only."""
     name = item.session if item else "test"
-    return f"{level}-{hashlib.sha256(name.encode()).hexdigest()[:24]}"
+    return f"{level}{hashlib.sha256(name.encode()).hexdigest()[:24]}"
 
 
 async def _send(sub: dict[str, Any], item: attention.Item | None, level: str) -> webpush.Result:
