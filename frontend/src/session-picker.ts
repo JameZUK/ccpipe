@@ -65,8 +65,9 @@ type SessionInfo = {
   /** Idle tracking: why it counts as in use; when it'll be stopped if idle. */
   busy?: string | null;
   stops_at?: number | null;
-  /** Claude Code's own status: "busy" | "shell" (background task) |
-   * "idle" | "waiting" (a question or permission prompt is up). */
+  /** Claude Code's own status: "busy" | "shell" (background shell task) |
+   * "mcp" (background MCP task, from its footer) | "idle" | "waiting" (a
+   * question or permission prompt is up). */
   claude?: string | null;
   /** What needs you here: Claude's question, or a finished turn. */
   attention?: AttentionItem | null;
@@ -227,7 +228,7 @@ function stateOf(s: SessionInfo): State {
   if (s.attention?.level === "ask" || s.claude === "waiting") return "asking";
   if (s.claude === "busy" || taskOf(s).working) return "working";
   if (s.attention?.level === "done") return "done";
-  if (s.claude === "shell") return "task";
+  if (s.claude === "shell" || s.claude === "mcp") return "task";
   return (s.clients ?? (s.attached ? 1 : 0)) > 0 ? "open" : "idle";
 }
 
@@ -1046,7 +1047,8 @@ export function renderSessionPicker(
       activity.title = "Claude finished its turn while no one was looking. Opening it clears this.";
     } else if (state === "working" || state === "task") {
       activity.classList.add("is-working");
-      activity.textContent = state === "working" ? "working" : "task running";
+      activity.textContent = state === "working" ? "working"
+        : s.claude === "mcp" ? "MCP task running" : "task running";
     } else if (stopped) {
       activity.textContent = stopped.stopped ? relativeTime(stopped.stopped) : "stopped";
       if (stopped.stopped) activity.title = `Stopped ${fullDate(stopped.stopped)}`;

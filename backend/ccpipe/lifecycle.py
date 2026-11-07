@@ -14,6 +14,7 @@ its idle clock restarts — whenever any of these holds (busy_reason):
   2. there was output or input in the pane;
   3. Claude is working, or idle with a background shell task — Claude
      Code's own status ("busy" / "shell") in ~/.claude/sessions/<pid>.json
+     — or with a background MCP task ("mcp": only its footer says so)
      (attention.claude_states); older versions: a spinner in the pane title;
   4. a Claude tool command is running, foreground or background — Claude
      runs each as `bash -c 'source ~/.claude/shell-snapshots/…'`, so any
@@ -94,6 +95,8 @@ def busy_reason(s: tmux.TmuxSession, roots: list[int], table: proctree.Table,
         return "Claude is working"
     if claude == "shell":
         return "background task running"
+    if claude == "mcp":
+        return "MCP task running"
     pids: list[int] = []
     for root in roots:
         rp = table.procs.get(root)

@@ -90,7 +90,9 @@ class SessionInfo(BaseModel):
     busy: str | None = None
     idle_since: int | None = None
     stops_at: int | None = None
-    # Claude Code's own status: "busy" (working on a turn), "shell" (idle
+    # Claude Code's own status: "busy" (working on a turn), "waiting" (a
+    # question or permission prompt), "mcp" (idle with a background MCP
+    # task, from its footer: attention.py), "shell" (idle
     # with a background shell task) or "idle"; None = no Claude running.
     claude: str | None = None
     claude_since: int | None = None

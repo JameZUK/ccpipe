@@ -651,7 +651,8 @@ async def all_panes() -> dict[str, list[int]]:
 # the reliable "is Claude working" signal: the pane title shows ✳ even mid
 # turn, and a long tool call produces no pane output for minutes.
 # "waiting" (a question or permission prompt is up) needs you most.
-_STATUS_RANK = {"waiting": 4, "busy": 3, "shell": 2, "idle": 1}
+# "mcp" (attention.py): idle with a background MCP task, from its footer.
+_STATUS_RANK = {"waiting": 4, "busy": 3, "shell": 2, "mcp": 2, "idle": 1}
 
 
 def _read_claude_states(pane_sessions: dict[str, str]) -> dict[str, tuple[str, int]]:

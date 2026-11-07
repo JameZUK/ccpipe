@@ -12,7 +12,11 @@ Two levels:
 One watcher for the whole server (``run``, started by the app lifespan).
 Every POLL_S it reads Claude Code's session files,
 ``~/.claude/sessions/<pid>.json``: their ``status`` is "busy", "shell" (idle
-with a background task), "idle" or "waiting". The question itself is read
+with a background shell task), "idle" or "waiting". An MCP tool Claude has
+moved to the background doesn't show there: Claude says "idle" while it
+runs (2.1.319, 2026-11-07: a 13-minute kicad autoroute in chirper), and
+only its footer says "1 MCP task". So an idle Claude's footer is read now
+and then, and ``claude_states`` reports it as "mcp". The question itself is read
 off Claude's pane when the wait starts (claude_asks.py). It costs one small
 file read per Claude each second, and a screen capture only while one waits.
 
@@ -36,6 +40,7 @@ from typing import Any
 
 from . import claude_asks, tmux
 from .paths import claude_project_dir
+from .tmux_control import control_client
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +63,11 @@ _TAIL_BYTES = 256 * 1024  # how much of a transcript is read for the last reply
 
 # Several Claudes in one session (split panes): the one that needs you most.
 _RANK = tmux._STATUS_RANK
+# An idle Claude's footer is read this often, and more often while it shows
+# a background MCP task (so the list shows it end soon after it does).
+MCP_EVERY_S = 30.0
+MCP_WHILE_S = 5.0
+_MCP_RE = re.compile(r"\b(\d+) MCP tasks?\b")
 
 
 @dataclass
@@ -321,7 +331,6 @@ def _place(data: dict[str, Any]) -> str | None:
 async def _claudes() -> dict[str, dict[str, Any]]:
     """session name → the session file of its Claude (the one that needs
     you most, when a session has several)."""
-    global _snapshot_at
     files = await asyncio.to_thread(_read_files)
     if time.monotonic() - _panes_at >= PANES_EVERY_S:
         await _refresh_panes()
@@ -361,17 +370,65 @@ async def _claudes() -> dict[str, dict[str, Any]]:
             out[name] = data
     live = {(d["pid"], str(d.get("procStart", ""))) for d in files}
     _foreign.intersection_update(live)
-    _snapshot.clear()
-    for name, data in out.items():
-        since = data.get("statusUpdatedAt")
-        _snapshot[name] = (data["status"], int(since / 1000) if isinstance(since, (int, float)) else 0)
-    _snapshot_at = time.monotonic()
     return out
+
+
+def _take_snapshot(claudes: dict[str, dict[str, Any]]) -> None:
+    global _snapshot_at
+    _snapshot.clear()
+    for name, data in claudes.items():
+        since = data.get("statusUpdatedAt")
+        status = data["status"]
+        tr = _tracks.get(name)
+        if status == "idle" and tr is not None and tr.mcp:
+            status = "mcp"
+        _snapshot[name] = (status, int(since / 1000) if isinstance(since, (int, float)) else 0)
+    _snapshot_at = time.monotonic()
+
+
+async def _capture(target: str) -> list[str] | None:
+    """A pane's screen, over the control connection (no tmux process to
+    start), or tmux itself when that isn't up."""
+    lines = await control_client.query(f"capture-pane -p -t {target}")
+    if lines is None:
+        out = await tmux._tmux_out("capture-pane", "-p", "-t", target)
+        lines = None if out is None else out.split("\n")
+    return lines
+
+
+def footer_mcp_tasks(lines: list[str]) -> int:
+    """How many background MCP tasks Claude's footer counts ("⏵⏵ auto mode
+    on · 1 MCP task"): the lines under the prompt box, so the "1 MCP task
+    still running" of a finished turn above it doesn't count. Public for
+    tests."""
+    lines = [ln.rstrip() for ln in lines]
+    while lines and not lines[-1]:
+        lines.pop()
+    rule = max((i for i, ln in enumerate(lines) if claude_asks._SOLID_RULE_RE.match(ln)), default=-1)
+    footer = lines[rule + 1:] if rule >= 0 else lines[-3:]
+    m = _MCP_RE.search("\n".join(footer))
+    return int(m.group(1)) if m else 0
+
+
+async def _check_mcp(name: str, tr: "_Track", state: dict[str, Any]) -> None:
+    now = time.monotonic()
+    stamp = state.get("statusUpdatedAt")
+    if stamp != tr.mcp_stamp:
+        # Just went idle: look once the footer has had a moment to draw.
+        if isinstance(stamp, (int, float)) and time.time() * 1000 - stamp < 1000:
+            return
+    elif now - tr.mcp_at < (MCP_WHILE_S if tr.mcp else MCP_EVERY_S):
+        return
+    tr.mcp_at, tr.mcp_stamp = now, stamp
+    lines = await _capture(await claude_asks._pane_of(name, state))
+    if lines is not None:
+        tr.mcp = footer_mcp_tasks(lines)
 
 
 async def claude_states() -> dict[str, tuple[str, int]]:
     """session name → (Claude's status, since when): the watcher's last
-    look, a second old at most; read afresh when it isn't running."""
+    look, a second old at most; read afresh when it isn't running. "mcp":
+    idle, with a background MCP task running."""
     if time.monotonic() - _snapshot_at < 3 * POLL_S:
         return dict(_snapshot)
     return await tmux.claude_states()
@@ -389,6 +446,9 @@ class _Track:
     busy_since: float | None = None     # wall clock
     idle_at: float | None = None        # monotonic
     missing: int = 0                    # looks in a row without its Claude
+    mcp: int = 0                        # background MCP tasks its footer shows
+    mcp_at: float = float("-inf")       # monotonic
+    mcp_stamp: Any = None               # the status stamp it was read for
     # A new question not read off the screen yet (announced once it is).
     pending: claude_asks.Ask | None = None
     pending_since: float | None = None  # monotonic
@@ -451,6 +511,12 @@ async def _step(name: str, tr: _Track, state: dict[str, Any] | None, quiet: bool
             tr.ask_key = ask.key
             _put(_ask_item(name, ask), "new")
 
+    # ── a background MCP task (only the footer says) ──
+    if status == "idle" and state is not None:
+        await _check_mcp(name, tr, state)
+    else:
+        tr.mcp, tr.mcp_stamp = 0, None
+
     # ── finished ──
     if status in ("busy", "waiting"):
         tr.idle_at = None
@@ -490,6 +556,7 @@ async def tick(quiet: bool = False) -> None:
     for n, r in zip(claudes, results):
         if isinstance(r, Exception):
             log.debug("attention step for %s failed", n, exc_info=r)
+    _take_snapshot(claudes)
 
 
 async def run() -> None:

@@ -308,3 +308,41 @@ async def test_or_without_them_if_they_never_come(monkeypatch, tmp_path):
     c.screens["%7"] = ["drawing…"]
     await _run(c, [WAIT, {}, {}], gap=0.1)
     assert [(i.title, i.body) for e, i in c.events if e == "new"] == [("Claude has a question", "")]
+
+
+# ─── Background MCP tasks (only Claude's footer says) ─────────────────────
+# chirper, 2026-11-07, Claude Code 2.1.319: status "idle" for the 13 minutes
+# a kicad autoroute ran in the background.
+
+def _chirper(footer: str) -> list[str]:
+    rule = "─" * 120
+    return [
+        "● The second attempt is running in the background: 6 routing passes, capped at 15 minutes.",
+        "",
+        "✻ Brewed for 2m 21s · done 20:03 · 1 MCP task still running",
+        "",
+        rule, "❯ ", rule,
+        "  [james@ chirper]",
+        footer,
+        "",
+    ]
+
+
+def test_the_footer_says_how_many_mcp_tasks():
+    assert attention.footer_mcp_tasks(_chirper("  ⏵⏵ auto mode on · 1 MCP task · ← 5 agents")) == 1
+    assert attention.footer_mcp_tasks(_chirper("  ? for shortcuts · 2 MCP tasks")) == 2
+    # The finished turn's "1 MCP task still running" above the box isn't now.
+    assert attention.footer_mcp_tasks(_chirper("  ⏵⏵ auto mode on · ← 5 agents")) == 0
+
+
+async def test_an_idle_claude_with_an_mcp_task_is_busy_with_it(monkeypatch, tmp_path):
+    c = Claudes(monkeypatch, tmp_path)
+    monkeypatch.setattr(attention, "MCP_WHILE_S", 0.02)
+    c.add(status="idle", statusUpdatedAt=1)
+    c.screens["%7"] = _chirper("  ⏵⏵ auto mode on · 1 MCP task · ← 5 agents")
+    seen = []
+
+    def look():
+        seen.append(dict(attention._snapshot))
+    await _run(c, [look, lambda: c.screens.update({"%7": _chirper("  ⏵⏵ auto mode on")}), look], gap=0.1)
+    assert seen == [{"work": ("mcp", 0)}, {"work": ("idle", 0)}]

@@ -26,7 +26,8 @@ Each session shows:
 - **What Claude is working on:** the task Claude Code puts in the pane
   title.
 - **Its state:** **working** while Claude is on a turn, **task running**
-  while a background shell task runs, idle otherwise, and **open** while
+  while a background shell task runs (**MCP task running** for an MCP tool
+  Claude moved to the background), idle otherwise, and **open** while
   a terminal is attached somewhere.
 - **Whether it needs you:** **has a question** or **needs permission**
   (a red dot, with the question) while Claude waits for you, and

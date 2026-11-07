@@ -309,7 +309,8 @@ stay stopped.
 A session counts as in use — and its idle clock restarts — while a
 terminal or tile is attached, its pane produces output or input, Claude
 Code reports itself busy or running a background shell task (its own
-status in `~/.claude/sessions/<pid>.json`), a Claude tool command runs
+status in `~/.claude/sessions/<pid>.json`), its footer shows a background
+MCP task (Claude's status says idle while one runs, so the footer is read), a Claude tool command runs
 (any process carrying `~/.claude/shell-snapshots/`, even a `sleep` loop
 at 0 % CPU), the pane's shell runs anything besides Claude (a server, a
 build, an editor, in any window or pane), its processes use CPU, or a
