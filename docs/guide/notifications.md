@@ -30,14 +30,18 @@ you saw it.
 
 A session that's asking has a pulsing red dot, says **has a question** or
 **needs permission**, and shows the question itself in place of Claude's
-task. A finished one has a green ring, says **finished 5m ago**, and shows
-the end of Claude's reply. The header adds what needs you to its summary,
-such as *1 needs you · 2 finished*, with **clear** to dismiss the finished
-ones.
+task. A finished one has a green ring, says **finished** (hover for when),
+and shows the end of Claude's reply. The header adds what needs you to its
+summary, such as *2 need you · 1 finished*, with **clear** to dismiss the
+finished ones.
+
+<p align="center">
+  <img src="../screenshots/Desktop-Attention-List.png" width="720" alt="The session list with three sessions at the top: infra has a question, with a red dot and its question, which storage class backups should move to after 30 days; homelab needs permission, with a red dot and the command, restart Grafana to load the fixed dashboard; and weather-api finished, with a green ring and the end of Claude's reply about the new health endpoint. The header reads 8 running, 1 with a task, 3 stopped, 2 need you, 1 finished, with a clear button">
+</p>
 
 Sessions that are asking go to the top when the list is sorted (when you
-open it, change the sort, or come back to it), with finished ones next. In between, rows stay where
-they are, so nothing moves under your finger. The list checks every 3
+open it, change the sort, or come back to it), with finished ones next.
+In between, rows stay where they are, so nothing moves under your finger. The list checks every 3
 seconds, and a chime plays when something new needs you (see
 [Settings](#settings)).
 
@@ -54,6 +58,10 @@ it's asking or how its reply ended, and how long ago, with:
 - **Clear:** dismiss a finished turn (**Clear all finished** for every
   one).
 
+<p align="center">
+  <img src="../screenshots/Desktop-Attention-Bell.png" width="720" alt="A desktop session, blog, with the bell in its top bar showing 3 and its list open: infra has a question (which storage class, with the two choices) with Answer and Beside this; homelab needs permission (Bash command: restart Grafana) with Open and Beside this; and weather-api finished, with the end of its reply and Open, Beside this and Clear">
+</p>
+
 When something new arrives, a banner drops in under the top bar for a
 few seconds, with the same Answer or Open. A chime plays, two rising
 notes for a question and one soft note for a finished turn, and the
@@ -64,6 +72,19 @@ and so does the app icon's badge where the browser has one.
 The session you're in, and any in tiles beside it, are on screen, so
 they're left out. This session's own question is read out in full, as it
 always was (see [Voice](voice.md#when-claude-asks-you-something)).
+
+<table>
+<tr>
+<td align="center"><img src="../screenshots/Mobile-Attention-List.jpg" width="220" alt="The session list on a phone: the header says 2 need you and 1 finished, with clear; infra has a question and homelab needs permission, each with a red dot and the start of the question; weather-api finished, with a green ring and the start of Claude's reply; then blog with a task running"></td>
+<td align="center"><img src="../screenshots/Mobile-Attention-Toast.jpg" width="220" alt="The blog session on a phone, with a banner under the top bar: infra has a question, which storage class should backups move to after 30 days, with an Answer button and a close cross. The bell in the top bar shows 3"></td>
+<td align="center"><img src="../screenshots/Mobile-Attention-Bell.jpg" width="220" alt="The bell's list on a phone: homelab needs permission with Open, infra has a question with Answer, and weather-api finished with Open and Clear, each with its text and just now"></td>
+</tr>
+<tr>
+<td align="center"><sub>The list shows who needs you…</sub></td>
+<td align="center"><sub>…a banner when a question comes up…</sub></td>
+<td align="center"><sub>…and the bell lists them all.</sub></td>
+</tr>
+</table>
 
 ## Push notifications
 
@@ -123,6 +144,10 @@ touches Claude's login or Anthropic.
 ## Settings
 
 **Settings → Notifications**:
+
+<p align="center">
+  <img src="../screenshots/Desktop-Notifications-Settings.png" width="560" alt="Settings, Notifications tab: a grid with sound, say it and push for questions and permission (all ticked) and finished turns (sound ticked); push notifications on for this device with Send a test and Turn off; show the question or the reply, ticked; wait 1 minute while ccpipe is open on another device; the devices with push on, an iPad (questions and finished turns, last delivered 4 min ago), Firefox on Android (questions, 25 min ago) and this one, Chrome on Linux, with Remove for the other two; and notify from an open tab in the background">
+</p>
 
 | | Sound | Say it | Push |
 |---|---|---|---|

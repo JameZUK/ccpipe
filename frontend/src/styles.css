@@ -943,6 +943,9 @@ a:hover { color: var(--fg); }
   color: var(--fg-muted);
   font-size: var(--t-xs);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
   font-variant-numeric: tabular-nums;
 }
 .sess__activity.is-working { color: var(--ok); letter-spacing: 0.06em; }
@@ -986,7 +989,7 @@ a:hover { color: var(--fg); }
    line up from row to row. */
 .sess--compact {
   display: grid;
-  grid-template-columns: auto minmax(0, 15rem) minmax(0, 1fr) 6rem 2.25rem;
+  grid-template-columns: auto minmax(0, 15rem) minmax(0, 1fr) 8.5rem 2.25rem;
   align-items: center;
   gap: var(--s-3);
   padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4);
@@ -4435,6 +4438,17 @@ body.mobile .statusbar__controls .pill[data-role="tts"] svg { width: 1rem; heigh
 .picker-shell[data-use="on"] .picker__thead,
 .picker-shell[data-use="on"] .sess--detailed {
   grid-template-columns: 0.6rem minmax(0, 2.2fr) minmax(0, 1.2fr) 6rem 5rem 6.5rem 6.5rem 9.5rem 9.5rem 2.25rem;
+}
+/* Room for "needs permission" in the activity column where there's room. */
+@media (min-width: 1200px) {
+  .picker__thead,
+  .sess--detailed {
+    grid-template-columns: 0.6rem minmax(0, 2.4fr) minmax(0, 1.4fr) 8.5rem 10.5rem 10.5rem 2.25rem;
+  }
+  .picker-shell[data-use="on"] .picker__thead,
+  .picker-shell[data-use="on"] .sess--detailed {
+    grid-template-columns: 0.6rem minmax(0, 2.2fr) minmax(0, 1.2fr) 8.5rem 5rem 6.5rem 6.5rem 9.5rem 9.5rem 2.25rem;
+  }
 }
 /* Wide: cpu, memory and disk are table columns (the wrapper dissolves). */
 .sess--detailed .sess__uses { display: contents; }

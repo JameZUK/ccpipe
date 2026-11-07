@@ -1043,8 +1043,9 @@ export function renderSessionPicker(
       if (ask) activity.title = `${ask.title}, ${relativeTime(ask.since)}`;
     } else if (state === "done" && ask) {
       activity.classList.add("is-done");
-      activity.textContent = `finished ${relativeTime(ask.since)}`;
-      activity.title = "Claude finished its turn while no one was looking. Opening it clears this.";
+      activity.textContent = "finished";
+      activity.title = `Claude finished ${relativeTime(ask.since)}, while no one was looking. `
+        + "Opening it clears this.";
     } else if (state === "working" || state === "task") {
       activity.classList.add("is-working");
       activity.textContent = state === "working" ? "working"
