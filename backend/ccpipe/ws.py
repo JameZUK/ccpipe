@@ -420,33 +420,6 @@ def anyone_visible() -> bool:
     return any(c.visible and not c.outdated() for c in _connections())
 
 
-def _announcement(item: attention.Item) -> str:
-    """What's said when another session needs you."""
-    name = re.sub(r"[-_]+", " ", item.session)
-    if item.level == "done":
-        return f"{name} has finished."
-    if item.kind == "permission":
-        return f"{name} needs your permission."
-    return f"{name} has a question."
-
-
-# (device, item id) → when it was said: several pages on one device each
-# ask, and it's said once.
-_said: dict[tuple[str, int], float] = {}
-
-
-def _first_say(device: str, item_id: int) -> bool:
-    now = time.monotonic()
-    for k, t in list(_said.items()):
-        if now - t > 600:
-            del _said[k]
-    key = (device or f"conn-{id(object())}", item_id)
-    if key in _said:
-        return False
-    _said[key] = now
-    return True
-
-
 def _attention_message(new: Any) -> dict[str, Any]:
     return {"type": "attention", "items": [i.public() for i in attention.items()],
             "new": sorted(new)}
@@ -1451,8 +1424,8 @@ class _TerminalConnection:
             if (item is not None and self.alive and not self.outdated()
                     and not isinstance(self.tts_sub, _NoTts)
                     and app_config.load().tts.scope != "off"
-                    and _first_say(self.device, item.id)):
-                tts_service.speak_to(_announcement(item), self.tts_sub)
+                    and attention.first_say(self.device, item.id)):
+                tts_service.speak_to(attention.announcement(item), self.tts_sub)
         dismiss = msg.get("dismiss")
         if dismiss == "*":
             attention.dismiss()

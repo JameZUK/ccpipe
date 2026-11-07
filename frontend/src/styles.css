@@ -4913,6 +4913,17 @@ html.window-buttons .file-viewer__bar { padding-left: max(var(--window-buttons-g
 .sess__task--done { color: var(--fg-dim); font-style: italic; }
 .sess--grid[data-state="asking"] { border-top: 2px solid var(--attn-ask); }
 .sess--grid[data-state="done"] { border-top: 2px dashed var(--attn-done); }
+/* The row that just started needing you, as its chime plays. */
+.sess--flash { animation: sess-flash-done 1.1s var(--ease-out) 2; }
+.sess--flash[data-flash="ask"] { animation-name: sess-flash-ask; }
+@keyframes sess-flash-ask {
+  from { box-shadow: inset 0 0 0 999px rgba(239, 106, 90, 0.2), inset 3px 0 0 var(--attn-ask); }
+  to   { box-shadow: inset 0 0 0 999px rgba(239, 106, 90, 0), inset 3px 0 0 transparent; }
+}
+@keyframes sess-flash-done {
+  from { box-shadow: inset 0 0 0 999px rgba(142, 184, 116, 0.16), inset 3px 0 0 var(--attn-done); }
+  to   { box-shadow: inset 0 0 0 999px rgba(142, 184, 116, 0), inset 3px 0 0 transparent; }
+}
 
 .hero__needs { color: var(--attn-done); }
 .hero__needs[data-level="ask"] { color: var(--attn-ask); }
@@ -4980,10 +4991,12 @@ html.window-buttons .file-viewer__bar { padding-left: max(var(--window-buttons-g
 .attn-row__acts .btn, .attn-pop__clear { padding: var(--s-1) var(--s-3); font-size: var(--t-xs); }
 .attn-pop__clear { align-self: flex-start; }
 
-/* Toasts, under the top bar. */
+/* Toasts, under the top bar (attention.ts sets top), or at the top of the
+   session list. */
 .attn-toasts {
   position: fixed;
   z-index: 460;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
   left: 50%;
   transform: translateX(-50%);
   width: min(30rem, calc(100vw - 16px));

@@ -61,9 +61,9 @@ software one and speech plays in your browser.
   commands Claude ran and the diffs of its edits, updating live.
   [History →](docs/guide/files.md#conversation-history)
 - **Know when Claude needs you.** A question or permission prompt in
-  any session is marked on the session list, rung and named aloud in the
-  session you're in, and pushed to your phone or iPad when ccpipe isn't
-  on screen. Finished turns get a quieter mention.
+  any session is marked on the session list, rung and named aloud
+  there and in the session you're in, and pushed to your phone or iPad
+  when ccpipe isn't on screen. Finished turns get a quieter mention.
   [When Claude needs you →](docs/guide/notifications.md)
 - **Voice.** Dictate into Claude's `/voice`, hear replies read aloud, and
   hear when Claude asks a question or needs permission.

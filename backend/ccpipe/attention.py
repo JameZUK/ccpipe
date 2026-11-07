@@ -136,6 +136,38 @@ def asking(session: str) -> bool:
     return (session, "ask") in _items
 
 
+def announcement(item: Item) -> str:
+    """What's said when a session needs you: on the session list, or in
+    another session (ws.py, routes/notify.py)."""
+    name = re.sub(r"[-_]+", " ", item.session)
+    if item.level == "done":
+        return f"{name} has finished."
+    if item.kind == "permission":
+        return f"{name} needs your permission."
+    return f"{name} has a question."
+
+
+# (device, item id) → when it was said: several pages on one device each
+# ask, and it's said once.
+_said: dict[tuple[str, int], float] = {}
+
+
+def first_say(device: str, item_id: int) -> bool:
+    """Whether this device has yet to hear the item (and now it has). A page
+    with no device id always may."""
+    now = time.monotonic()
+    for k, t in list(_said.items()):
+        if now - t > 600:
+            del _said[k]
+    if not device:
+        return True
+    key = (device, item_id)
+    if key in _said:
+        return False
+    _said[key] = now
+    return True
+
+
 def _emit(event: str, item: Item) -> None:
     for fn in list(_listeners):
         try:
@@ -584,4 +616,5 @@ def _reset_for_tests() -> None:
     _file_cache.clear()
     _foreign.clear()
     _snapshot.clear()
+    _said.clear()
     _panes_at = _snapshot_at = float("-inf")

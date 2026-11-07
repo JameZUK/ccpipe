@@ -425,12 +425,60 @@ def test_routes(client, monkeypatch):
     assert client.post("/api/attention/dismiss", headers=H, json={"session": "a;b"}).status_code == 400
 
 
+def test_the_session_list_says_which_session(client, monkeypatch):
+    """After its chime, the session list asks for the name to be said: the
+    server's words, once per device, nothing once it's answered or when the
+    voice reads nothing."""
+    from ccpipe import config
+    from ccpipe.routes import tts as tts_routes
+    asked = []
+
+    class Stream:
+        async def aiter_bytes(self):
+            yield b"MP3"
+
+    class Cm:
+        async def __aexit__(self, *a):
+            return None
+
+    async def open_stream(payload):
+        asked.append(payload)
+        return Cm(), Stream()
+    monkeypatch.setattr(tts_routes, "_open_kokoro_stream", open_stream)
+    cfg = config.load_for_edit()
+    cfg.tts.voice = "af_heart"
+    config.save(cfg)
+
+    item = _item(session="weather-api")
+    r = client.post("/api/attention/say", headers=H, json={"id": item.id, "device": "phone"})
+    assert r.status_code == 200 and r.content == b"MP3"
+    assert asked[0]["input"] == "weather api has a question." and asked[0]["voice"] == "af_heart"
+    # Another page on the phone (a session page asks over its socket, ws.py).
+    assert client.post("/api/attention/say", headers=H,
+                       json={"id": item.id, "device": "phone"}).status_code == 204
+    assert not attention.first_say("phone", item.id)
+    # The iPad hasn't heard it.
+    assert client.post("/api/attention/say", headers=H,
+                       json={"id": item.id, "device": "ipad"}).status_code == 200
+    # Answered since: nothing to say.
+    assert client.post("/api/attention/say", headers=H,
+                       json={"id": item.id + 99, "device": "desk"}).status_code == 204
+    cfg = config.load_for_edit()
+    cfg.tts.scope = "off"
+    config.save(cfg)
+    other = _item(session="infra")
+    assert client.post("/api/attention/say", headers=H,
+                       json={"id": other.id, "device": "phone"}).status_code == 204
+    assert len(asked) == 2
+
+
 def test_routes_need_auth_and_csrf(client):
     anon = TestClient(client.app)
     assert anon.get("/api/attention").status_code == 401
     assert anon.get("/api/push").status_code == 401
     assert client.post("/api/push/subscribe", json={}).status_code == 403
     assert client.post("/api/attention/dismiss", json={}).status_code == 403
+    assert client.post("/api/attention/say", json={"id": 1}).status_code == 403
 
 
 # ─── What open pages are told ─────────────────────────────────────────────

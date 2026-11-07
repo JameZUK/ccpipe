@@ -41,9 +41,18 @@ finished ones.
 
 Sessions that are asking go to the top when the list is sorted (when you
 open it, change the sort, or come back to it), with finished ones next.
-In between, rows stay where they are, so nothing moves under your finger. The list checks every 3
-seconds, and a chime plays when something new needs you (see
-[Settings](#settings)).
+In between, rows stay where they are, so nothing moves under your finger.
+
+The list checks every 3 seconds. When something new needs you, it tells
+you which session:
+
+- A banner at the top names it, with what it's asking or how its reply
+  ended, and **Answer** or **Open**. It covers the row being out of sight.
+- Its row flashes, red for a question and green for a finished turn.
+- A chime plays, and then the session's name is said in ccpipe's voice:
+  *"infra has a question."*
+
+What plays is set in [Settings](#settings).
 
 ## In another session
 
@@ -155,10 +164,11 @@ touches Claude's login or Anthropic.
 | **Finished turns** (quiet) | on | off | off |
 
 - **Sound** and **Say it** are for this device and kept in this browser.
-  With several ccpipe tabs open, only one of them rings or speaks. Say it
-  uses ccpipe's voice, so it needs voice set up. It stays quiet on a
-  session page whose voice is muted, and when Voice → *What to read
-  aloud* is Off. Turning Sound on plays the chime.
+  They apply on the session list and in a session. With several ccpipe
+  tabs open, only one of them rings or speaks. Say it uses ccpipe's
+  voice, so it needs voice set up. It stays quiet on a session page whose
+  voice is muted, and when Voice → *What to read aloud* is Off. Turning
+  Sound on plays the chime.
 - **Push** is this device's subscription. Its choices are kept on the
   server with it.
 - **While ccpipe is open on another device, wait** applies to every

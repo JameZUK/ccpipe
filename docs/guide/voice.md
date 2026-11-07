@@ -71,8 +71,9 @@ permission prompt, ccpipe reads it out: *"Claude asks: Which colour do
 you prefer? Red, or Blue."* or *"Claude needs your permission. Bash
 command: delete hello.txt…"*.
 
-When it's another session that's asking, the voice says which one (*"weather
-api has a question"*), and a bell and a banner show it. Turn either
+When it's another session that's asking, or you're on the session list,
+the voice says which one (*"weather api has a question"*), and a banner
+shows it (and a bell, in a session). Turn either
 off, or the chime, in Settings → Notifications. To be told on a phone
 in your pocket, use push notifications. See
 [When Claude needs you](notifications.md).

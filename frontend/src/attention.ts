@@ -165,7 +165,8 @@ export async function claimAlert(item: AttentionItem): Promise<boolean> {
 // Made here (no sound files): two rising notes for a question, one soft
 // one for a finished turn. On a session page it plays through the voice
 // player, since Safari plays one audio element at a time (tts.ts); on the
-// session list through an element of its own, unlocked by the first tap.
+// session list through an element of its own, unlocked by the first tap,
+// followed there by the session's name (sayOnList).
 
 const blobs = new Map<Level, Blob>();
 
@@ -216,6 +217,8 @@ const GESTURES = ["pointerup", "touchend", "click", "keydown"] as const;
 
 function unlockOwn(): void {
   if (sink || ownUnlocked) return;
+  // Something is playing, so it already could.
+  if (playing) { ownUnlocked = true; return; }
   own ??= new Audio();
   const a = own;
   a.src = silence();
@@ -229,14 +232,77 @@ export function installChimeUnlock(): () => void {
   return () => { for (const g of GESTURES) document.removeEventListener(g, unlockOwn, { capture: true }); };
 }
 
+// The session list's element plays one thing after another: the chime,
+// then the name.
+const queue: Array<{ url: string; revoke: boolean }> = [];
+let playing = false;
+
+function playOwn(url: string, revoke: boolean): void {
+  if (queue.length >= 4) {
+    const dropped = queue.shift();
+    if (dropped?.revoke) URL.revokeObjectURL(dropped.url);
+  }
+  queue.push({ url, revoke });
+  pump();
+}
+
+function pump(): void {
+  if (playing) return;
+  const next = queue.shift();
+  if (!next) return;
+  own ??= new Audio();
+  const a = own;
+  playing = true;
+  let timer = 0;
+  let over = false;
+  const done = (): void => {
+    if (over) return;
+    over = true;
+    window.clearTimeout(timer);
+    a.removeEventListener("ended", done);
+    a.removeEventListener("error", done);
+    if (next.revoke) URL.revokeObjectURL(next.url);
+    playing = false;
+    pump();
+  };
+  // Never stuck behind one that stalls.
+  timer = window.setTimeout(done, 15_000);
+  a.addEventListener("ended", done);
+  a.addEventListener("error", done);
+  a.src = next.url;
+  a.play().catch(done);       // not unlocked yet: nothing plays
+}
+
 export function chime(level: Level): void {
   const blob = chimeBlob(level);
   if (sink) { sink(blob); return; }
-  own ??= new Audio();
   let url = urls.get(level);
   if (!url) { url = URL.createObjectURL(blob); urls.set(level, url); }
-  own.src = url;
-  own.play().catch(() => { /* not unlocked yet: no chime */ });
+  playOwn(url, false);
+}
+
+/** On the session list, after the chime: which session it is ("infra has a
+ * question"), in ccpipe's voice. The words are the server's, and a device
+ * hears each item once, whichever page asks first (204 when it won't, or
+ * the voice is set to read nothing). A session page asks over its socket
+ * instead (main.ts). */
+export async function sayOnList(item: AttentionItem): Promise<void> {
+  if (sink) return;
+  let blob: Blob;
+  try {
+    const res = await fetch("/api/attention/say", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Requested-By": "ccpipe" },
+      body: JSON.stringify({ id: item.id, device: deviceId() }),
+    });
+    if (res.status !== 200) return;
+    blob = await res.blob();
+  } catch {
+    return;
+  }
+  if (!blob.size || sink) return;
+  playOwn(URL.createObjectURL(blob), true);
 }
 
 /** For Settings: hear what each sounds like (inside the tap, so it plays). */
@@ -297,8 +363,9 @@ function toastHost(): HTMLElement {
 /** A banner under the top bar: who needs you and why, with Open. */
 export function toast(item: AttentionItem, onOpen: () => void): void {
   const host = toastHost();
+  // Under a session's top bar; at the top on the session list (styles.css).
   const bar = document.querySelector(".statusbar");
-  host.style.top = `${Math.round((bar?.getBoundingClientRect().bottom ?? 0) + 8)}px`;
+  host.style.top = bar ? `${Math.round(bar.getBoundingClientRect().bottom + 8)}px` : "";
   host.querySelector(`[data-key="${item.level}-${CSS.escape(item.session)}"]`)?.remove();
   const el = h("div", "attn-toast");
   el.dataset.level = item.level;

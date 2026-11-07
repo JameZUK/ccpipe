@@ -168,8 +168,9 @@ frontend/
     settings-passkeys.ts  Account → passkeys and ways to sign in
     settings-notify.ts Notifications → chime, spoken name, push per device
     attention.ts       What needs you on the page: the top bar's bell and
-                       its drop-down, banners, the chime (made in code),
-                       the tab title count, per-device choices
+                       its drop-down, banners, the chime (made in code)
+                       and the list's spoken name, the tab title count,
+                       per-device choices
     push.ts            Push on this device: permission, push-sw.js,
                        subscribe; a tapped notification opens its session
     passkey.ts         WebAuthn in the browser (base64url ⇄ ArrayBuffer,

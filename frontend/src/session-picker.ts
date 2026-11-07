@@ -14,8 +14,9 @@
 // "Working" is Claude Code's own status (its session file; the pane
 // title's spinner on older versions). A session that needs you, Claude's
 // question or a finished turn no one has looked at (backend attention.py),
-// is marked, goes to the top when the list is sorted, and chimes when it
-// starts (Settings → Notifications).
+// is marked and goes to the top when the list is sorted. When one starts, a
+// banner names it, its row flashes, and it chimes and its name is said
+// (Settings → Notifications).
 
 import { apiJson, getFsConfig } from "./api";
 import { sparkMark } from "./brand";
@@ -31,8 +32,8 @@ import { loadRecentDirs, pushRecentDir } from "./recent-dirs";
 import { FAST_PING_MS, LatencyLog, latencyLevel, pingDropdown } from "./pingmeter";
 import { mountSysPanel } from "./syspanel";
 import {
-  NewItems, ago, canSound, chime, claimAlert, deviceId, installChimeUnlock, loadAlerts,
-  setAppBadge, setTitleCount, whatLabel, type AttentionItem,
+  NewItems, ago, canSound, chime, claimAlert, clearToasts, deviceId, installChimeUnlock,
+  loadAlerts, sayOnList, setAppBadge, setTitleCount, toast, whatLabel, type AttentionItem,
 } from "./attention";
 import { fireResponseReady } from "./notifications";
 import { pushCovers, tidyNotifications } from "./push";
@@ -1385,18 +1386,46 @@ export function renderSessionPicker(
     setTitleCount(items.length);
     setAppBadge(items.length);
     void tidyNotifications(items);
+    // Which session it is: a banner naming it (the row may be out of sight,
+    // and rows don't move while you're looking), the row flashes, and after
+    // the chime its name is said.
     const prefs = loadAlerts();
+    const audible = canSound();
     let rang = false;
     for (const it of fresh) {
       if (!pushCovers(it.level)) {
         fireResponseReady(it.body, it.session, it.level === "ask" ? it.title : "Claude finished");
       }
-      if (!rang && prefs[it.level].sound && canSound()) {
-        rang = true;
-        // Once per device, whichever ccpipe page gets there first.
-        void claimAlert(it).then((mine) => { if (mine) chime(it.level); });
+      if (!document.hidden) {
+        toast(it, () => onPick(it.session));
+        flashRow(it);
       }
+      const want = prefs[it.level];
+      if (!audible || !(want.sound || want.speak)) continue;
+      const ring = want.sound && !rang;
+      if (ring) rang = true;
+      // Once per device, whichever ccpipe page gets there first.
+      void claimAlert(it).then((mine) => {
+        if (!mine) return;
+        if (ring) chime(it.level);
+        if (want.speak) void sayOnList(it);
+      });
     }
+  };
+  const flashRow = (it: AttentionItem): void => {
+    const row = list.querySelector<HTMLElement>(`.sess[data-name="${CSS.escape(it.session)}"]`);
+    if (!row) return;
+    row.classList.remove("sess--flash");
+    row.style.animation = "";   // the first paint's slide-in would win
+    void row.offsetWidth;     // start it again
+    row.classList.add("sess--flash");
+    row.dataset.flash = it.level;
+    const end = (e: AnimationEvent): void => {
+      if (e.target !== row) return;           // the dot's, or a child's
+      row.classList.remove("sess--flash");
+      row.removeEventListener("animationend", end);
+    };
+    row.addEventListener("animationend", end);
   };
   clearDone.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -1406,7 +1435,8 @@ export function renderSessionPicker(
     void pollAttention();
   });
   const attentionTimer = window.setInterval(() => { void pollAttention(); }, ATTENTION_POLL_MS);
-  cleanups.push(() => clearInterval(attentionTimer), installChimeUnlock(), () => setTitleCount(0));
+  cleanups.push(() => clearInterval(attentionTimer), installChimeUnlock(), () => setTitleCount(0),
+    clearToasts);
   void pollAttention();
 
   // ─── Document-level wiring (removed on teardown) ────────────────────────

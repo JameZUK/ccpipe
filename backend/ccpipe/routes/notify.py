@@ -4,6 +4,8 @@
                                 list polls it, and it counts as "a page is
                                 on screen on this device" (?device=&visible=1)
   POST /api/attention/dismiss   clear finished turns (one session, or all)
+  POST /api/attention/say       the session list's spoken name ("infra has a
+                                question"), as MP3: once per device
   GET  /api/push                this server's push key, the subscribed
                                 devices and the server-wide setting
   POST /api/push/subscribe      turn notifications on for a device
@@ -20,13 +22,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from .. import attention, notify
 from .. import config as app_config
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..tmux import _SAFE_NAME_RE
+from . import tts as tts_routes
 
 router = APIRouter()
 
@@ -56,6 +59,34 @@ async def dismiss(body: DismissBody) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="bad session name")
     attention.dismiss(body.session)
     return {"items": [i.public() for i in attention.items()]}
+
+
+class SayBody(BaseModel):
+    id: int
+    device: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/api/attention/say", dependencies=[AuthDep, CsrfDep])
+async def say(body: SayBody) -> Response:
+    """Which session needs you, said after the session list's chime. The
+    words are the server's, as for a session page (ws.py), and each device
+    hears an item once, whichever page asks first. Nothing (204) when it's
+    been answered or cleared, the voice is set to read nothing, or this
+    device has heard it."""
+    item = next((i for i in attention.items() if i.id == body.id), None)
+    cfg = app_config.load()
+    voice = (cfg.tts.voice or "").strip()
+    if (item is None or cfg.tts.scope == "off" or not voice or len(voice) > 64
+            or not attention.first_say(_device(body.device), item.id)):
+        return Response(status_code=204)
+    stream_cm, resp = await tts_routes._open_kokoro_stream({
+        "model": "kokoro",
+        "input": attention.announcement(item),
+        "voice": voice,
+        "speed": cfg.tts.speech_rate,
+        "response_format": "mp3",
+    })
+    return tts_routes._stream_then_close(stream_cm, resp)
 
 
 @router.get("/api/push", dependencies=[AuthDep, SameOriginDep])

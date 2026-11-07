@@ -408,7 +408,8 @@ reads each running Claude's `~/.claude/sessions/<pid>.json`. A status of
 `waiting` is a question or permission prompt, read off the pane. A
 `busy` → `idle` change held for 3 s while no page showed the session is
 a finished turn. Pages get the list over their WebSocket. The session list
-polls `GET /api/attention` every 3 s while it's on screen. See
+polls `GET /api/attention` every 3 s while it's on screen, and after its
+chime gets the session's spoken name from `POST /api/attention/say`. See
 [When Claude needs you](guide/notifications.md).
 
 Push notifications (`notify.py`, `webpush.py`) are off until a device
