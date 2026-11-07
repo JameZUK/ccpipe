@@ -60,7 +60,8 @@ The gear opens Settings:
 |---|---|
 | **Display** | Text size and spacing; the terminal font (per device); the cursor's style, colour and blink; the WebGL renderer switch; and *status & graphs*. Applies as you change it. |
 | **Sessions** | How many sessions start at boot, and the idle stop times (see [Sessions](sessions.md#stopped-sessions-come-back)). |
-| **Voice** | Text-to-speech: voice, speed, what to read aloud (and whether to read Claude's progress notes), and a notification when the app is in the background. Voice input: when dictation stops and is sent, and voice processing on this device. |
+| **Notifications** | What happens when Claude asks something or finishes in another session: a chime, the session's name said aloud, and push notifications for this device; how long to wait before pushing while ccpipe is open elsewhere; an open tab's own notification (see [When Claude needs you](notifications.md)). |
+| **Voice** | Text-to-speech: voice, speed, what to read aloud (and whether to read Claude's progress notes). Voice input: when dictation stops and is sent, and voice processing on this device. |
 | **Account** | Change the username or password, sign out, sign out everywhere, set up two-factor (TOTP), add or remove passkeys, and choose the ways to sign in. |
 | **Debug** | A diagnostic snapshot (Ctrl+Shift+D) for terminal display bugs. |
 

@@ -18,6 +18,11 @@ import * as notifications from "./notifications";
 import { attachOptionSpacePtt } from "./ptt";
 import { mdViewUrl } from "./view-url";
 import { KEEPALIVE_MS, TerminalSocket } from "./ws";
+import {
+  NewItems, attentionBell, canSound, chime, claimAlert, deviceId, loadAlerts, setAppBadge,
+  setChimeSink, setTitleCount, toast, type AttentionItem,
+} from "./attention";
+import { onNotificationOpen, pushCovers, pushStatus, tidyNotifications } from "./push";
 // Heavy chunks loaded lazily on user gesture:
 //   - settings / file-panel / session-picker are large (758 + 752 + 629
 //     LOC) and gated behind a button or a no-last-session bootstrap.
@@ -120,7 +125,7 @@ function wsUrlFor(session: string): string {
   // where output that arrived during a disconnect window never made it
   // into xterm's scrollback (refresh was the only workaround).
   return `${proto}//${location.host}/ws?session=${encodeURIComponent(session)}`
-    + `&build=${encodeURIComponent(WS_BUILD_TAG)}`;
+    + `&build=${encodeURIComponent(WS_BUILD_TAG)}&device=${deviceId()}`;
 }
 
 // This bundle's build id, carried on every terminal connection so the
@@ -495,7 +500,14 @@ async function attachTerminal(session: string): Promise<void> {
   tmuxBtn.title = "tmux controls";
   tmuxBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M12 4v12"/><path d="M12 10h9"/><path d="M3 16h18"/></svg>`;
 
-  controls.append(ttsWaveCanvas, replayBtn, ttsBtn, micBtn, tilesBtn, tmuxBtn, historyBtn, docsBtn, filesBtn, settingsBtn);
+  // What needs you in the other sessions (attention.ts): shown only then.
+  const bell = attentionBell({
+    onOpen: (s) => { void attachTerminal(s); },
+    canTile: () => layout.capable(),
+    onTile: (s) => { layout.add(s, "h"); showAttention(); },
+    onDismiss: (s) => socket.send({ type: "attention", dismiss: s ?? "*" }),
+  });
+  controls.append(bell.el, ttsWaveCanvas, replayBtn, ttsBtn, micBtn, tilesBtn, tmuxBtn, historyBtn, docsBtn, filesBtn, settingsBtn);
   // System status beside the ping (sysmeter.ts): inline on wide screens, a
   // three-bar meter on the phone; tap for the details.
   const sysMeter = mountSysMeter(session);
@@ -1117,7 +1129,14 @@ async function attachTerminal(session: string): Promise<void> {
     onClaudeAsk(msg) {
       // Its spoken copy (if any) mustn't notify again when it ends.
       if (msg.id != null) notifiedId = msg.id;
-      notifications.fireResponseReady(msg.text, session, msg.title);
+      if (loadAlerts().ask.sound && canSound()) chime("ask");
+      if (!pushCovers("ask")) notifications.fireResponseReady(msg.text, session, msg.title);
+    },
+    onAttention(items, newIds) {
+      attentionItems = items;
+      const fresh = newAttention.take(items, newIds);
+      showAttention();
+      for (const it of fresh) alertFor(it);
     },
     onTtsEnd() {
       tts.onEnd();
@@ -1125,7 +1144,8 @@ async function attachTerminal(session: string): Promise<void> {
       // once per reply. An older server sends no id: notify every time.
       if (lastSpokenId === undefined || lastSpokenId !== notifiedId) {
         notifiedId = lastSpokenId;
-        notifications.fireResponseReady(lastSpokenText, session);
+        // A push for the finished turn reaches this device instead.
+        if (!pushCovers("done")) notifications.fireResponseReady(lastSpokenText, session);
       }
     },
     onOutput(data) {
@@ -1202,6 +1222,45 @@ async function attachTerminal(session: string): Promise<void> {
     toggleTilesMenu(tilesBtn, layout);
   });
 
+  // ─── What needs you in the other sessions (attention.ts) ─────────────
+  // The server sends the list on connect and on every change. This session
+  // and its tiles are on screen, so the bell leaves them out; this
+  // session's own questions come as claude_ask (spoken by the server).
+  let attentionItems: AttentionItem[] = [];
+  const newAttention = new NewItems();
+  // Tiles count only where they're shown (a phone shows none of them).
+  const onScreen = (s: string): boolean =>
+    s === session || (layout.capable() && layout.tiledSessions().includes(s));
+  const showAttention = (): void => {
+    const others = attentionItems.filter((i) => !onScreen(i.session));
+    bell.update(others);
+    setTitleCount(others.length);
+    setAppBadge(attentionItems.length);
+    void tidyNotifications(attentionItems, document.hidden ? null : session);
+  };
+  const alertFor = (it: AttentionItem): void => {
+    if (onScreen(it.session)) return;
+    const prefs = loadAlerts()[it.level];
+    if (document.hidden && !pushCovers(it.level)) {
+      notifications.fireResponseReady(it.body, it.session,
+        it.level === "ask" ? it.title : "Claude finished");
+    }
+    if (!document.hidden) toast(it, () => { void attachTerminal(it.session); });
+    if (!canSound() || !(prefs.sound || prefs.speak)) return;
+    void claimAlert(it).then((mine) => {
+      if (!mine) return;
+      if (prefs.sound) chime(it.level);
+      // The words are the server's (ws.py), spoken by this page's voice.
+      if (prefs.speak) window.setTimeout(() => socket.send({ type: "attention", say: it.id }), 500);
+    });
+  };
+  const onAttentionVisibility = (): void => showAttention();
+  document.addEventListener("visibilitychange", onAttentionVisibility);
+  // The chime plays through the voice player (one audio element for Safari).
+  const unsinkChime = setChimeSink((blob) => {
+    if (!ttsPlaying) tts.playNow(blob).catch(() => {});
+  });
+
   const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session, {
     // With tiles on screen, Ctrl+F / font-size keys belong to whichever
     // terminal is focused.
@@ -1251,6 +1310,10 @@ async function attachTerminal(session: string): Promise<void> {
     unbusy();
     sysMeter.dispose();
     pingPop.dispose();
+    bell.dispose();
+    unsinkChime();
+    document.removeEventListener("visibilitychange", onAttentionVisibility);
+    setTitleCount(0);
     window.removeEventListener("resize", syncTilesBtn);
     if (tmuxRefreshTimer !== null) clearTimeout(tmuxRefreshTimer);
     tmuxBar?.dispose();
@@ -1367,7 +1430,28 @@ function renderSessionLabel(el: HTMLElement, session: string): void {
 // it was awaiting, the stale run bails before mounting anything.
 let bootstrapGen = 0;
 
+// A tapped push notification opens its session: in a new window as
+// /?open=<session>, or in a page already open (the service worker's message).
+function takeOpenParam(): void {
+  const params = new URLSearchParams(location.search);
+  const want = params.get("open");
+  if (!want) return;
+  saveLastSession(want);
+  params.delete("open");
+  const rest = params.toString();
+  history.replaceState(null, "", location.pathname + (rest ? `?${rest}` : "") + location.hash);
+}
+onNotificationOpen((s) => {
+  // bootstrap checks it's still running before attaching (it never makes
+  // one): a notification can outlive its session.
+  saveLastSession(s);
+  void bootstrap();
+});
+
+let pushChecked = false;
+
 async function bootstrap(): Promise<void> {
+  takeOpenParam();
   const myGen = ++bootstrapGen;
   const isStale = (): boolean => myGen !== bootstrapGen;
   // Dispatch a tear-down event so any pending key listeners cleanly detach.
@@ -1392,6 +1476,13 @@ async function bootstrap(): Promise<void> {
     // retry affordance and leave authRequired untouched.
     renderBootstrapError(() => bootstrap());
     return;
+  }
+
+  // Once a page: is push still on for this device as far as the server
+  // knows? (If not, its tabs go back to notifying by themselves.)
+  if (!pushChecked) {
+    pushChecked = true;
+    void pushStatus().catch(() => {});
   }
 
   // Auto-attach to the last session if it still exists. A short

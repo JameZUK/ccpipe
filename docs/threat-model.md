@@ -125,3 +125,35 @@ the session. `mode=watch` attaches tmux with `-f read-only,ignore-size` and
 the server drops the tile's input frames as well. Tile layouts
 (`/api/layouts/{name}`) are validated: session names go through
 `safe_name`, and there are at most 9 tiles, 4 levels deep.
+
+## Push notifications
+
+Push is off until a signed-in device turns it on (Settings →
+Notifications). Then the backend makes outbound HTTPS requests, which
+it otherwise doesn't (Kokoro aside):
+
+- **Where to.** A subscription's endpoint comes from the page, so it is
+  checked against the browsers' push services (`webpush.endpoint_allowed`:
+  `https` on port 443, no userinfo, a Mozilla, Apple, Google or Microsoft
+  push host). That keeps an authenticated caller from pointing the server
+  at an internal address. Redirects aren't followed.
+- **What the push service learns.** The body is encrypted for the device
+  (RFC 8291 `aes128gcm`; checked byte for byte against the RFC's worked
+  example in `tests/test_push.py`). The service sees the timing, the
+  size, the urgency and the `Topic` (a hash of the session name), not the
+  question. A device can also leave the text out, for its lock screen.
+- **Who can push.** Each request carries a VAPID JWT (RFC 8292) signed
+  with the server's P-256 key, which lives only in `push.json` (`0600`).
+  The subscriptions are bound to its public key, so without the private
+  key nobody else can push to them.
+- **The routes** (`/api/push/*`, `/api/attention*`) carry the usual auth
+  plus CSRF (writes) or same-origin (reads) dependencies. Endpoints never
+  come back out of `GET /api/push`, only their host.
+- **The service worker** (`push-sw.js`) has no fetch handler. It never
+  sees or serves the app's requests, so it can't pin a stale build. It
+  only shows notifications, opens the session tapped and renews its own
+  subscription.
+- **Rate limits.** At most 20 pushes per device in 10 minutes, and one
+  finished turn per session per device a minute, so a runaway loop of
+  tiny turns can't buzz a phone all day.
+

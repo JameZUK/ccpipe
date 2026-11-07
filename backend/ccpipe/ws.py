@@ -22,7 +22,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import claude_asks, drafts, plan_usage, session_meta, tmux, tmux_ui, voice_ptt
+from . import attention, drafts, plan_usage, session_meta, tmux, tmux_ui, voice_ptt
 from . import config as app_config
 from .auth import is_session_authed
 from .mic import MicWriter
@@ -388,6 +388,106 @@ def _is_draft_frame(text: str) -> bool:
     return text.startswith(('{"type":"draft"', '{"type": "draft"'))
 
 
+def _spawn(coro: Awaitable[Any]) -> None:
+    task = asyncio.ensure_future(coro)
+    _draft_sends.add(task)
+    task.add_done_callback(_draft_sends.discard)
+
+
+# ─── What needs you (attention.py) ────────────────────────────────────────
+# Every open page is told what needs you in every session: {"type":
+# "attention", "items": […], "new": [ids just started]}. The page shows the
+# other sessions' (its own is on screen) and decides what to ring or say.
+# A session's own terminal also gets claude_ask for its question, spoken.
+
+def _connections() -> list["_TerminalConnection"]:
+    return [c for peers in _draft_peers.values() for c in peers]
+
+
+def session_watched(session: str) -> bool:
+    """A page (a terminal or a tile) is showing the session right now."""
+    return any(c.visible and not c.outdated() for c in _draft_peers.get(session, ()))
+
+
+def device_visible(device: str) -> bool:
+    """A ccpipe session page is on screen on this device."""
+    return bool(device) and any(c.device == device and c.visible and not c.outdated()
+                                for c in _connections())
+
+
+def anyone_visible() -> bool:
+    """A ccpipe session page is on screen somewhere."""
+    return any(c.visible and not c.outdated() for c in _connections())
+
+
+def _announcement(item: attention.Item) -> str:
+    """What's said when another session needs you."""
+    name = re.sub(r"[-_]+", " ", item.session)
+    if item.level == "done":
+        return f"{name} has finished."
+    if item.kind == "permission":
+        return f"{name} needs your permission."
+    return f"{name} has a question."
+
+
+# (device, item id) → when it was said: several pages on one device each
+# ask, and it's said once.
+_said: dict[tuple[str, int], float] = {}
+
+
+def _first_say(device: str, item_id: int) -> bool:
+    now = time.monotonic()
+    for k, t in list(_said.items()):
+        if now - t > 600:
+            del _said[k]
+    key = (device or f"conn-{id(object())}", item_id)
+    if key in _said:
+        return False
+    _said[key] = now
+    return True
+
+
+def _attention_message(new: Any) -> dict[str, Any]:
+    return {"type": "attention", "items": [i.public() for i in attention.items()],
+            "new": sorted(new)}
+
+
+_attn_new: set[int] = set()
+_attn_scheduled = False
+
+
+def _on_attention(event: str, item: attention.Item) -> None:
+    global _attn_scheduled
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return          # no loop, no connections (a test calling in directly)
+    if event == "new" and item.level == "ask":
+        for c in list(_draft_peers.get(item.session, ())):
+            if not c.tile:
+                _spawn(c._on_claude_ask(item))
+    if event == "new":
+        _attn_new.add(item.id)
+    # One message for everything that changed in this turn of the loop.
+    if not _attn_scheduled:
+        _attn_scheduled = True
+        loop.call_soon(_flush_attention)
+
+
+def _flush_attention() -> None:
+    global _attn_scheduled
+    _attn_scheduled = False
+    msg = _attention_message(_attn_new)
+    _attn_new.clear()
+    for c in _connections():
+        if not c.tile and c.attn_ready and c.alive:
+            _spawn(c.send_json(msg))
+
+
+attention.subscribe(_on_attention)
+attention.set_watched(session_watched)
+
+
 class _TerminalConnection:
     """One browser terminal connection to a tmux session.
 
@@ -416,11 +516,18 @@ class _TerminalConnection:
         self.tile = tile or watch
         self.watch_size: tuple[int, int] | None = None
         self.watch_task: asyncio.Task[None] | None = None
-        # Watches for Claude stopping to ask something (main terminal only).
-        self.ask_task: asyncio.Task[None] | None = None
         # The page's build ("5478df8_2026-11-03T2120Z" → "5478df8").
         params = getattr(websocket, "query_params", None) or {}
         self.build = (params.get("build") or "").split("_")[0][:40]
+        # What needs you (attention.py): the device the page is on (a random
+        # id it keeps) and whether it's on screen: in the URL as it dials
+        # (a hidden page reconnecting in the background mustn't count as
+        # looking while its replay runs), then on every change. A page from
+        # before this says nothing: on screen. The list goes to the page
+        # once the replay is through (attn_ready).
+        self.device = re.sub(r"[^A-Za-z0-9_-]", "", params.get("device") or "")[:64]
+        self.visible = params.get("visible") != "0"
+        self.attn_ready = False
         # Budget for the page's tts_log reports (see _receive_loop).
         self.tts_log_window = 0.0
         self.tts_log_count = 0
@@ -549,9 +656,6 @@ class _TerminalConnection:
         self.pty_task = asyncio.create_task(self._pty_lifecycle())
         if self.watch:
             self.watch_task = asyncio.create_task(self._follow_window_size())
-        if not self.tile:
-            self.ask_task = asyncio.create_task(
-                claude_asks.watch(self.session, self._on_claude_ask))
         try:
             if replay:
                 await self._send_history(cols, rows)
@@ -564,6 +668,9 @@ class _TerminalConnection:
             # the main receive() loop and a ping pongs back at network speed.
             await self.send_json({"type": "stream_ready"})
             await self._release_pty()
+            self.attn_ready = True
+            if not self.tile:
+                await self.send_json(_attention_message(()))
             # Any non-resize messages we drained while waiting for the
             # initial resize are applied now that the relay exists (inside
             # the try so a malformed one can't skip the teardown in finally).
@@ -855,8 +962,6 @@ class _TerminalConnection:
         self._unregister()
         if self.watch_task is not None:
             self.watch_task.cancel()
-        if self.ask_task is not None:
-            self.ask_task.cancel()
         self.pty_task.cancel()
         # Await pump cancellation BEFORE tearing down the PTY so a pending
         # send_text/send_bytes doesn't race with the socket close.
@@ -966,6 +1071,12 @@ class _TerminalConnection:
             return True
         if _is_control_frame(text, '"type":"mic_stop"', '"type": "mic_stop"'):
             self._on_mic_stop()
+            return True
+        if len(text) <= _CONTROL_FRAME_MAX and text.startswith(
+                ('{"type":"attention"', '{"type": "attention"')):
+            if not await self._still_authed("attention"):
+                return False
+            self._on_attention_frame(text)
             return True
         if _is_control_frame(text, '"type":"mic_error"', '"type": "mic_error"'):
             # The browser couldn't start its mic: log why (cleaned, bounded).
@@ -1303,11 +1414,12 @@ class _TerminalConnection:
         if not await self.send_json({"type": "tts_end"}):
             self._tts_dead()
 
-    async def _on_claude_ask(self, ask: claude_asks.Ask) -> None:
-        """Claude is waiting on a question or a permission prompt: tell the
-        page (for a notification) and say it, unless voice is muted or set
-        to read nothing. The id is the spoken copy's, so the page doesn't
-        notify a second time when it finishes playing."""
+    async def _on_claude_ask(self, ask: attention.Item) -> None:
+        """Claude is waiting on a question or a permission prompt in this
+        terminal's session: tell the page (for a notification) and say it,
+        unless voice is muted or set to read nothing. The id is the spoken
+        copy's, so the page doesn't notify a second time when it finishes
+        playing."""
         if not self.alive or self.outdated():
             return
         uid = None
@@ -1315,6 +1427,37 @@ class _TerminalConnection:
             uid = tts_service.speak_to(ask.spoken, self.tts_sub)
         await self.send_json({"type": "claude_ask", "kind": ask.kind, "title": ask.title,
                               "text": ask.body[:4000] or ask.spoken, "id": uid})
+
+    def _on_attention_frame(self, text: str) -> None:
+        """{"type": "attention", …} from the page:
+          visible    it's on screen (true) or not: a page showing this
+                     session has seen its finished turn
+          say        read out that another session needs you (an item id):
+                     the page decides, since it knows its tiles and its
+                     settings; the words are the server's, once per device,
+                     and not when voice is set to read nothing
+          dismiss    clear finished turns: one session's, or "*" for all"""
+        try:
+            msg = _safe_json_loads(text)
+        except ValueError:
+            return
+        if isinstance(msg.get("visible"), bool):
+            self.visible = msg["visible"]
+            if self.visible and not self.outdated():
+                attention.seen(self.session)
+        say = msg.get("say")
+        if isinstance(say, int) and not isinstance(say, bool) and not self.tile:
+            item = next((i for i in attention.items() if i.id == say), None)
+            if (item is not None and self.alive and not self.outdated()
+                    and not isinstance(self.tts_sub, _NoTts)
+                    and app_config.load().tts.scope != "off"
+                    and _first_say(self.device, item.id)):
+                tts_service.speak_to(_announcement(item), self.tts_sub)
+        dismiss = msg.get("dismiss")
+        if dismiss == "*":
+            attention.dismiss()
+        elif isinstance(dismiss, str) and tmux._SAFE_NAME_RE.fullmatch(dismiss):
+            attention.dismiss(dismiss)
 
     def _tts_dead(self) -> None:
         self.alive = False
@@ -1734,7 +1877,7 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
             # one. See _last_client_size / _FALLBACK_COLS.
             if session is not None:
                 _remember_client_size(session, cols, rows)
-        case "ping" | "tts_mute" | "tts_log" | "mic_stop" | "mic_start" | "mic_error":
+        case "ping" | "tts_mute" | "tts_log" | "mic_stop" | "mic_start" | "mic_error" | "attention":
             # These are intercepted by the main WS receive loop where
             # the closures over send_json / tts_sub / _mic_writer live.
             # We still hit this code path when one of them lands in

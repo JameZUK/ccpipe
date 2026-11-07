@@ -103,8 +103,12 @@ backend/
                        tracks bytes/drops and estimates drain time
     tts.py             JSONL tail + Kokoro client + audio chunk fan-out;
                        which records are Claude's reply, markdown → speech
-    claude_asks.py     Notices Claude waiting on a question / permission
-                       prompt (its session file) and reads the dialog
+    attention.py       What needs you in every session: Claude waiting on
+                       a question / permission prompt, or a finished turn
+                       no page saw (Claude's session files, once a second)
+    claude_asks.py     Reads a question / permission dialog off the pane
+    notify.py          Push subscriptions, and which devices get a push
+    webpush.py         Web Push: RFC 8291 encryption, VAPID (RFC 8292)
     sticky.py          {name: {cwd}} JSON store for sticky sessions
     session_meta.py    Every remembered session: times, cwd, Claude
                        conversation id, stopped / why
@@ -159,8 +163,15 @@ frontend/
                        lazy older paging + live tail (after cursor)
     md-chat.ts         Lean markdown renderer (markdown-it + highlight.js
                        + DOMPurify) shared by the /history prose blocks
-    settings.ts        Tabbed settings dialog (Display / Voice / Account)
+    settings.ts        Tabbed settings dialog (Display / Sessions /
+                       Notifications / Voice / Account / Debug)
     settings-passkeys.ts  Account → passkeys and ways to sign in
+    settings-notify.ts Notifications → chime, spoken name, push per device
+    attention.ts       What needs you on the page: the top bar's bell and
+                       its drop-down, banners, the chime (made in code),
+                       the tab title count, per-device choices
+    push.ts            Push on this device: permission, push-sw.js,
+                       subscribe; a tapped notification opens its session
     passkey.ts         WebAuthn in the browser (base64url ⇄ ArrayBuffer,
                        options fetched before the tap for Safari)
     mic.ts             Mic capture: getUserMedia + AudioWorkletNode +
@@ -175,6 +186,9 @@ frontend/
     manifest.webmanifest
     sw.js              Self-retiring worker (retires any an old install
                        registered; nothing registers it now)
+    push-sw.js         Push notifications' worker: shows them, opens the
+                       session tapped, renews the subscription; registered
+                       only when a device turns push on. No fetch handler
     mic-worklet.js     AudioWorkletProcessor: 48k→16k mono Int16 PCM
   index.html
   vite.config.ts
@@ -209,6 +223,13 @@ Client → server text frames (JSON):
 - `{"type":"draft","text":"…"}` — the prompt box changed; the server
   stores it as the session's draft and relays it to the session's other
   connections (last write wins). Routed before the control-frame sniffs.
+- `{"type":"attention",…}` — sent after `stream_ready` and on every
+  visibility change: `visible` (the page is on screen: a page showing a
+  session has seen its finished turn, and a device with one on screen
+  isn't pushed to; the dial URL carries `&visible=0|1` too, so a hidden
+  page reconnecting doesn't count as looking). Also `say` (an item id:
+  say which other session needs you, in the server's words, once per
+  device) and `dismiss` (clear finished turns: a session name, or `"*"`)
 
 Client → server binary frames are prefixed with a 1-byte channel tag:
 - `0x01` — Int16 PCM mic audio (16 kHz mono)
@@ -222,8 +243,13 @@ Server → client text frames (JSON):
 - `tts_start` / `tts_end` — frame the audio that follows; a reply is
   spoken a sentence at a time, and `tts_start` carries the sentence
   (`text`), the whole reply (`utterance`) and its number (`id`)
-- `claude_ask` — Claude is waiting on a question or permission prompt:
-  `kind`, `title`, `text`, and `id` of its spoken copy (or null)
+- `claude_ask` — Claude is waiting on a question or permission prompt
+  in this session: `kind`, `title`, `text`, and `id` of its spoken copy
+  (or null)
+- `attention` — what needs you in every session, after `stream_ready`
+  and on each change: `items` (`id`, `session`, `level` "ask" | "done",
+  `kind`, `title`, `body`, `since`) and `new` (the ids that just
+  started, for the page to ring)
 - `pong` — keepalive reply, echoing the ping's `id` so each pong is
   timed against its own ping (an id-less ping gets an id-less pong)
 - `pty_exited` — PTY child closed

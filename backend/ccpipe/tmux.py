@@ -650,7 +650,8 @@ async def all_panes() -> dict[str, list[int]]:
 # or "idle" — and the tmux pane it runs in ("tmux": "name:@4.%4"). This is
 # the reliable "is Claude working" signal: the pane title shows ✳ even mid
 # turn, and a long tool call produces no pane output for minutes.
-_STATUS_RANK = {"busy": 3, "shell": 2, "idle": 1}
+# "waiting" (a question or permission prompt is up) needs you most.
+_STATUS_RANK = {"waiting": 4, "busy": 3, "shell": 2, "idle": 1}
 
 
 def _read_claude_states(pane_sessions: dict[str, str]) -> dict[str, tuple[str, int]]:

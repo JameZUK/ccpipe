@@ -125,6 +125,7 @@ export const ICON_FILE_PDF = icon(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1
 export const ICON_FOLDER = icon(`<path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/>`);
 export const ICON_PASSKEY = icon(`<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2"/>`);
 export const ICON_REFRESH = icon(`<path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/>`);
+export const ICON_BELL = icon(`<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>`);
 
 /** One of the icon strings above as a DOM node — parsed as SVG, never as
  * HTML, so new code needn't assign innerHTML to show an icon. */

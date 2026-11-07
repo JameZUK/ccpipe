@@ -9,9 +9,8 @@ tool call to the transcript after you answer, so the TTS transcript tail
 can't see it in time. So this watches the status, and reads the dialog off
 Claude's pane when it appears.
 
-One watcher runs per attached terminal (not tiles). It reports each new
-question once; one already on screen when you attach is not reported, since
-you're looking at it.
+attention.py watches every session's status and calls these to read the
+dialog when a wait starts.
 """
 from __future__ import annotations
 
@@ -19,8 +18,6 @@ import asyncio
 import json
 import logging
 import re
-import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,12 +26,10 @@ from . import tmux
 
 log = logging.getLogger(__name__)
 
-POLL_S = 1.0          # how often the session file is looked at (a stat)
 # While Claude waits, how often the screen is read for a new dialog: two
 # questions asked back to back leave the status at "waiting" throughout
 # (seen 2026-11-03), so the status alone misses the second.
 REREAD_S = 2.0
-PID_EVERY_S = 10.0    # how often Claude's pid is re-resolved (it can restart)
 # The status flips as the dialog is drawn: give the screen a moment, and look
 # again if the dialog isn't there yet.
 _SCREEN_TRIES_S = (0.3, 0.6, 1.0)
@@ -92,9 +87,10 @@ def _text(line: str) -> str:
     return line.strip().strip("│┃║").strip()
 
 
-def _clip(text: str) -> str:
+def _clip(text: str, n: int = _MAX_PART) -> str:
+    """One line, at most ``n`` characters (… when cut)."""
     text = " ".join(text.split())
-    return text if len(text) <= _MAX_PART else text[: _MAX_PART - 1].rstrip() + "…"
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
 def _or_list(labels: list[str]) -> str:
@@ -215,51 +211,3 @@ async def _read_now(session: str, state: dict[str, Any]) -> Ask | None:
     out = await tmux._tmux_out("capture-pane", "-p", "-t", await _pane_of(session, state))
     ask = describe([ln.rstrip() for ln in (out or "").split("\n")], state.get("waitingFor"))
     return ask if ask.body else None
-
-
-async def watch(session: str, on_ask: Callable[[Ask], Awaitable[None]]) -> None:
-    """Call ``on_ask`` each time Claude in ``session`` starts waiting on you,
-    and for each new dialog while it waits. Runs until cancelled."""
-    pid: int | None = None
-    pid_at = float("-inf")
-    was_waiting: bool | None = None      # None: not read yet
-    last_since: Any = None
-    last_key: str | None = None          # the dialog last reported (or seen)
-    read_at = float("-inf")
-    while True:
-        try:
-            now = time.monotonic()
-            if pid is None or now - pid_at >= PID_EVERY_S:
-                pid = await tmux.cached_claude_pid(session)
-                pid_at = now
-            state = await asyncio.to_thread(_read_state, pid) if pid else None
-            waiting = bool(state) and state.get("status") == "waiting"
-            since = state.get("statusUpdatedAt") if state else None
-            first = was_waiting is None
-            # A new wait: from not waiting, or a fresh status stamp (a second
-            # prompt right after the first, between two looks).
-            fresh = waiting and (was_waiting is False
-                                 or (was_waiting and since != last_since))
-            was_waiting, last_since = waiting, since
-            if not waiting:
-                last_key = None
-            elif pid and state:
-                ask: Ask | None = None
-                if fresh:
-                    ask = await _read_dialog(session, pid, state)
-                    read_at = time.monotonic()
-                elif first or time.monotonic() - read_at >= REREAD_S:
-                    ask = await _read_now(session, state)
-                    read_at = time.monotonic()
-                    if first and ask is not None:
-                        last_key = ask.key   # already up when you attached
-                        ask = None
-                if ask is not None and ask.key != last_key:
-                    last_key = ask.key
-                    log.info("claude asks in %s: %s", session, ask.title)
-                    await on_ask(ask)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.debug("claude_asks watch of %s failed", session, exc_info=True)
-        await asyncio.sleep(POLL_S)

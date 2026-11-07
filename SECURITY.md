@@ -271,6 +271,11 @@ report them as findings:
   TOTP authenticator (`docs/configuration.md`).
 - **TTS reads your Claude transcripts.** Only run ccpipe on a host where
   you trust everyone with access to those files.
+- **Push goes through the browser makers' push services.** With push
+  notifications on, a device's notifications are relayed by Mozilla,
+  Apple or Google. They're encrypted for the device, but the service sees
+  when one was sent. Push is off until a device turns it on; see
+  [`docs/threat-model.md`](docs/threat-model.md#push-notifications).
 - **Drafts and saved prompts are stored in plain text** (`0600`, in the
   state directory) so they can follow you between devices.
 - **TOTP burn-list is in-memory.** Survives the verify window but not

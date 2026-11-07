@@ -11,8 +11,11 @@
 // keeps its order until the user re-sorts or comes back to the page, so
 // rows never jump under a finger.
 //
-// "Working" comes from the pane title: Claude Code puts its task there,
-// prefixed with a braille spinner while it works and ✳ when idle.
+// "Working" is Claude Code's own status (its session file; the pane
+// title's spinner on older versions). A session that needs you, Claude's
+// question or a finished turn no one has looked at (backend attention.py),
+// is marked, goes to the top when the list is sorted, and chimes when it
+// starts (Settings → Notifications).
 
 import { apiJson, getFsConfig } from "./api";
 import { sparkMark } from "./brand";
@@ -27,6 +30,12 @@ import {
 import { loadRecentDirs, pushRecentDir } from "./recent-dirs";
 import { FAST_PING_MS, LatencyLog, latencyLevel, pingDropdown } from "./pingmeter";
 import { mountSysPanel } from "./syspanel";
+import {
+  NewItems, ago, canSound, chime, claimAlert, deviceId, installChimeUnlock, loadAlerts,
+  setAppBadge, setTitleCount, whatLabel, type AttentionItem,
+} from "./attention";
+import { fireResponseReady } from "./notifications";
+import { pushCovers, tidyNotifications } from "./push";
 import { bar, fmtBytes, loadStatsPrefs, onStatsPrefs } from "./sysviz";
 // `./settings` is dynamically imported in the gear click handler so it
 // stays out of the session-picker chunk.
@@ -56,8 +65,11 @@ type SessionInfo = {
   /** Idle tracking: why it counts as in use; when it'll be stopped if idle. */
   busy?: string | null;
   stops_at?: number | null;
-  /** Claude Code's own status: "busy" | "shell" (background task) | "idle". */
+  /** Claude Code's own status: "busy" | "shell" (background task) |
+   * "idle" | "waiting" (a question or permission prompt is up). */
   claude?: string | null;
+  /** What needs you here: Claude's question, or a finished turn. */
+  attention?: AttentionItem | null;
 };
 
 /** A remembered session that isn't running; opening it resumes it. */
@@ -84,7 +96,7 @@ type ClaudeSession = {
 
 type View = "compact" | "detailed" | "grid";
 type Sort = "activity" | "opened" | "created" | "name" | "cpu" | "memory" | "disk";
-type State = "working" | "task" | "open" | "idle" | "stopped";
+type State = "asking" | "working" | "task" | "done" | "open" | "idle" | "stopped";
 
 const VIEWS: ReadonlyArray<{ id: View; label: string; icon: string }> = [
   { id: "compact", label: "Compact list", icon: ICON_VIEW_COMPACT },
@@ -110,7 +122,9 @@ const SORTERS: Record<Sort, (a: SessionInfo, b: SessionInfo) => number> = {
   disk: (a, b) => (b.disk ?? -1) - (a.disk ?? -1) || a.name.localeCompare(b.name),
 };
 const STATE_LABEL: Record<State, string> = {
+  asking: "Claude is waiting for you",
   working: "Claude is working",
+  done: "Claude finished, and no one has looked yet",
   task: "a background task is running",
   open: "open in a terminal",
   idle: "idle",
@@ -123,6 +137,14 @@ const REFRESH_MS = 10_000;
 const PREVIEW_MS = 6_000;
 const PREVIEW_LINES = 14;
 const HEALTH_POLL_MS = 5000;
+// How often what needs you is checked while the list is on screen. Cheap:
+// the server keeps the list (attention.py).
+const ATTENTION_POLL_MS = 3000;
+/** Sessions that need you first when the list is sorted: asking, then
+ * finished. */
+const NEEDS_RANK: Partial<Record<State, number>> = { asking: 2, done: 1 };
+const needsYouFirst = (a: SessionInfo, b: SessionInfo): number =>
+  (NEEDS_RANK[stateOf(b)] ?? 0) - (NEEDS_RANK[stateOf(a)] ?? 0);
 // Cap on a single in-flight probe — long enough to be patient with a
 // sluggish backend, short enough to flip the dot red within one tick.
 const HEALTH_TIMEOUT_MS = 4000;
@@ -169,13 +191,9 @@ function dateTime(unix: number): string {
 }
 const fullDate = (unix: number): string => FULL_FMT.format(new Date(unix * 1000));
 
+/** "just now", "5m ago", "3h ago", "2d ago" (attention.ts), then a date. */
 function relativeTime(unix: number): string {
-  const diff = Math.max(0, Math.floor(Date.now() / 1000) - unix);
-  if (diff < 45) return "just now";
-  if (diff < 3600) return `${Math.max(1, Math.round(diff / 60))}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`;
-  return dateTime(unix);
+  return Date.now() / 1000 - unix < 86400 * 30 ? ago(unix) : dateTime(unix);
 }
 
 function basename(path: string): string {
@@ -206,7 +224,9 @@ function taskOf(s: SessionInfo): { text: string | null; working: boolean } {
 /** Claude Code's own status wins (the pane title shows ✳ even mid-turn);
  * the title spinner is the fallback for older Claude Code versions. */
 function stateOf(s: SessionInfo): State {
+  if (s.attention?.level === "ask" || s.claude === "waiting") return "asking";
   if (s.claude === "busy" || taskOf(s).working) return "working";
+  if (s.attention?.level === "done") return "done";
   if (s.claude === "shell") return "task";
   return (s.clients ?? (s.attached ? 1 : 0)) > 0 ? "open" : "idle";
 }
@@ -301,13 +321,23 @@ export function renderSessionPicker(
   const statusLatency = h("span", "hero__latency");
   statusLatency.hidden = true;
   const statusCount = h("span", "hero__count");
+  // "1 needs you", ahead of the count: what to do first.
+  const statusNeeds = h("span", "hero__needs");
+  statusNeeds.hidden = true;
+  // On a phone it starts a line of its own.
+  const needsBreak = h("span", "hero__break");
+  needsBreak.hidden = true;
+  const clearDone = h("button", "hero__clear", "clear");
+  clearDone.type = "button";
+  clearDone.title = "Clear the finished turns";
+  clearDone.hidden = true;
   // The dot, state and round trip are one button: it drops down the
   // round-trip graph and the server's ups and downs (pingmeter.ts).
   const statusLink = h("button", "hero__link");
   statusLink.type = "button";
   statusLink.title = "Connection: round trips and outages";
   statusLink.append(statusDot, statusLabel, statusLatency);
-  status.append(statusLink, statusCount);
+  status.append(statusLink, statusCount, needsBreak, statusNeeds, clearDone);
   heroText.append(word, status);
   const gear = iconButton(GEAR_SVG, "Settings", "hero__gear");
   gear.addEventListener("click", async () => {
@@ -999,8 +1029,22 @@ export function renderSessionPicker(
     const taskEl = h("div", "sess__task", taskText);
     if (taskText) taskEl.title = taskText;
 
+    const ask = stopped ? null : s.attention ?? null;
+    if (ask?.body && (state === "asking" || state === "done")) {
+      taskEl.textContent = ask.body;
+      taskEl.title = ask.body;
+      taskEl.classList.add(`sess__task--${state}`);
+    }
     const activity = h("span", "sess__activity");
-    if (state === "working" || state === "task") {
+    if (state === "asking") {
+      activity.classList.add("is-asking");
+      activity.textContent = ask ? whatLabel(ask) : "waiting for you";
+      if (ask) activity.title = `${ask.title}, ${relativeTime(ask.since)}`;
+    } else if (state === "done" && ask) {
+      activity.classList.add("is-done");
+      activity.textContent = `finished ${relativeTime(ask.since)}`;
+      activity.title = "Claude finished its turn while no one was looking. Opening it clears this.";
+    } else if (state === "working" || state === "task") {
       activity.classList.add("is-working");
       activity.textContent = state === "working" ? "working" : "task running";
     } else if (stopped) {
@@ -1013,7 +1057,9 @@ export function renderSessionPicker(
 
     // Idle auto-stop countdown (lifecycle.py decides; nothing busy may be stopped).
     let stopEl: HTMLElement | null = null;
-    if (!stopped && s.stops_at) {
+    // Not while Claude waits for you: that keeps it running (its once-a-
+    // minute check may not have seen the question yet).
+    if (!stopped && s.stops_at && state !== "asking") {
       stopEl = h("div", "sess__stop", s.stops_at > now ? `auto-stop in ${fmtIn(s.stops_at - now)}` : "auto-stop due");
       stopEl.title = "Idle — no terminal attached, no output, no task running, no CPU use. "
         + "It stops then, and resumes the same conversation when opened (Settings → Sessions).";
@@ -1107,6 +1153,15 @@ export function renderSessionPicker(
 
   const updateCount = (): void => {
     const count = (st: State): number => sessions.filter((s) => stateOf(s) === st).length;
+    const asking = count("asking");
+    const finished = sessions.filter((s) => s.attention?.level === "done").length;
+    const needs = [asking ? `${asking} need${asking > 1 ? "" : "s"} you` : "",
+      finished ? `${finished} finished` : ""].filter(Boolean);
+    statusNeeds.textContent = needs.join(" · ");
+    statusNeeds.hidden = !loaded || !needs.length;
+    needsBreak.hidden = statusNeeds.hidden;
+    statusNeeds.dataset.level = asking ? "ask" : "done";
+    clearDone.hidden = !loaded || !finished;
     const working = count("working");
     const tasks = count("task");
     const open = count("open");
@@ -1160,7 +1215,7 @@ export function renderSessionPicker(
     killTimers.clear();
     syncControls();
     if (resort || order.length === 0) {
-      order = [...sessions].sort(SORTERS[sort]).map((s) => s.name);
+      order = [...sessions].sort((a, b) => needsYouFirst(a, b) || SORTERS[sort](a, b)).map((s) => s.name);
     } else {
       // Keep the order the user is looking at; new sessions go on top.
       const idx = new Map(order.map((n, i) => [n, i]));
@@ -1294,6 +1349,63 @@ export function renderSessionPicker(
     }
   });
 
+  // ─── What needs you (attention.ts) ──────────────────────────────────────
+  // /api/sessions carries it too; this checks more often, and its check-in
+  // tells the server this device has ccpipe on screen (so it isn't pushed to).
+  let attention: AttentionItem[] = [];
+  let attentionKey = "";
+  let attentionDirty = false;
+  const newAttention = new NewItems();
+  const applyAttention = (): void => {
+    for (const s of sessions) {
+      s.attention = attention.find((i) => i.session === s.name && i.level === "ask")
+        ?? attention.find((i) => i.session === s.name && i.level === "done") ?? null;
+    }
+  };
+  const pollAttention = async (): Promise<void> => {
+    const visible = document.visibilityState === "visible";
+    let items: AttentionItem[];
+    try {
+      ({ items } = await apiJson<{ items: AttentionItem[] }>(
+        `/api/attention?device=${encodeURIComponent(deviceId())}&visible=${visible ? 1 : 0}`));
+    } catch { return; }
+    if (!frame.isConnected || !Array.isArray(items)) return;
+    attention = items;
+    const fresh = newAttention.take(items);
+    const key = items.map((i) => `${i.id}:${i.body}`).join("\n");
+    if (key !== attentionKey || attentionDirty) {
+      attentionKey = key;
+      // Not under a finger: the next check paints it.
+      if (loaded && !interacting()) { applyAttention(); render(false); attentionDirty = false; }
+      else attentionDirty = true;
+    }
+    setTitleCount(items.length);
+    setAppBadge(items.length);
+    void tidyNotifications(items);
+    const prefs = loadAlerts();
+    let rang = false;
+    for (const it of fresh) {
+      if (!pushCovers(it.level)) {
+        fireResponseReady(it.body, it.session, it.level === "ask" ? it.title : "Claude finished");
+      }
+      if (!rang && prefs[it.level].sound && canSound()) {
+        rang = true;
+        // Once per device, whichever ccpipe page gets there first.
+        void claimAlert(it).then((mine) => { if (mine) chime(it.level); });
+      }
+    }
+  };
+  clearDone.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      await apiJson("/api/attention/dismiss", { method: "POST", body: JSON.stringify({}) });
+    } catch { /* the next check shows what's still there */ }
+    void pollAttention();
+  });
+  const attentionTimer = window.setInterval(() => { void pollAttention(); }, ATTENTION_POLL_MS);
+  cleanups.push(() => clearInterval(attentionTimer), installChimeUnlock(), () => setTitleCount(0));
+  void pollAttention();
+
   // ─── Document-level wiring (removed on teardown) ────────────────────────
   list.addEventListener("pointerdown", () => { lastPointer = Date.now(); });
   stoppedWrap.addEventListener("pointerdown", () => { lastPointer = Date.now(); });
@@ -1312,6 +1424,8 @@ export function renderSessionPicker(
     searchInput.focus();
   });
   listen("visibilitychange", () => {
+    // Hidden too: the server stops counting this device as looking.
+    void pollAttention();
     if (!document.hidden) { void probeHealth(); void load("full"); }
   });
   const refreshTimer = window.setInterval(() => {

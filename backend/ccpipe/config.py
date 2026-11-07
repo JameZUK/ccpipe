@@ -159,6 +159,35 @@ class PlanUsageConfig:
         return c
 
 
+PUSH_WAIT_MAX_S = 900
+
+
+@dataclass
+class NotifyConfig:
+    """Push notifications (notify.py), from Settings → Notifications. What
+    each device is told about is its own choice, kept with its
+    subscription; this is the server-wide part.
+
+      - ``push_wait_s``: when a ccpipe page is on screen on another device,
+        wait this long before pushing (0 .. 900 s), in case you answer it
+        there. With no page on screen anywhere, it's pushed straight away;
+        a device with a page on screen isn't pushed to at all (the page
+        shows it).
+    """
+    push_wait_s: int = 60
+
+    @classmethod
+    def from_dict(cls, d: Any) -> "NotifyConfig":
+        c = cls()
+        if not isinstance(d, dict):
+            return c
+        try:
+            c.push_wait_s = max(0, min(PUSH_WAIT_MAX_S, int(d.get("push_wait_s", c.push_wait_s))))
+        except (TypeError, ValueError):
+            pass
+        return c
+
+
 @dataclass
 class AppConfig:
     tts: TtsConfig = field(default_factory=TtsConfig)
@@ -166,6 +195,7 @@ class AppConfig:
     mic: MicConfig = field(default_factory=MicConfig)
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
     plan_usage: PlanUsageConfig = field(default_factory=PlanUsageConfig)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -174,6 +204,7 @@ class AppConfig:
             "mic": asdict(self.mic),
             "sessions": asdict(self.sessions),
             "plan_usage": asdict(self.plan_usage),
+            "notify": asdict(self.notify),
         }
 
     @classmethod
@@ -229,7 +260,9 @@ class AppConfig:
             pass
         sessions = SessionsConfig.from_dict(data.get("sessions") if isinstance(data, dict) else None)
         plan_usage = PlanUsageConfig.from_dict(data.get("plan_usage") if isinstance(data, dict) else None)
-        return cls(tts=tts, fs=fs, mic=mic, sessions=sessions, plan_usage=plan_usage)
+        notify = NotifyConfig.from_dict(data.get("notify") if isinstance(data, dict) else None)
+        return cls(tts=tts, fs=fs, mic=mic, sessions=sessions, plan_usage=plan_usage,
+                   notify=notify)
 
 
 _state_dir = state_dir

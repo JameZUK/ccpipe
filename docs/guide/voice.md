@@ -12,7 +12,7 @@ for spoken replies. See [Configuration → Voice setup](../configuration.md#voic
 The microphone and notifications need ccpipe over HTTPS.
 
 <p align="center">
-  <img src="../screenshots/Desktop-Voice-Settings.png" width="420" alt="Voice settings: voice, speed, what to read aloud, read progress notes too, background notification; voice input: auto-stop, timings and voice processing on this device">
+  <img src="../screenshots/Desktop-Voice-Settings.png" width="420" alt="Voice settings: voice, speed, what to read aloud, read progress notes too, and a background notification (now under Settings → Notifications); voice input: auto-stop, timings and voice processing on this device">
 </p>
 
 ## Dictation
@@ -71,9 +71,16 @@ permission prompt, ccpipe reads it out: *"Claude asks: Which colour do
 you prefer? Red, or Blue."* or *"Claude needs your permission. Bash
 command: delete hello.txt…"*.
 
-With *Notify when backgrounded* on, it also shows a notification, even
-when voice is muted. A reply that ends in a question is notified as a
-question too.
+When it's another session that's asking, the voice says which one (*"weather
+api has a question"*), and a bell and a banner show it. Turn either
+off, or the chime, in Settings → Notifications. To be told on a phone
+in your pocket, use push notifications. See
+[When Claude needs you](notifications.md).
+
+With *Notify from an open tab in the background* on (Settings →
+Notifications; it used to be *Notify when backgrounded* here), a hidden tab
+also shows a notification, even when voice is muted. A reply that ends in
+a question is notified as a question too.
 
 Claude only writes a question to its transcript after you've answered
 it, so ccpipe spots the wait in Claude's session file and reads the

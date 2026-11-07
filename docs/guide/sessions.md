@@ -28,6 +28,11 @@ Each session shows:
 - **Its state:** **working** while Claude is on a turn, **task running**
   while a background shell task runs, idle otherwise, and **open** while
   a terminal is attached somewhere.
+- **Whether it needs you:** **has a question** or **needs permission**
+  (a red dot, with the question) while Claude waits for you, and
+  **finished** (a green ring, with the end of the reply) when Claude
+  finished while no one was looking. These go to the top when the list
+  is sorted. See [When Claude needs you](notifications.md).
 - **Its directory and resources:** CPU, memory and project size.
   - CPU reads like `top`: 100% is one core busy, so a session using three
     cores shows 300%.

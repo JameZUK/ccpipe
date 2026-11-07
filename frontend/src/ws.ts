@@ -1,6 +1,8 @@
 // Minimal WS client with auto-reconnect. Text frames are JSON control messages;
 // binary frames are tagged with a 1-byte type prefix.
 
+import type { AttentionItem } from "./attention";
+
 export type ServerHello = {
   type: "hello";
   session: string;
@@ -93,7 +95,11 @@ export type ClientMessage =
   | { type: "mic_error"; name: string; message: string }
   // The composer's contents changed on this device. The server stores it
   // as the session's draft and relays it to the session's other devices.
-  | { type: "draft"; text: string };
+  | { type: "draft"; text: string }
+  // What needs you (backend attention.py): whether this page is on screen,
+  // read out that another session needs you (an item id), clear finished
+  // turns ("*" = all).
+  | { type: "attention"; visible?: boolean; say?: number; dismiss?: string };
 
 // Binary frame type prefixes (must match backend ws.py). Every binary
 // frame is now tagged so a PTY byte that happens to look like a TTS
@@ -116,6 +122,8 @@ export interface TerminalSocketHandlers {
   onClaudeAsk?: (msg: ServerClaudeAsk) => void;
   /** The session's composer draft was changed on another device. */
   onDraft?: (text: string) => void;
+  /** What needs you in every session, and which items just started. */
+  onAttention?: (items: AttentionItem[], newIds: number[]) => void;
   /** Answer to mic_start: Claude is recording (stream now), or why not. */
   onMicArmed?: () => void;
   onMicFailed?: (reason: string) => void;
@@ -238,7 +246,10 @@ export class TerminalSocket {
    * if the session is gone, it ended while open here (stopped, forgotten,
    * idle-stopped, exited) and coming back would undo that. */
   private resolveUrl(): string {
-    return this.helloCount > 0 ? `${this.url}&reattach=1` : this.url;
+    // Whether the page is on screen as it dials: a hidden page reconnecting
+    // in the background mustn't count as looking (backend attention.py).
+    const url = `${this.url}&visible=${document.visibilityState === "visible" ? 1 : 0}`;
+    return this.helloCount > 0 ? `${url}&reattach=1` : url;
   }
 
   connect(): void {
@@ -337,6 +348,10 @@ export class TerminalSocket {
               }
               this.lastStreamReadyAt = Date.now();
               this.streamReady = true;
+              // Now, not at open: the server's receive loop takes it from
+              // here (frames sent before the first resize is in are
+              // replayed as terminal input, where this one is dropped).
+              this.sendAttentionState();
               // Server has finished history-send and is one statement
               // from `while True: await receive()`. But on the CLIENT
               // side xterm.js is probably still parsing the history-
@@ -371,6 +386,12 @@ export class TerminalSocket {
             case "claude_ask": this.handlers.onClaudeAsk?.(parsed as unknown as ServerClaudeAsk); return;
             case "draft":
               if (typeof parsed.text === "string") this.handlers.onDraft?.(parsed.text);
+              return;
+            case "attention":
+              if (Array.isArray(parsed.items)) {
+                this.handlers.onAttention?.(parsed.items as AttentionItem[],
+                  Array.isArray(parsed.new) ? (parsed.new as number[]) : []);
+              }
               return;
             case "mic_armed": this.handlers.onMicArmed?.(); return;
             case "voice_listening": this.handlers.onVoiceListening?.(parsed.on === true); return;
@@ -497,6 +518,10 @@ export class TerminalSocket {
     ws.onerror = () => { if (this.ws === ws) ws.close(); };
 
     this.ws = ws;
+  }
+
+  private sendAttentionState(): void {
+    this.send({ type: "attention", visible: document.visibilityState === "visible" });
   }
 
   send(msg: ClientMessage): void {
@@ -813,6 +838,9 @@ export class TerminalSocket {
     // socket actually looks idle.
     const onFocus = () => kickAndRetry(true, false);
     const onVisible = () => {
+      // The server knows whether a page shows the session (a finished turn
+      // is seen) and whether one is on this device's screen (no push).
+      if (this.streamReady) this.sendAttentionState();
       if (document.visibilityState === "visible") kickAndRetry(true, false);
     };
     // pageshow with persisted=true fires when the page comes back from

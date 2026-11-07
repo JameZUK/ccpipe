@@ -151,9 +151,11 @@ async def lifespan(app: FastAPI):
     await control_client.start()
     # Resource sampling for the picker / session bar, and the idle-stop loop.
     from .routes import fs_transfer
-    from . import plan_usage
+    from . import attention, notify, plan_usage
     _background = [asyncio.create_task(sysstats.run()), asyncio.create_task(lifecycle.run()),
-                   asyncio.create_task(fs_transfer.sweep_loop()), asyncio.create_task(plan_usage.run())]
+                   asyncio.create_task(fs_transfer.sweep_loop()), asyncio.create_task(plan_usage.run()),
+                   # What needs you in every session, and push notifications.
+                   asyncio.create_task(attention.run())]
     if os.environ.get("CCPIPE_TTS", "off").lower() in ("kokoro", "on", "1", "true"):
         tts_service.set_enabled(True)
         await tts_service.start()
@@ -171,6 +173,7 @@ async def lifespan(app: FastAPI):
         for t in _background:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
+        await notify.stop()
         await tts_service.stop()
         await control_client.stop()
         # Persist any composer-draft edits still inside the save debounce.
@@ -485,6 +488,7 @@ from .routes.system import router as _system_router
 from .routes.fs import router as _fs_router
 from .routes.fs_transfer import router as _fs_transfer_router
 from .routes.mic import router as _mic_router
+from .routes.notify import router as _notify_router
 from .routes.sessions import router as _sessions_router
 from .routes.prompts import router as _prompts_router
 from .routes.layouts import router as _layouts_router
@@ -496,6 +500,7 @@ app.include_router(_tts_router)
 app.include_router(_mic_router)
 app.include_router(_sessions_router)
 app.include_router(_prompts_router)
+app.include_router(_notify_router)
 app.include_router(_layouts_router)
 app.include_router(_fs_router)
 app.include_router(_fs_transfer_router)

@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import config as app_config
-from .. import drafts, lifecycle, plan_usage, session_meta, sticky, sysstats, tmux, tmux_ui
+from .. import attention, drafts, lifecycle, plan_usage, session_meta, sticky, sysstats, tmux, tmux_ui
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..paths import claude_project_dir
@@ -94,6 +94,9 @@ class SessionInfo(BaseModel):
     # with a background shell task) or "idle"; None = no Claude running.
     claude: str | None = None
     claude_since: int | None = None
+    # What needs you here (attention.py): Claude's question, or its
+    # finished turn that no one has looked at. None = nothing.
+    attention: dict[str, Any] | None = None
 
 
 class StoppedSessionInfo(BaseModel):
@@ -141,6 +144,11 @@ class StickyBody(BaseModel):
 _HOSTNAME = socket.gethostname()
 
 
+def _attention_of(name: str) -> dict[str, Any] | None:
+    item = attention.get(name, "ask") or attention.get(name, "done")
+    return item.public() if item else None
+
+
 def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
                      meta: session_meta.Meta | None = None,
                      panes: dict[str, tuple[str, str]] | None = None,
@@ -171,13 +179,14 @@ def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
         stops_at=idle.get("stops_at"),
         claude=cstate,
         claude_since=csince or None,
+        attention=_attention_of(s.name),
     )
 
 
 async def _session_infos() -> list[SessionInfo]:
     sysstats.touch()
     (sessions, complete), panes, claude = await asyncio.gather(
-        tmux.list_sessions_checked(), tmux.active_panes(), tmux.claude_states())
+        tmux.list_sessions_checked(), tmux.active_panes(), attention.claude_states())
     sticky_names = sticky.sticky_names()
     if complete:
         meta = await asyncio.to_thread(

@@ -400,6 +400,46 @@ In `config.json` (restart to apply, like the rest of the file):
 Each check logs one line, such as `plan usage: week · all models 40%,
 week · Fable 5% (13.2 s)`, or why it failed and when it tries again.
 
+## Notifications
+
+What needs you (`backend/ccpipe/attention.py`): every second the backend
+reads each running Claude's `~/.claude/sessions/<pid>.json`. A status of
+`waiting` is a question or permission prompt, read off the pane. A
+`busy` → `idle` change held for 3 s while no page showed the session is
+a finished turn. Pages get the list over their WebSocket. The session list
+polls `GET /api/attention` every 3 s while it's on screen. See
+[When Claude needs you](guide/notifications.md).
+
+Push notifications (`notify.py`, `webpush.py`) are off until a device
+turns them on in Settings → Notifications. Then:
+
+- The backend makes a P-256 VAPID key (in `push.json`, `0600`) and POSTs
+  each notification to that device's push service, encrypted for it
+  (RFC 8291) and signed (RFC 8292). These are its only outbound
+  connections apart from Kokoro.
+- Push endpoints are limited to the browsers' push services:
+  `*.push.services.mozilla.com`, `*.push.apple.com`,
+  `fcm.googleapis.com`, `android.googleapis.com`, `*.notify.windows.com`.
+  Anything else is refused at subscribe time.
+- The signature's contact (`sub`) is the page's own `https://` origin, or
+  the project's URL when ccpipe is reached over plain HTTP.
+- A device the push service reports gone (404 / 410) is dropped, and so
+  is one it has refused (400 / 401 / 403) for a week. Network errors,
+  429 and 5xx don't count against a device. **Send a test** shows the
+  last error.
+- A device that had ccpipe on screen when a question came up is checked
+  again every 5 s while the question waits (for up to 30 minutes), and is
+  pushed to once ccpipe is no longer on its screen.
+
+| Setting | Default | |
+|---|---|---|
+| `notify.push_wait_s` | `60` | While a ccpipe page is on screen on another device, wait this long before pushing (0–900 s). Settings → Notifications. |
+
+Per device, and kept in that browser: the chime and the spoken name,
+each for questions and for finished turns. Per device but kept on the
+server with its subscription: whether it's pushed questions, finished
+turns, and the question or reply text.
+
 ## Where state lives
 
 - `~/.local/state/ccpipe/credentials` — argon2id hash, TOTP secret,
@@ -417,6 +457,10 @@ week · Fable 5% (13.2 s)`, or why it failed and when it tries again.
   (name → text), shared by every session and device. `0600`.
 - `~/.local/state/ccpipe/layouts.json` — each session's tile layout
   (which other sessions are tiled beside it, and how). `0600`.
+- `~/.local/state/ccpipe/push.json` — the server's push-notification
+  (VAPID) key, made on first use, and each device's push subscription
+  with its choices. `0600`. Deleting it turns push off everywhere; each
+  device then turns it on again.
 - `~/.local/state/ccpipe/initial_password.txt` — read-once `0400` file
   with the auto-generated password on first run. **Delete after
   reading.**

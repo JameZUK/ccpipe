@@ -14,7 +14,7 @@ its idle clock restarts — whenever any of these holds (busy_reason):
   2. there was output or input in the pane;
   3. Claude is working, or idle with a background shell task — Claude
      Code's own status ("busy" / "shell") in ~/.claude/sessions/<pid>.json
-     (tmux.claude_states); older versions: a spinner in the pane title;
+     (attention.claude_states); older versions: a spinner in the pane title;
   4. a Claude tool command is running, foreground or background — Claude
      runs each as `bash -c 'source ~/.claude/shell-snapshots/…'`, so any
      process under Claude carrying that is a task (a CI-wait loop sleeping
@@ -22,8 +22,8 @@ its idle clock restarts — whenever any of these holds (busy_reason):
   5. a pane's shell is running anything other than Claude — a server, a
      build, an editor, in any window or pane of the session;
   6. its processes used CPU (≥ CPU_BUSY_PCT of a core over the last tick);
-  7. Claude is waiting on a question / permission prompt (checked from the
-     screen just before a stop).
+  7. Claude is waiting on a question / permission prompt (its status is
+     "waiting"; older versions: checked from the screen just before a stop).
 Helpers Claude starts by itself (MCP servers, the Playwright browser,
 language servers) are NOT tasks: on 2026-11-02 19 of 23 idle sessions had
 exactly those running and nothing else.
@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import config as app_config
-from . import plan_usage, proctree, session_meta, sticky, tmux
+from . import attention, plan_usage, proctree, session_meta, sticky, tmux
 from .paths import claude_project_dir
 
 log = logging.getLogger(__name__)
@@ -88,6 +88,8 @@ def busy_reason(s: tmux.TmuxSession, roots: list[int], table: proctree.Table,
         return "open in a terminal"
     if now - s.activity < TICK_S * 2:
         return "recent output"
+    if claude == "waiting":
+        return "waiting for an answer"
     if claude == "busy" or _working(title):
         return "Claude is working"
     if claude == "shell":
@@ -146,7 +148,7 @@ async def tick() -> None:
     if not sessions:
         return
     panes, details, claude = await asyncio.gather(
-        tmux.all_panes(), tmux.active_panes(), tmux.claude_states())
+        tmux.all_panes(), tmux.active_panes(), attention.claude_states())
     table = await asyncio.to_thread(proctree.snapshot)
     stick = sticky.load()
     meta = session_meta.load()
@@ -178,7 +180,7 @@ async def tick() -> None:
 
         if stops_at is not None and now >= stops_at:
             screen = await tmux.capture_screen(s.name) or []
-            if PROMPT_RE.search("\n".join(screen[-15:])):
+            if attention.asking(s.name) or PROMPT_RE.search("\n".join(screen[-15:])):
                 _busy_at[s.name] = now
                 _status[s.name].update(busy="waiting for an answer", stops_at=None)
                 continue
@@ -281,7 +283,7 @@ async def stop(name: str, reason: str = "stopped") -> None:
     try:
         sid, cwd = await tmux.claude_sid_and_cwd(name)
         details, panes, states = await asyncio.gather(
-            tmux.active_panes(), tmux.all_panes(), tmux.claude_states())
+            tmux.active_panes(), tmux.all_panes(), attention.claude_states())
         table = await asyncio.to_thread(proctree.snapshot)
         claude_in = has_claude(panes.get(name, []), table, states.get(name, (None, 0))[0])
         session_meta.note_details(name, cwd or details.get(name, (None, None))[0], sid, claude_in)

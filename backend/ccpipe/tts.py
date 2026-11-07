@@ -715,8 +715,9 @@ class TtsService:
 
     def speak_to(self, text: str, sub: "_Subscription") -> int | None:
         """Speak ``text`` to one subscriber only — a question Claude is
-        asking, seen by that terminal's own watcher (claude_asks), so every
-        terminal on the session would otherwise speak it to all of them.
+        asking (attention.py), or that another session needs you: each
+        terminal decides for itself, so speaking it to every subscriber
+        would say it once per terminal to all of them.
         Returns the utterance id, or None when nothing will be spoken."""
         text = speakable(text).strip()
         if (not text or not self._enabled or self._http is None or sub.muted

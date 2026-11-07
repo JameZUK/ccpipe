@@ -131,6 +131,13 @@ async def manifest() -> FileResponse: return _serve_file("manifest.webmanifest")
 async def service_worker() -> FileResponse: return _serve_file("sw.js")
 
 
+# The push notifications' service worker (frontend/public/push-sw.js): shows
+# a notification when one arrives, opens the session when it's tapped. No
+# fetch handler, so it never stands between a page and the server.
+@router.get("/push-sw.js")
+async def push_service_worker() -> FileResponse: return _serve_file("push-sw.js")
+
+
 # PWA icon set. Top-level URLs (browsers expect /icon-192.png, not
 # /assets/icon-192.png) so each variant gets its own route here
 # rather than being mounted under StaticFiles. PNG-only because the

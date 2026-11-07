@@ -20,6 +20,7 @@ import { TERMINAL_FONTS } from "./terminal-fonts";
 import { onUpdateChange, pendingUpdate } from "./update";
 import { silence } from "./silence";
 import { buildSessionsSection, buildStatsSection } from "./settings-sessions";
+import { buildNotifySection } from "./settings-notify";
 import { deviceClass, isIPad, isMobileLayout, isStandalone, safeAreaInsets, titlebarArea } from "./mobile";
 import {
   DEFAULT_PREFS,
@@ -64,7 +65,7 @@ function sanitizeSvgTree(el: Element): void {
   walk(el);
 }
 
-type TabId = "display" | "sessions" | "voice" | "account" | "debug";
+type TabId = "display" | "sessions" | "notify" | "voice" | "account" | "debug";
 const LS_LAST_TAB = "ccpipe.settings.tab";
 const DEFAULT_TAB: TabId = "display";
 
@@ -74,7 +75,7 @@ function loadLastTab(): TabId {
     // L9: include "debug" — buildTabs() renders all four, but a user
     // who selected the debug tab and reopened settings was bounced
     // back to display every time because the validator dropped it.
-    if (v === "display" || v === "sessions" || v === "voice" || v === "account" || v === "debug") return v;
+    if (v === "display" || v === "sessions" || v === "notify" || v === "voice" || v === "account" || v === "debug") return v;
   } catch {}
   return DEFAULT_TAB;
 }
@@ -163,6 +164,11 @@ export function openSettings(opts: SettingsOpts): void {
   sessionsPanel.dataset.tab = "sessions";
   sessionsPanel.append(buildSessionsSection());
 
+  const notifyPanel = document.createElement("div");
+  notifyPanel.className = "modal__panel";
+  notifyPanel.dataset.tab = "notify";
+  notifyPanel.append(buildNotifySection());
+
   const voicePanel = document.createElement("div");
   voicePanel.className = "modal__panel";
   voicePanel.dataset.tab = "voice";
@@ -181,6 +187,7 @@ export function openSettings(opts: SettingsOpts): void {
   const panels: Record<TabId, HTMLElement> = {
     display: displayPanel,
     sessions: sessionsPanel,
+    notify: notifyPanel,
     voice: voicePanel,
     account: accountPanel,
     debug: debugPanel,
@@ -200,7 +207,7 @@ export function openSettings(opts: SettingsOpts): void {
   // The panels scroll inside .modal__body; header, tabs and footer stay put.
   const body = document.createElement("div");
   body.className = "modal__body";
-  body.append(displayPanel, sessionsPanel, voicePanel, accountPanel, debugPanel);
+  body.append(displayPanel, sessionsPanel, notifyPanel, voicePanel, accountPanel, debugPanel);
   modal.append(buildHeader(), tabs, body, buildAboutFooter());
 
   overlay.appendChild(modal);
@@ -278,6 +285,7 @@ function buildTabs(initial: TabId, onChange: (next: TabId) => void): HTMLElement
   const items: Array<{ id: TabId; label: string }> = [
     { id: "display", label: "display" },
     { id: "sessions", label: "sessions" },
+    { id: "notify",  label: "notifications" },
     { id: "voice",   label: "voice"   },
     { id: "account", label: "account" },
     { id: "debug",   label: "debug"   },
@@ -352,12 +360,6 @@ function buildVoiceSection(playSample?: (blob: Blob) => Promise<void>): HTMLElem
         </span>
         <input type="checkbox" name="progress" class="checkbox"/>
       </label>
-      <label class="row">
-        <span class="row__label">Notify when backgrounded
-          <span class="row__hint">browser notification on response, requires permission</span>
-        </span>
-        <input type="checkbox" name="notify" class="checkbox"/>
-      </label>
     </div>
     <div class="modal__row-actions">
       <span class="modal__status" data-role="voice-status"></span>
@@ -370,36 +372,9 @@ function buildVoiceSection(playSample?: (blob: Blob) => Promise<void>): HTMLElem
   const rateValue = sec.querySelector<HTMLElement>("[data-role=rate-value]")!;
   const scopeSelect = sec.querySelector<HTMLSelectElement>("select[name=scope]")!;
   const progressCheckbox = sec.querySelector<HTMLInputElement>("input[name=progress]")!;
-  const notifyCheckbox = sec.querySelector<HTMLInputElement>("input[name=notify]")!;
   const testBtn = sec.querySelector<HTMLButtonElement>("[data-role=test]")!;
   const saveBtn = sec.querySelector<HTMLButtonElement>("[data-role=save]")!;
   const status = sec.querySelector<HTMLElement>("[data-role=voice-status]")!;
-
-  // Notification toggle: pure client-side preference, so wire it
-  // independently of the Save voice button. Requesting permission must
-  // happen from a user gesture (the click here), so do it inline.
-  import("./notifications").then(({ isEnabled, setEnabled, requestPermission, notificationsSupported }) => {
-    if (!notificationsSupported()) {
-      notifyCheckbox.disabled = true;
-      notifyCheckbox.title = "this browser doesn't support notifications";
-      return;
-    }
-    notifyCheckbox.checked = isEnabled();
-    notifyCheckbox.addEventListener("change", async () => {
-      if (notifyCheckbox.checked) {
-        const perm = await requestPermission();
-        if (perm !== "granted") {
-          notifyCheckbox.checked = false;
-          status.textContent = "notification permission denied";
-          status.classList.add("modal__status--error");
-          return;
-        }
-        setEnabled(true);
-      } else {
-        setEnabled(false);
-      }
-    });
-  });
 
   rate.addEventListener("input", () => {
     rateValue.textContent = `${parseFloat(rate.value).toFixed(2)}×`;

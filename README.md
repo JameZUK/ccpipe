@@ -60,6 +60,11 @@ software one and speech plays in your browser.
 - **Conversation history.** The whole transcript, rendered, with the
   commands Claude ran and the diffs of its edits, updating live.
   [History →](docs/guide/files.md#conversation-history)
+- **Know when Claude needs you.** A question or permission prompt in
+  any session is marked on the session list, rung and named aloud in the
+  session you're in, and pushed to your phone or iPad when ccpipe isn't
+  on screen. Finished turns get a quieter mention.
+  [When Claude needs you →](docs/guide/notifications.md)
 - **Voice.** Dictate into Claude's `/voice`, hear replies read aloud, and
   hear when Claude asks a question or needs permission.
   [Voice →](docs/guide/voice.md)
@@ -91,7 +96,7 @@ you've read it). Open `http://<host>:8080` and sign in with your system
 username.
 
 To use ccpipe away from home, put nginx or Caddy in front of it for
-HTTPS. The microphone, notifications and passkeys need HTTPS too.
+HTTPS. The microphone, push notifications and passkeys need HTTPS too.
 
 [Install](docs/install.md) has the requirements, platforms and updating;
 [Deployment](docs/deployment.md) covers HTTPS and the firewall.
@@ -110,6 +115,7 @@ and [SECURITY.md](SECURITY.md#claude-subscription-terms).
 
 - **User guide:** [Sessions](docs/guide/sessions.md) ·
   [Using a session](docs/guide/terminal.md) ·
+  [When Claude needs you](docs/guide/notifications.md) ·
   [Files](docs/guide/files.md) · [Voice](docs/guide/voice.md) ·
   [Status](docs/guide/status.md) ·
   [Signing in and settings](docs/guide/account.md)

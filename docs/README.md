@@ -9,6 +9,7 @@
 | [Sessions](guide/sessions.md) | The session list, stopped sessions and resuming, starting a session, tiles, tmux controls |
 | [Using a session](guide/terminal.md) | The prompt box, drafts and saved prompts, copying, phones and tablets, reconnecting, updates |
 | [Files, documents and history](guide/files.md) | The file browser and transfers, the file viewer and editor, rendered Markdown, the conversation history |
+| [When Claude needs you](guide/notifications.md) | Questions, permission prompts and finished turns in every session: the session list, the bell, chimes and push notifications |
 | [Voice](guide/voice.md) | Dictation, spoken replies, questions and permission prompts read aloud |
 | [Status](guide/status.md) | The machine's CPU, memory and disk; the connection's round trips, jitter and reconnects; your Claude plan usage |
 | [Signing in and settings](guide/account.md) | Password, two-factor, passkeys and the ways to sign in; the Settings tabs |
