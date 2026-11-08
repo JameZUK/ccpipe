@@ -13,7 +13,7 @@
 import { h } from "./dom";
 import { dropdown } from "./dropdown";
 import { ICON_BELL, ICON_X, iconNode } from "./icons";
-import { alertAudio, audioSessionType } from "./audio-session";
+import { APPLE_TOUCH, audioSessionType } from "./audio-session";
 
 export type Level = "ask" | "done";
 
@@ -225,26 +225,60 @@ function context(): AudioContext | null {
     if (AC) ctx = new AC();
   } catch { /* none */ }
   noContext = !ctx;
+  if (ctx) {
+    const c = ctx;
+    c.addEventListener("statechange", () => note(`chime audio ${c.state} (audio session ${audioSessionType()})`));
+  }
   return ctx;
 }
 
 const isRunning = (c: AudioContext): boolean => (c.state as string) === "running";
 
-/** Inside a tap or key press: start the context (Safari's condition), with
- * a silent frame, which iOS also wants. Cheap once it runs. */
+// The context runs only while a sound plays, and is suspended again after
+// (idleLater). A running context is audio the page is playing, silent or
+// not, as far as the iPad is concerned. Once a tap has started it, Safari
+// lets the page start it again without one (WebKit removes the context's
+// gesture restriction the first time), so only the first tap is needed.
+let unlocked = false;
+let idleTimer = 0;
+let suspending: Promise<void> | null = null;
+
+/** Every gesture until the context has run once, if this device wants any
+ * sound: start it (Safari's condition) with a silent frame, which iOS also
+ * wants, then let it idle. With Sound and Say it off, never. */
 function unlockAudio(): void {
+  if (unlocked) return;
+  const p = loadAlerts();
+  if (!(p.ask.sound || p.ask.speak || p.done.sound || p.done.speak)) return;
+  startAudio();
+}
+
+function startAudio(): void {
   const c = context();
-  if (!c || isRunning(c)) return;
-  // Starting it starts the page's audio: as "ambient", or Safari stops the
-  // music (audio-session.ts). Not while the voice or the mic is going.
-  if (!busy()) alertAudio();
-  c.resume().catch(() => {});
+  if (!c) return;
+  c.resume().then(() => {
+    if (!isRunning(c)) return;
+    unlocked = true;
+    idleLater(c);
+  }).catch(() => {});
   try {
     const src = c.createBufferSource();
     src.buffer = c.createBuffer(1, 1, c.sampleRate);
     src.connect(c.destination);
     src.start(0);
   } catch { /* the next tap tries again */ }
+}
+
+/** Suspend the context once what's scheduled has played. */
+function idleLater(c: AudioContext): void {
+  window.clearTimeout(idleTimer);
+  const wait = Math.max(0, endsAt - c.currentTime) * 1000 + 400;
+  idleTimer = window.setTimeout(() => {
+    if (endsAt > c.currentTime) { idleLater(c); return; }
+    if (!isRunning(c)) return;
+    const done = c.suspend().catch(() => {}).finally(() => { if (suspending === done) suspending = null; });
+    suspending = done;
+  }, wait);
 }
 
 const GESTURES = ["pointerup", "touchend", "click", "keydown"] as const;
@@ -255,13 +289,17 @@ export function installChimeUnlock(): () => void {
   return () => { for (const g of GESTURES) document.removeEventListener(g, unlockAudio, { capture: true }); };
 }
 
-/** Running now, or after a short try (a backgrounded iPad page comes back
- * "interrupted"; Chrome and Firefox resume a page you've used). */
+/** Running now, or after a short try. If Safari won't (a page that hasn't
+ * had a tap yet, or one back from behind other apps), the next tap starts
+ * it again. */
 async function ready(c: AudioContext): Promise<boolean> {
+  window.clearTimeout(idleTimer);
+  if (suspending) await suspending;
   if (isRunning(c)) return true;
   try {
     await Promise.race([c.resume(), new Promise((r) => window.setTimeout(r, 400))]);
   } catch { /* still not running */ }
+  if (!isRunning(c)) unlocked = false;
   return isRunning(c);
 }
 
@@ -270,9 +308,11 @@ let busy: () => boolean = () => false;
 let note: (msg: string) => void = () => {};
 
 /** A session page: where the chime and the name go if Web Audio won't run
- * (its voice player's element, the one Safari lets it play), whether its
- * voice is speaking (a chime then would talk over it), and where to report
- * which way it played (the server log, for a device we can't see). */
+ * (its voice player's element; not on an iPad or iPhone, where an element
+ * that has played makes Safari treat the page as a media player, which
+ * stops other apps' audio), whether its voice is speaking (a chime then
+ * would talk over it), and where to report which way it played (the
+ * server log, for a device we can't see). */
 export function setChimeFallback(opts: {
   play: (blob: Blob) => Promise<void>; busy: () => boolean; log: (msg: string) => void;
 }): () => void {
@@ -296,10 +336,8 @@ function play(what: string, make: (c: AudioContext) => Promise<AudioBuffer> | Au
               blob: () => Blob): void {
   chain = chain.then(async () => {
     const c = context();
-    // Mix with whatever else is playing (audio-session.ts), unless the voice
-    // or the mic is going (then this waited, or it doesn't play).
+    // Not over the voice or into the mic (then this waited, or it doesn't play).
     if (busy()) return;
-    alertAudio();
     const was = c?.state ?? "missing";
     if (c && await ready(c)) {
       try {
@@ -310,11 +348,16 @@ function play(what: string, make: (c: AudioContext) => Promise<AudioBuffer> | Au
         const at = Math.max(c.currentTime + 0.02, endsAt);
         src.start(at);
         endsAt = at + buf.duration + 0.12;
-        note(`${what}: web audio (session ${audioSessionType()}, context ${was})`);
+        idleLater(c);
+        note(`${what}: web audio (audio session ${audioSessionType()}, context was ${was})`);
         return;
       } catch (e) {
         note(`${what}: web audio failed (${(e as Error)?.name ?? e})`);
       }
+    }
+    if (APPLE_TOUCH) {
+      note(`${what}: not played (audio context ${c ? c.state : "missing"}); the next tap lets it play`);
+      return;
     }
     if (fallback) {
       note(`${what}: voice player (audio context ${c ? c.state : "missing"})`);
@@ -368,7 +411,7 @@ export async function sayName(item: AttentionItem): Promise<void> {
 
 /** For Settings: hear what each sounds like (inside the tap, so it plays). */
 export function previewChime(level: Level): void {
-  unlockAudio();
+  startAudio();
   chime(level);
 }
 

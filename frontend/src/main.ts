@@ -23,7 +23,7 @@ import {
   sayName, setAppBadge, setChimeFallback, setTitleCount, toast, type AttentionItem,
 } from "./attention";
 import { onNotificationOpen, pushCovers, pushStatus, tidyNotifications } from "./push";
-import { alertAudio } from "./audio-session";
+import { watchAudio } from "./audio-session";
 // Heavy chunks loaded lazily on user gesture:
 //   - settings / file-panel / session-picker are large (758 + 752 + 629
 //     LOC) and gated behind a button or a no-last-session bootstrap.
@@ -104,10 +104,6 @@ installTooltips();
 
 // Notice a deploy and reload onto it at a safe moment (see update.ts).
 installUpdater();
-
-// Mix with other apps' audio until Claude's voice or the mic needs more:
-// the chimes mustn't stop the music (audio-session.ts).
-alertAudio();
 
 /** Socket URL for a tile beside the main terminal (see tile.ts). */
 function tileWsUrl(session: string, mode: "live" | "watch"): string {
@@ -1263,14 +1259,19 @@ async function attachTerminal(session: string): Promise<void> {
   document.addEventListener("visibilitychange", onAttentionVisibility);
   // The chime and the name play through Web Audio, which leaves the lock
   // screen's player alone (attention.ts). Only if that won't run do they
-  // use the voice player's element, the one Safari lets this page play.
+  // use the voice player's element (not on an iPad or iPhone).
   const unsetChime = setChimeFallback({
-    play: (blob) => tts.playNow(blob, true).catch(() => {}),
+    play: (blob) => tts.playNow(blob).catch(() => {}),
     // Not over Claude's voice, nor into the microphone.
     busy: () => ttsPlaying || recording,
     log: (msg) => socket.send({ type: "tts_log", msg: `alert: ${msg}` }),
   });
   const unlockChime = installChimeUnlock();
+  // What Safari's audio does, in the server log (audio-session.ts).
+  // Lines from while it was disconnected arrive late, so each says when.
+  const unwatchAudio = watchAudio((msg) => socket.sendWhenReady({
+    type: "tts_log", msg: `audio: ${msg} [${new Date().toISOString().slice(11, 19)}Z]`,
+  }));
 
   const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session, {
     // With tiles on screen, Ctrl+F / font-size keys belong to whichever
@@ -1324,6 +1325,7 @@ async function attachTerminal(session: string): Promise<void> {
     bell.dispose();
     unsetChime();
     unlockChime();
+    unwatchAudio();
     document.removeEventListener("visibilitychange", onAttentionVisibility);
     setTitleCount(0);
     window.removeEventListener("resize", syncTilesBtn);

@@ -32,9 +32,6 @@
 // (the analyser's loudest sample: 0) and then marked the context
 // "interrupted" — the player's own reports from the user's iPad,
 // 2026-11-03. The bare element plays fine; the visualiser stays hidden.
-const APPLE_TOUCH = typeof navigator !== "undefined"
-  && (/iPad|iPhone|iPod/.test(navigator.userAgent)
-    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
 
 type Queued = { blob: Blob; at: number };
 
@@ -47,7 +44,7 @@ const GESTURES = ["pointerup", "touchend", "click", "keydown"] as const;
 import { loadTtsMuted, saveTtsMuted } from "./display-prefs";
 import * as wakeLock from "./wake-lock";
 import { silence } from "./silence";
-import { mediaAudio } from "./audio-session";
+import { APPLE_TOUCH } from "./audio-session";
 
 export class TtsPlayer {
   // Per-utterance chunk buffer (between onStart and onEnd).
@@ -241,6 +238,9 @@ export class TtsPlayer {
       const next = this.queue.shift();
       if (next) { this.startPlayback(next); return; }
     }
+    // On the iPad this is the moment Safari counts the page as playing
+    // media (the server log, to match against the music stopping).
+    if (APPLE_TOUCH) this.debug("tap: unlocking the voice player (a moment of silence)");
     this.priming = true;
     a.src = silence();
     const seq = ++this.playSeq;
@@ -372,28 +372,22 @@ export class TtsPlayer {
 
   /** Play `blob` now, ahead of anything queued, muted or not: the voice
    * test in Settings. On Safari only one audio element plays at a time,
-   * so the test must use this one, not its own. Settles with play().
-   * `mix`: a chime that couldn't use Web Audio, which mixes with other
-   * audio rather than stopping it (audio-session.ts). */
-  playNow(blob: Blob, mix = false): Promise<void> {
+   * so the test must use this one, not its own. Settles with play(). */
+  playNow(blob: Blob): Promise<void> {
     this.ensureWebAudio();
     const a = this.audio;
     if (!a) return Promise.reject(new Error("no audio element"));
     if (!a.paused) { try { a.pause(); } catch {} }
     this.setBlocked(false);
     return new Promise((resolve, reject) => {
-      this.startPlayback({ blob, at: Date.now() }, { resolve, reject }, mix);
+      this.startPlayback({ blob, at: Date.now() }, { resolve, reject });
     });
   }
 
   private startPlayback(item: Queued,
-                        settle?: { resolve: () => void; reject: (e: unknown) => void },
-                        mix = false): void {
+                        settle?: { resolve: () => void; reject: (e: unknown) => void }): void {
     const audio = this.audio;
     if (!audio) return;
-    // Speech plays as it always has (Safari's "playback": it pauses other
-    // audio); the page is otherwise "ambient" so its chimes don't.
-    if (!mix) mediaAudio();
     // New source first, then let the old URL go (the element has dropped it).
     const old = this.playingUrl;
     this.playingUrl = URL.createObjectURL(item.blob);

@@ -78,12 +78,13 @@ session's name is said in ccpipe's voice: *"weather api has a
 question."* The tab's title counts what's waiting, such as *(2) ccpipe*,
 and so does the app icon's badge where the browser has one.
 
-The chime and the name play over whatever else is on, such as music or
-a podcast. They don't pause it, and they don't take over the lock
-screen's media controls, so pressing play still plays your music. Like
-other sounds from a web page, they follow the iPad's or iPhone's silent
-mode. (Claude's voice reading a reply, and dictation, still pause other
-audio while they run, as they always have.)
+The chime and the name don't take over the lock screen's media
+controls, so pressing play there still plays your music. ccpipe's sound
+runs only while they play. Whether they pause music or a podcast in
+another app is up to Safari: usually they play over it, but on an iPad
+they can still pause it. If yours does, turn off **Sound** and **Say it**
+for that device (below). With both off, and Claude's voice muted,
+ccpipe plays no sound at all.
 
 The session you're in, and any in tiles beside it, are on screen, so
 they're left out. This session's own question is read out in full, as it

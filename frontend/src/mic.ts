@@ -10,7 +10,6 @@
 
 import { FRAME_MIC_PCM, TerminalSocket } from "./ws";
 import { loadMicProcessing } from "./display-prefs";
-import { mediaAudio } from "./audio-session";
 
 export interface MicStreamerConfig {
   /** Whether the client-side VAD trips an automatic stop on sustained
@@ -153,9 +152,6 @@ export class MicStreamer {
    * gesture, before anything async. A no-op while recording. */
   prime(): void {
     if (this.state === "running" || this.state === "starting") return;
-    // Recording needs Safari's own choice ("play-and-record"), not the
-    // page's resting "ambient" (audio-session.ts).
-    mediaAudio();
     try {
       if (!this.audio || this.audio.state === "closed") this._newAudio();
       void this.audio!.resume().catch(() => {});
@@ -212,7 +208,6 @@ export class MicStreamer {
   private async _start(): Promise<void> {
     if (this.state === "running" || this.state === "starting") return;
     this.state = "starting";
-    mediaAudio();
     const processing = loadMicProcessing();
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({

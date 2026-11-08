@@ -324,6 +324,14 @@ whose), so its lazily-loaded code is still there. (`frontend/src/update.ts`,
   build; pages left over from before then go away with a restart of the
   iPad. The page logs its playback trouble on the server
   (`journalctl --user -u ccpipe | grep "tts client"`).
+- **Music in another app pauses on an iPad**: the page logs its sound on
+  the server, with the device: `audio:` lines for Safari's audio session
+  (active, inactive, interrupted) and the page going behind other apps,
+  and `alert:` lines for each chime. Note the time the music stopped and
+  look there (`journalctl --user -u ccpipe | grep "tts client"`). To stop
+  it meanwhile, turn off Sound and Say it for that device (Settings →
+  Notifications), and mute Claude's voice there: ccpipe then plays no
+  sound at all.
 - **Lost the generated initial password**: the credentials file stores
   only the hash. If you didn't capture the password from
   `~/.local/state/ccpipe/initial_password.txt` before deleting it,

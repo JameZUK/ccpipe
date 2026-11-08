@@ -1070,8 +1070,8 @@ class _TerminalConnection:
             if self.tts_log_count <= 40:
                 with contextlib.suppress(Exception):
                     msg = _safe_json_loads(text)
-                    log.info("tts client (session=%s build=%s conn=%x): %s", self.session,
-                             self.build or "?", id(self) & 0xffff,
+                    log.info("tts client (session=%s build=%s device=%s conn=%x): %s", self.session,
+                             self.build or "?", self.device[:8] or "?", id(self) & 0xffff,
                              re.sub(r"[\x00-\x1f]", " ", str(msg.get("msg", "")))[:300])
             return True
         if _is_control_frame(text, '"type":"mic_start"', '"type": "mic_start"'):

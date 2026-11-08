@@ -202,6 +202,8 @@ export class TerminalSocket {
   // ping before that would time the history replay, not the network.
   private fastPingTimer: number | null = null;
   private streamReady = false;
+  // sendWhenReady()'s frames, waiting for the server's receive loop.
+  private afterReady: ClientMessage[] = [];
   // Pending retry handle so reconnectNow() can cancel an in-flight backoff
   // and dial immediately when the network/tab comes back.
   private pendingRetry: number | null = null;
@@ -352,6 +354,7 @@ export class TerminalSocket {
               // here (frames sent before the first resize is in are
               // replayed as terminal input, where this one is dropped).
               this.sendAttentionState();
+              for (const m of this.afterReady.splice(0)) this.send(m);
               // Server has finished history-send and is one statement
               // from `while True: await receive()`. But on the CLIENT
               // side xterm.js is probably still parsing the history-
@@ -522,6 +525,14 @@ export class TerminalSocket {
 
   private sendAttentionState(): void {
     this.send({ type: "attention", visible: document.visibilityState === "visible" });
+  }
+
+  /** A report for the server log that shouldn't be lost to the connect
+   * (the server drops it before its receive loop starts): sent now if the
+   * server is there, else once it is (a few kept). */
+  sendWhenReady(msg: ClientMessage): void {
+    if (this.streamReady && this.ws?.readyState === WebSocket.OPEN) { this.send(msg); return; }
+    if (this.afterReady.length < 20) this.afterReady.push(msg);
   }
 
   send(msg: ClientMessage): void {

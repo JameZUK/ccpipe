@@ -1,37 +1,59 @@
-// How the page's sound sits with other apps' (Safari: navigator.audioSession).
+// What the page's sound is doing, for the server log: Safari's audio
+// session (navigator.audioSession: active, inactive, interrupted), the
+// page going behind other apps and back. The iPad is where the trouble
+// is, and the log is the only view of it.
 //
-// Left to itself ("auto"), Safari puts a page whose <audio> has ever played
-// (the voice player plays a moment of silence on the first tap, to be
-// allowed to speak later) in its "playback" mode: any sound from the page,
-// even a Web Audio chime, stops the music or podcast that was on and takes
-// the lock screen's player. "ambient" mixes with what's playing and leaves
-// the player alone (and, like a game's sound, follows silent mode).
-//
-// So ccpipe is ambient by default and for its chimes (attention.ts). Claude's
-// voice and dictation ask for "auto" as they start, which is how they always
-// behaved: a reply in "playback", dictation in "play-and-record" (ambient
-// can't record). Other browsers have no audioSession: these do nothing.
+// ccpipe doesn't set the session's type. "ambient" for the chimes (so they
+// mix with music) made the iPad pause the music at random (user,
+// 2026-11-08, c54c41b): while a page sets a type Safari never lets go of
+// the page's audio (WebKit's MediaSessionManagerInterface::
+// maybeDeactivateAudioSession), and each switch back to "auto" for
+// Claude's voice re-applied "playback" to audio that was already running.
+// Left at "auto", Safari treats Web Audio alone as ambient anyway; what
+// ccpipe can do is keep its audio short (attention.ts runs the chime's
+// context only while it plays).
 
-type Mode = "ambient" | "auto";
+/** An iPad or iPhone (an iPad's Safari says it's a Mac, but with touch). */
+export const APPLE_TOUCH = typeof navigator !== "undefined"
+  && (/iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
 
-function session(): { type: string } | undefined {
-  return (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
+type Session = EventTarget & { type?: string; state?: string };
+
+function session(): Session | undefined {
+  try {
+    return (navigator as Navigator & { audioSession?: Session }).audioSession;
+  } catch {
+    return undefined;
+  }
 }
 
-function set(mode: Mode): void {
+/** "auto/active", or "none" where there's no audioSession (not Safari). */
+export function audioSessionType(): string {
   try {
     const s = session();
-    if (s && s.type !== mode) s.type = mode;
-  } catch { /* not allowed here (a frame): leave it */ }
+    return s ? `${s.type ?? "?"}/${s.state ?? "?"}` : "none";
+  } catch {
+    return "none";
+  }
 }
 
-/** The chimes, and the page at rest: mix with other audio. */
-export function alertAudio(): void { set("ambient"); }
-
-/** Claude's voice or the microphone is about to start: Safari's choice. */
-export function mediaAudio(): void { set("auto"); }
-
-/** What it is now, for the server log. */
-export function audioSessionType(): string {
-  try { return session()?.type ?? "none"; } catch { return "none"; }
+/** Report changes to `log` while a session page is open. Returns an undo. */
+export function watchAudio(log: (msg: string) => void): () => void {
+  const s = session();
+  const say = (msg: string) => { try { log(msg); } catch { /* socket gone */ } };
+  const onState = () => say(`audio session ${audioSessionType()}`);
+  const onVisible = () => say(`page ${document.hidden ? "hidden" : "shown"} (audio session ${audioSessionType()})`);
+  s?.addEventListener("statechange", onState);
+  document.addEventListener("visibilitychange", onVisible);
+  const standalone = matchMedia("(display-mode: standalone)").matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  const ua = navigator.userAgent;
+  const version = ua.match(/Version\/[\d.]+/)?.[0] ?? ua.match(/(Firefox|Chrome)\/[\d.]+/)?.[0] ?? "?";
+  say(`page open: ${standalone ? "home-screen app" : "browser tab"}, ${APPLE_TOUCH ? "iPad/iPhone" : "other"}, `
+    + `${version}, audio session ${audioSessionType()}`);
+  return () => {
+    s?.removeEventListener("statechange", onState);
+    document.removeEventListener("visibilitychange", onVisible);
+  };
 }
