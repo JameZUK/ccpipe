@@ -1405,11 +1405,10 @@ class _TerminalConnection:
         """{"type": "attention", …} from the page:
           visible    it's on screen (true) or not: a page showing this
                      session has seen its finished turn
-          say        read out that another session needs you (an item id):
-                     the page decides, since it knows its tiles and its
-                     settings; the words are the server's, once per device,
-                     and not when voice is set to read nothing
-          dismiss    clear finished turns: one session's, or "*" for all"""
+          dismiss    clear finished turns: one session's, or "*" for all
+        (The name of another session that needs you is fetched from POST
+        /api/attention/say and played with the chime, through Web Audio,
+        so it stays off the lock screen's media player: attention.ts.)"""
         try:
             msg = _safe_json_loads(text)
         except ValueError:
@@ -1418,14 +1417,6 @@ class _TerminalConnection:
             self.visible = msg["visible"]
             if self.visible and not self.outdated():
                 attention.seen(self.session)
-        say = msg.get("say")
-        if isinstance(say, int) and not isinstance(say, bool) and not self.tile:
-            item = next((i for i in attention.items() if i.id == say), None)
-            if (item is not None and self.alive and not self.outdated()
-                    and not isinstance(self.tts_sub, _NoTts)
-                    and app_config.load().tts.scope != "off"
-                    and attention.first_say(self.device, item.id)):
-                tts_service.speak_to(attention.announcement(item), self.tts_sub)
         dismiss = msg.get("dismiss")
         if dismiss == "*":
             attention.dismiss()

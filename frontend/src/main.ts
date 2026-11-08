@@ -19,8 +19,8 @@ import { attachOptionSpacePtt } from "./ptt";
 import { mdViewUrl } from "./view-url";
 import { KEEPALIVE_MS, TerminalSocket } from "./ws";
 import {
-  NewItems, attentionBell, canSound, chime, claimAlert, deviceId, loadAlerts, setAppBadge,
-  setChimeSink, setTitleCount, toast, type AttentionItem,
+  NewItems, attentionBell, canSound, chime, claimAlert, deviceId, installChimeUnlock, loadAlerts,
+  sayName, setAppBadge, setChimeFallback, setTitleCount, toast, type AttentionItem,
 } from "./attention";
 import { onNotificationOpen, pushCovers, pushStatus, tidyNotifications } from "./push";
 // Heavy chunks loaded lazily on user gesture:
@@ -1250,16 +1250,21 @@ async function attachTerminal(session: string): Promise<void> {
     void claimAlert(it).then((mine) => {
       if (!mine) return;
       if (prefs.sound) chime(it.level);
-      // The words are the server's (ws.py), spoken by this page's voice.
-      if (prefs.speak) window.setTimeout(() => socket.send({ type: "attention", say: it.id }), 500);
+      // Not with this session's voice muted.
+      if (prefs.speak && !tts.isMuted) void sayName(it);
     });
   };
   const onAttentionVisibility = (): void => showAttention();
   document.addEventListener("visibilitychange", onAttentionVisibility);
-  // The chime plays through the voice player (one audio element for Safari).
-  const unsinkChime = setChimeSink((blob) => {
-    if (!ttsPlaying) tts.playNow(blob).catch(() => {});
+  // The chime and the name play through Web Audio, which leaves the lock
+  // screen's player alone (attention.ts). Only if that won't run do they
+  // use the voice player's element, the one Safari lets this page play.
+  const unsetChime = setChimeFallback({
+    play: (blob) => tts.playNow(blob).catch(() => {}),
+    busy: () => ttsPlaying,
+    log: (msg) => socket.send({ type: "tts_log", msg: `alert: ${msg}` }),
   });
+  const unlockChime = installChimeUnlock();
 
   const terminalApi = createTerminal(terminalContainer, socket, loadDisplayPrefs(session), session, {
     // With tiles on screen, Ctrl+F / font-size keys belong to whichever
@@ -1311,7 +1316,8 @@ async function attachTerminal(session: string): Promise<void> {
     sysMeter.dispose();
     pingPop.dispose();
     bell.dispose();
-    unsinkChime();
+    unsetChime();
+    unlockChime();
     document.removeEventListener("visibilitychange", onAttentionVisibility);
     setTitleCount(0);
     window.removeEventListener("resize", syncTilesBtn);

@@ -137,8 +137,8 @@ def asking(session: str) -> bool:
 
 
 def announcement(item: Item) -> str:
-    """What's said when a session needs you: on the session list, or in
-    another session (ws.py, routes/notify.py)."""
+    """What's said after the chime when a session needs you (POST
+    /api/attention/say, routes/notify.py)."""
     name = re.sub(r"[-_]+", " ", item.session)
     if item.level == "done":
         return f"{name} has finished."

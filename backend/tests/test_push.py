@@ -525,16 +525,10 @@ def test_the_page_says_what_it_sees_and_wants(store, monkeypatch):
     c._on_attention_frame('{"type":"attention","visible":true}')
     assert c.visible and attention.get("work", "done") is None
     assert ws.session_watched("work") and ws.device_visible("phone") and ws.anyone_visible()
-    item = _item(session="build_2")
-    c._on_attention_frame(json.dumps({"type": "attention", "say": item.id}))
-    c._on_attention_frame(json.dumps({"type": "attention", "say": item.id}))   # another page
-    assert said == ["build 2 has a question."]
-    from ccpipe import config
-    cfg = config.load_for_edit()
-    cfg.tts.scope = "off"                       # voice set to read nothing
-    config.save(cfg)
-    c._on_attention_frame(json.dumps({"type": "attention", "say": _item(session="z").id}))
-    assert said == ["build 2 has a question."]
+    # The name is no longer said into the voice stream (it would take the
+    # lock screen's player): a page from before asking is ignored.
+    c._on_attention_frame(json.dumps({"type": "attention", "say": _item(session="b").id}))
+    assert said == []
     _item("done", session="x")
     c._on_attention_frame('{"type":"attention","dismiss":"*"}')
     assert attention.get("x", "done") is None

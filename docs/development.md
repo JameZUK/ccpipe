@@ -169,7 +169,8 @@ frontend/
     settings-notify.ts Notifications → chime, spoken name, push per device
     attention.ts       What needs you on the page: the top bar's bell and
                        its drop-down, banners, the chime (made in code)
-                       and the list's spoken name, the tab title count,
+                       and the spoken name (Web Audio, which stays off
+                       the lock screen's player), the tab title count,
                        per-device choices
     push.ts            Push on this device: permission, push-sw.js,
                        subscribe; a tapped notification opens its session
@@ -228,9 +229,11 @@ Client → server text frames (JSON):
   visibility change: `visible` (the page is on screen: a page showing a
   session has seen its finished turn, and a device with one on screen
   isn't pushed to; the dial URL carries `&visible=0|1` too, so a hidden
-  page reconnecting doesn't count as looking). Also `say` (an item id:
-  say which other session needs you, in the server's words, once per
-  device) and `dismiss` (clear finished turns: a session name, or `"*"`)
+  page reconnecting doesn't count as looking). Also `dismiss` (clear
+  finished turns: a session name, or `"*"`). The name of another session
+  that needs you isn't said over the socket: the page fetches it from
+  `POST /api/attention/say` and plays it with the chime, through Web
+  Audio, so it stays off the lock screen's player.
 
 Client → server binary frames are prefixed with a 1-byte channel tag:
 - `0x01` — Int16 PCM mic audio (16 kHz mono)

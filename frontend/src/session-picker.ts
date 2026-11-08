@@ -33,7 +33,7 @@ import { FAST_PING_MS, LatencyLog, latencyLevel, pingDropdown } from "./pingmete
 import { mountSysPanel } from "./syspanel";
 import {
   NewItems, ago, canSound, chime, claimAlert, clearToasts, deviceId, installChimeUnlock,
-  loadAlerts, sayOnList, setAppBadge, setTitleCount, toast, whatLabel, type AttentionItem,
+  loadAlerts, sayName, setAppBadge, setTitleCount, toast, whatLabel, type AttentionItem,
 } from "./attention";
 import { fireResponseReady } from "./notifications";
 import { pushCovers, tidyNotifications } from "./push";
@@ -1408,7 +1408,7 @@ export function renderSessionPicker(
       void claimAlert(it).then((mine) => {
         if (!mine) return;
         if (ring) chime(it.level);
-        if (want.speak) void sayOnList(it);
+        if (want.speak) void sayName(it);
       });
     }
   };

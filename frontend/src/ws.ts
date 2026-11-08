@@ -99,7 +99,7 @@ export type ClientMessage =
   // What needs you (backend attention.py): whether this page is on screen,
   // read out that another session needs you (an item id), clear finished
   // turns ("*" = all).
-  | { type: "attention"; visible?: boolean; say?: number; dismiss?: string };
+  | { type: "attention"; visible?: boolean; dismiss?: string };
 
 // Binary frame type prefixes (must match backend ws.py). Every binary
 // frame is now tagged so a PTY byte that happens to look like a TTS

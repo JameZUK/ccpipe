@@ -13,7 +13,6 @@
 import { h } from "./dom";
 import { dropdown } from "./dropdown";
 import { ICON_BELL, ICON_X, iconNode } from "./icons";
-import { silence } from "./silence";
 
 export type Level = "ask" | "done";
 
@@ -163,21 +162,27 @@ export async function claimAlert(item: AttentionItem): Promise<boolean> {
 
 // ─── The chime ────────────────────────────────────────────────────────────
 // Made here (no sound files): two rising notes for a question, one soft
-// one for a finished turn. On a session page it plays through the voice
-// player, since Safari plays one audio element at a time (tts.ts); on the
-// session list through an element of its own, unlocked by the first tap,
-// followed there by the session's name (sayOnList).
+// one for a finished turn, then (if chosen) the session's name in
+// ccpipe's voice.
+//
+// Both play through Web Audio, not an <audio> element. Safari builds the
+// lock screen's player (and the iPad's play button) from media elements,
+// and playing one stops the music or podcast that was on: a chime that
+// way took over the player, and pressing play replayed the tone. Web
+// Audio mixes with what's playing and stays off the player. Like any web
+// game's sound, it follows the device's silent mode.
+//
+// Safari lets the context run once a tap or key press has started it, so
+// every page starts it on its first one. If it still won't run, a session
+// page falls back to its voice player's element (setChimeFallback).
 
-const blobs = new Map<Level, Blob>();
+const notesOf: Record<Level, { notes: Array<[number, number, number]>; gain: number }> = {
+  ask: { notes: [[659.25, 0, 0.5], [987.77, 0.13, 0.75]], gain: 0.3 },
+  done: { notes: [[587.33, 0, 0.7]], gain: 0.16 },
+};
 
-function chimeBlob(level: Level): Blob {
-  const have = blobs.get(level);
-  if (have) return have;
-  const notes: Array<[number, number, number]> = level === "ask"
-    ? [[659.25, 0, 0.5], [987.77, 0.13, 0.75]]
-    : [[587.33, 0, 0.7]];
-  const gain = level === "ask" ? 0.3 : 0.16;
-  const rate = 22050;
+function chimePcm(level: Level, rate: number): Float32Array<ArrayBuffer> {
+  const { notes, gain } = notesOf[level];
   const len = Math.ceil(rate * Math.max(...notes.map(([, s, d]) => s + d)));
   const pcm = new Float32Array(len);
   for (const [f, start, dur] of notes) {
@@ -189,6 +194,14 @@ function chimeBlob(level: Level): Blob {
       pcm[s0 + i] += env * gain * (Math.sin(2 * Math.PI * f * t) + 0.25 * Math.sin(4 * Math.PI * f * t));
     }
   }
+  return pcm;
+}
+
+/** The chime as a WAV, for the fallback. */
+function chimeBlob(level: Level): Blob {
+  const rate = 22050;
+  const pcm = chimePcm(level, rate);
+  const len = pcm.length;
   const buf = new ArrayBuffer(44 + len * 2);
   const v = new DataView(buf);
   const tag = (o: number, t: string) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
@@ -197,98 +210,130 @@ function chimeBlob(level: Level): Blob {
   v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
   tag(36, "data"); v.setUint32(40, len * 2, true);
   for (let i = 0; i < len; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 0x7fff, true);
-  const blob = new Blob([buf], { type: "audio/wav" });
-  blobs.set(level, blob);
-  return blob;
+  return new Blob([buf], { type: "audio/wav" });
 }
 
-let sink: ((blob: Blob) => void) | null = null;
-let own: HTMLAudioElement | null = null;
-let ownUnlocked = false;
-const urls = new Map<Level, string>();
+let ctx: AudioContext | null = null;
+let noContext = false;
 
-/** A session page plays the chime through its voice player. */
-export function setChimeSink(fn: (blob: Blob) => void): () => void {
-  sink = fn;
-  return () => { if (sink === fn) sink = null; };
+function context(): AudioContext | null {
+  if (ctx || noContext) return ctx;
+  const AC = window.AudioContext
+    ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  try {
+    if (AC) ctx = new AC();
+  } catch { /* none */ }
+  noContext = !ctx;
+  return ctx;
+}
+
+const isRunning = (c: AudioContext): boolean => (c.state as string) === "running";
+
+/** Inside a tap or key press: start the context (Safari's condition), with
+ * a silent frame, which iOS also wants. Cheap once it runs. */
+function unlockAudio(): void {
+  const c = context();
+  if (!c || isRunning(c)) return;
+  c.resume().catch(() => {});
+  try {
+    const src = c.createBufferSource();
+    src.buffer = c.createBuffer(1, 1, c.sampleRate);
+    src.connect(c.destination);
+    src.start(0);
+  } catch { /* the next tap tries again */ }
 }
 
 const GESTURES = ["pointerup", "touchend", "click", "keydown"] as const;
 
-function unlockOwn(): void {
-  if (sink || ownUnlocked) return;
-  // Something is playing, so it already could.
-  if (playing) { ownUnlocked = true; return; }
-  own ??= new Audio();
-  const a = own;
-  a.src = silence();
-  a.play().then(() => { ownUnlocked = true; try { a.pause(); } catch {} })
-    .catch((e) => { if ((e as DOMException)?.name === "AbortError") ownUnlocked = true; });
-}
-
-/** On the session list: the first tap or key press unlocks the chime. */
+/** Every page with alerts: a tap or key press lets the chime play. */
 export function installChimeUnlock(): () => void {
-  for (const g of GESTURES) document.addEventListener(g, unlockOwn, { capture: true, passive: true });
-  return () => { for (const g of GESTURES) document.removeEventListener(g, unlockOwn, { capture: true }); };
+  for (const g of GESTURES) document.addEventListener(g, unlockAudio, { capture: true, passive: true });
+  return () => { for (const g of GESTURES) document.removeEventListener(g, unlockAudio, { capture: true }); };
 }
 
-// The session list's element plays one thing after another: the chime,
-// then the name.
-const queue: Array<{ url: string; revoke: boolean }> = [];
-let playing = false;
-
-function playOwn(url: string, revoke: boolean): void {
-  if (queue.length >= 4) {
-    const dropped = queue.shift();
-    if (dropped?.revoke) URL.revokeObjectURL(dropped.url);
-  }
-  queue.push({ url, revoke });
-  pump();
+/** Running now, or after a short try (a backgrounded iPad page comes back
+ * "interrupted"; Chrome and Firefox resume a page you've used). */
+async function ready(c: AudioContext): Promise<boolean> {
+  if (isRunning(c)) return true;
+  try {
+    await Promise.race([c.resume(), new Promise((r) => window.setTimeout(r, 400))]);
+  } catch { /* still not running */ }
+  return isRunning(c);
 }
 
-function pump(): void {
-  if (playing) return;
-  const next = queue.shift();
-  if (!next) return;
-  own ??= new Audio();
-  const a = own;
-  playing = true;
-  let timer = 0;
-  let over = false;
-  const done = (): void => {
-    if (over) return;
-    over = true;
-    window.clearTimeout(timer);
-    a.removeEventListener("ended", done);
-    a.removeEventListener("error", done);
-    if (next.revoke) URL.revokeObjectURL(next.url);
-    playing = false;
-    pump();
+let fallback: ((blob: Blob) => Promise<void>) | null = null;
+let busy: () => boolean = () => false;
+let note: (msg: string) => void = () => {};
+
+/** A session page: where the chime and the name go if Web Audio won't run
+ * (its voice player's element, the one Safari lets it play), whether its
+ * voice is speaking (a chime then would talk over it), and where to report
+ * which way it played (the server log, for a device we can't see). */
+export function setChimeFallback(opts: {
+  play: (blob: Blob) => Promise<void>; busy: () => boolean; log: (msg: string) => void;
+}): () => void {
+  fallback = opts.play;
+  busy = opts.busy;
+  note = opts.log;
+  return () => {
+    if (fallback !== opts.play) return;
+    fallback = null;
+    busy = () => false;
+    note = () => {};
   };
-  // Never stuck behind one that stalls.
-  timer = window.setTimeout(done, 15_000);
-  a.addEventListener("ended", done);
-  a.addEventListener("error", done);
-  a.src = next.url;
-  a.play().catch(done);       // not unlocked yet: nothing plays
+}
+
+// One after another: the chime, then the name. `chain` keeps them in the
+// order asked; `endsAt` is when the last one scheduled finishes.
+let chain: Promise<void> = Promise.resolve();
+let endsAt = 0;
+
+function play(what: string, make: (c: AudioContext) => Promise<AudioBuffer> | AudioBuffer,
+              blob: () => Blob): void {
+  chain = chain.then(async () => {
+    const c = context();
+    if (c && await ready(c)) {
+      try {
+        const buf = await make(c);
+        const src = c.createBufferSource();
+        src.buffer = buf;
+        src.connect(c.destination);
+        const at = Math.max(c.currentTime + 0.02, endsAt);
+        src.start(at);
+        endsAt = at + buf.duration + 0.12;
+        return;
+      } catch (e) {
+        note(`${what}: web audio failed (${(e as Error)?.name ?? e})`);
+      }
+    }
+    if (fallback) {
+      note(`${what}: voice player (audio context ${c ? c.state : "missing"})`);
+      // It settles as it starts: the next one waits for it to finish
+      // (busy while the voice player plays), or it would cut it off.
+      await fallback(blob());
+      for (let w = 0; busy() && w < 15_000; w += 150) {
+        await new Promise((r) => window.setTimeout(r, 150));
+      }
+    }
+  }).catch(() => {});
 }
 
 export function chime(level: Level): void {
-  const blob = chimeBlob(level);
-  if (sink) { sink(blob); return; }
-  let url = urls.get(level);
-  if (!url) { url = URL.createObjectURL(blob); urls.set(level, url); }
-  playOwn(url, false);
+  if (busy()) return;
+  play(`chime ${level}`, (c) => {
+    const pcm = chimePcm(level, c.sampleRate);
+    const buf = c.createBuffer(1, pcm.length, c.sampleRate);
+    buf.copyToChannel(pcm, 0);
+    return buf;
+  }, () => chimeBlob(level));
 }
 
-/** On the session list, after the chime: which session it is ("infra has a
- * question"), in ccpipe's voice. The words are the server's, and a device
- * hears each item once, whichever page asks first (204 when it won't, or
- * the voice is set to read nothing). A session page asks over its socket
- * instead (main.ts). */
-export async function sayOnList(item: AttentionItem): Promise<void> {
-  if (sink) return;
-  let blob: Blob;
+/** After the chime: which session it is ("infra has a question"). The
+ * words are the server's, and a device hears each item once, whichever
+ * page asks first (204 when it won't, or the voice is set to read
+ * nothing). On a session page, after its voice has finished speaking. */
+export async function sayName(item: AttentionItem): Promise<void> {
+  let bytes: ArrayBuffer;
   try {
     const res = await fetch("/api/attention/say", {
       method: "POST",
@@ -297,17 +342,23 @@ export async function sayOnList(item: AttentionItem): Promise<void> {
       body: JSON.stringify({ id: item.id, device: deviceId() }),
     });
     if (res.status !== 200) return;
-    blob = await res.blob();
+    bytes = await res.arrayBuffer();
   } catch {
     return;
   }
-  if (!blob.size || sink) return;
-  playOwn(URL.createObjectURL(blob), true);
+  if (!bytes.byteLength) return;
+  for (let waited = 0; busy() && waited < 30_000; waited += 300) {
+    await new Promise((r) => window.setTimeout(r, 300));
+  }
+  if (busy()) return;
+  // decodeAudioData takes the buffer over: the fallback keeps its own copy.
+  const copy = bytes.slice(0);
+  play("name", (c) => c.decodeAudioData(bytes), () => new Blob([copy], { type: "audio/mpeg" }));
 }
 
 /** For Settings: hear what each sounds like (inside the tap, so it plays). */
 export function previewChime(level: Level): void {
-  unlockOwn();
+  unlockAudio();
   chime(level);
 }
 

@@ -78,6 +78,12 @@ session's name is said in ccpipe's voice: *"weather api has a
 question."* The tab's title counts what's waiting, such as *(2) ccpipe*,
 and so does the app icon's badge where the browser has one.
 
+The chime and the name play over whatever else is on, such as music or
+a podcast. They don't pause it, and they don't take over the lock
+screen's media controls, so pressing play still plays your music. Like
+other sounds from a web page, they follow the iPad's or iPhone's silent
+mode.
+
 The session you're in, and any in tiles beside it, are on screen, so
 they're left out. This session's own question is read out in full, as it
 always was (see [Voice](voice.md#when-claude-asks-you-something)).
