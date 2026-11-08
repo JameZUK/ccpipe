@@ -79,12 +79,15 @@ question."* The tab's title counts what's waiting, such as *(2) ccpipe*,
 and so does the app icon's badge where the browser has one.
 
 The chime and the name don't take over the lock screen's media
-controls, so pressing play there still plays your music. ccpipe's sound
-runs only while they play. Whether they pause music or a podcast in
-another app is up to Safari: usually they play over it, but on an iPad
-they can still pause it. If yours does, turn off **Sound** and **Say it**
-for that device (below). With both off, and Claude's voice muted,
-ccpipe plays no sound at all.
+controls, so pressing play there still plays your music, and ccpipe's
+sound runs only while they play. On an iPad or iPhone with iOS 27,
+though, any sound from a web page pauses music or a podcast in another
+app: Safari routes a page's sound the way it routes a music app's. There,
+turn off **Sound** and **Say it** for that device, and turn on **Also
+while ccpipe is open here** under push notifications (below). The
+notification then brings the sound, played by the system rather than the
+page. With Sound and Say it off, and Claude's voice muted, the page plays
+no sound at all.
 
 The session you're in, and any in tiles beside it, are on screen, so
 they're left out. This session's own question is read out in full, as it
@@ -179,6 +182,10 @@ touches Claude's login or Anthropic.
   Sound on plays the chime.
 - **Push** is this device's subscription. Its choices are kept on the
   server with it.
+- **Also while ccpipe is open here** sends this device its notifications
+  even while ccpipe is on its screen, straight away, so their sound can
+  stand in for the page's (for an iPad, above). It's off by default: the
+  page's banner is enough elsewhere.
 - **While ccpipe is open on another device, wait** applies to every
   device: don't wait, 30 s, 1, 2, 5 or 15 minutes.
 - **Notify from an open tab in the background** is the browser

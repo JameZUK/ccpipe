@@ -9,10 +9,14 @@ subscription, with its own choices:
   done     finished turns (off by default)
   details  the question, or the end of Claude's reply, in the notification
            (on by default); off: only which session, for a lock screen
+  open     also while a ccpipe page is on this device's screen, at once
+           (off by default): for an iPad, where any sound from the page
+           stops the music, the notification's own sound is the chime
 
 Which devices get a new item:
 
-  - not one with a ccpipe page on screen: the page shows it;
+  - not one with a ccpipe page on screen: the page shows it (unless it
+    asked for ``open``: then at once, as it's the one you're using);
   - with no page on screen anywhere, straight away;
   - with a page on screen on another device, after ``notify.push_wait_s``
     (Settings), and only if it still needs you then: you may well answer
@@ -56,7 +60,7 @@ FAILING_DROP_S = 7 * 86400
 # without answering, it's pushed to then.
 RECHECK_S = 5.0
 HOLD_S = 30 * 60.0
-DEFAULT_PREFS = {"ask": True, "done": False, "details": True}
+DEFAULT_PREFS = {"ask": True, "done": False, "details": True, "open": False}
 # The VAPID "sub" (a contact for the push service) when the page's origin
 # isn't https.
 FALLBACK_SUBJECT = "https://github.com/JameZUK/ccpipe"
@@ -325,8 +329,13 @@ def _allowed(sub_id: str, item: attention.Item) -> bool:
 def _targets(item: attention.Item) -> list[dict[str, Any]]:
     with _lock:
         subs = _load()["subs"]
-    return [s for s in subs if _prefs(s.get("prefs")).get(item.level)
-            and not device_visible(s.get("device", ""))]
+    return [s for s in subs if (p := _prefs(s.get("prefs"))).get(item.level)
+            and (p["open"] or not device_visible(s.get("device", "")))]
+
+
+def _open_here(s: dict[str, Any]) -> bool:
+    """On screen on a device that wants it even so."""
+    return _prefs(s.get("prefs"))["open"] and device_visible(s.get("device", ""))
 
 
 def _still(item: attention.Item) -> bool:
@@ -339,24 +348,30 @@ def _wanted(item: attention.Item) -> list[dict[str, Any]]:
     return [s for s in subs if _prefs(s.get("prefs")).get(item.level)]
 
 
+async def _push(item: attention.Item, targets: list[dict[str, Any]], done: set[str]) -> None:
+    done.update(s["id"] for s in targets)
+    targets = [s for s in targets if _allowed(s["id"], item)]
+    if targets:
+        log.info("push: %s %s → %d device(s)", item.session, item.level, len(targets))
+        await asyncio.gather(*(_send(s, item, item.level) for s in targets),
+                             return_exceptions=True)
+
+
 async def _deliver(item: attention.Item) -> None:
     if not _wanted(item):
         return
-    # A device to push to now, while ccpipe is on screen somewhere (so on
-    # another device): give you the chance to answer it there first.
-    wait = app_config.load().notify.push_wait_s
-    if wait and _targets(item) and anyone_visible():
-        await asyncio.sleep(wait)
     done: set[str] = set()
+    # On screen on a device that asked for them there too: it's the one
+    # you're using, so now.
+    await _push(item, [s for s in _targets(item) if _open_here(s)], done)
+    # Another device to push to now, while ccpipe is on screen somewhere
+    # (so on another device): give you the chance to answer it there first.
+    wait = app_config.load().notify.push_wait_s
+    if wait and [s for s in _targets(item) if s["id"] not in done] and anyone_visible():
+        await asyncio.sleep(wait)
     until = time.monotonic() + HOLD_S
     while _still(item):
-        targets = [s for s in _targets(item) if s["id"] not in done]
-        done.update(s["id"] for s in targets)
-        targets = [s for s in targets if _allowed(s["id"], item)]
-        if targets:
-            log.info("push: %s %s → %d device(s)", item.session, item.level, len(targets))
-            await asyncio.gather(*(_send(s, item, item.level) for s in targets),
-                                 return_exceptions=True)
+        await _push(item, [s for s in _targets(item) if s["id"] not in done], done)
         # Devices that had ccpipe on screen: again shortly, in case it's put
         # away with this still waiting.
         if not [s for s in _wanted(item) if s["id"] not in done] or time.monotonic() > until:

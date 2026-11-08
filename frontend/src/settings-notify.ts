@@ -40,10 +40,10 @@ function row(label: string, hint: string, control: HTMLElement): HTMLLabelElemen
 }
 
 function loadWant(): PushPrefs {
-  const d: PushPrefs = { ask: true, done: false, details: true };
+  const d: PushPrefs = { ask: true, done: false, details: true, open: false };
   try {
     const raw = JSON.parse(localStorage.getItem(WANT_KEY) || "{}");
-    for (const k of ["ask", "done", "details"] as const) if (typeof raw[k] === "boolean") d[k] = raw[k];
+    for (const k of ["ask", "done", "details", "open"] as const) if (typeof raw[k] === "boolean") d[k] = raw[k];
   } catch { /* defaults */ }
   return d;
 }
@@ -140,6 +140,13 @@ export function buildNotifySection(): HTMLElement {
   pushHead.append(h("span", "row__label", "Push notifications on this device"), btns);
   const details = checkbox(want.details, "Show the question or reply in the notification");
   const detailsRow = row("Show the question or the reply", "off: only which session, for a lock screen", details);
+  // On an iPad any sound from the page stops the music (iOS 27: Safari gives
+  // a page's audio the music apps' routing), so the notification's sound,
+  // which the system plays, is the chime there.
+  const openHere = checkbox(want.open, "Also while ccpipe is open on this device");
+  const openRow = row("Also while ccpipe is open here",
+    "at once, with the notification's sound · for an iPad, where the page's own sound stops "
+    + "your music (turn off Sound and Say it above)", openHere);
   const wait = h("select", "select");
   for (const [v, label] of WAITS) {
     const o = h("option", undefined, label);
@@ -150,7 +157,7 @@ export function buildNotifySection(): HTMLElement {
     "in case you answer it there · for every device", wait);
   const devices = h("div", "notify-devices");
   const status = h("span", "modal__status");
-  pushSec.append(pushHead, pushState_, detailsRow, waitRow, devices, status);
+  pushSec.append(pushHead, pushState_, detailsRow, openRow, waitRow, devices, status);
   sec.append(pushSec);
 
   const setStatus = (msg: string, error = false): void => {
@@ -204,6 +211,7 @@ export function buildNotifySection(): HTMLElement {
     offBtn.hidden = !on;
     for (const b of Object.values(pushBoxes)) b.disabled = !support.ok;
     details.disabled = !support.ok;
+    openHere.disabled = !support.ok;
   };
 
   const refresh = async (): Promise<void> => {
@@ -226,6 +234,7 @@ export function buildNotifySection(): HTMLElement {
         pushBoxes.ask.checked = me.prefs.ask;
         pushBoxes.done.checked = me.prefs.done;
         details.checked = me.prefs.details;
+        openHere.checked = me.prefs.open;
         saveWant(me.prefs);
       }
       paintDevices(st.devices);
@@ -251,6 +260,12 @@ export function buildNotifySection(): HTMLElement {
     w.details = details.checked;
     saveWant(w);
     void savePushPrefs({ details: details.checked });
+  });
+  openHere.addEventListener("change", () => {
+    const w = loadWant();
+    w.open = openHere.checked;
+    saveWant(w);
+    void savePushPrefs({ open: openHere.checked });
   });
   wait.addEventListener("change", async () => {
     try {

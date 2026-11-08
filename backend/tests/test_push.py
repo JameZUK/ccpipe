@@ -161,12 +161,13 @@ def _subscribe(dev: Device, device="phone", **prefs):
 def test_subscriptions_are_kept_private_and_renewed(store):
     import os
     a = _subscribe(Device())
-    assert a["prefs"] == {"ask": True, "done": False, "details": True}
+    assert a["prefs"] == {"ask": True, "done": False, "details": True, "open": False}
     assert a["host"] == "updates.push.services.mozilla.com" and "endpoint" not in a
     # The same device with a new endpoint replaces its old one, keeping its id.
     b = _subscribe(Device(MOZ + "new"), done=True)
     assert b["id"] == a["id"] and len(notify.subscriptions()) == 1
-    assert notify.set_prefs(MOZ + "new", {"ask": False})["prefs"] == {"ask": False, "done": True, "details": True}
+    assert notify.set_prefs(MOZ + "new", {"ask": False})["prefs"] == {"ask": False, "done": True, "details": True,
+                                                                       "open": False}
     assert os.stat(store / "push.json").st_mode & 0o777 == 0o600
     # The browser renewed it (the service worker knows only the old endpoint).
     c = notify.subscribe(MOZ + "renewed", b64u(webpush._public_bytes(ec.generate_private_key(
@@ -287,6 +288,30 @@ async def test_waits_while_a_page_is_on_screen_elsewhere(store, sent, monkeypatc
     assert [d for d, _ in sent] == ["phone"]
 
 
+async def test_a_device_that_wants_them_while_open_gets_them_at_once(store, sent, monkeypatch):
+    # The iPad: any sound from the page stops its music (iOS 27), so with
+    # ccpipe on its screen the notification's own sound is the chime.
+    from ccpipe import config
+    cfg = config.load_for_edit()
+    cfg.notify.push_wait_s = 30
+    config.save(cfg)
+    sleeps: list[float] = []
+
+    async def fast_sleep(s):
+        sleeps.append(s)
+    monkeypatch.setattr(notify.asyncio, "sleep", fast_sleep)
+    ipad = _subscribe(Device(), device="ipad", open=True)
+    _subscribe(Device(MOZ + "2"), device="phone")
+    assert ipad["prefs"]["open"] is True
+    ws._draft_peers["work"] = {_Page("ipad")}
+    try:
+        await notify._deliver(_item())
+    finally:
+        ws._draft_peers.clear()
+    # The iPad at once; the phone after the wait, as ccpipe was on screen.
+    assert [d for d, _ in sent] == ["ipad", "phone"] and sleeps == [30]
+
+
 async def test_a_long_question_still_fits(store, sent):
     _subscribe(Device(), device="phone")
     item = _item()
@@ -400,8 +425,8 @@ def test_routes(client, monkeypatch):
     assert client.post("/api/push/subscribe", headers=H,
                        json={**body, "endpoint": "https://127.0.0.1/"}).status_code == 400
     assert client.post("/api/push/prefs", headers=H,
-                       json={"endpoint": dev.endpoint, "prefs": {"details": False}}).json()["prefs"] == {
-        "ask": True, "done": True, "details": False}
+                       json={"endpoint": dev.endpoint, "prefs": {"details": False, "open": True}}).json()["prefs"] == {
+        "ask": True, "done": True, "details": False, "open": True}
     assert client.post("/api/push/config", headers=H, json={"push_wait_s": 120}).json() == {"push_wait_s": 120}
     assert client.post("/api/push/config", headers=H, json={"push_wait_s": 5000}).status_code == 422
     sends = []

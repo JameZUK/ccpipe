@@ -105,6 +105,7 @@ class Prefs(BaseModel):
     ask: bool | None = None
     done: bool | None = None
     details: bool | None = None
+    open: bool | None = None
 
 
 class SubscribeBody(BaseModel):

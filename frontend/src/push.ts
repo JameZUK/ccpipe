@@ -12,7 +12,9 @@
 import { apiJson } from "./api";
 import { deviceId, type Level } from "./attention";
 
-export type PushPrefs = { ask: boolean; done: boolean; details: boolean };
+/** `open`: also while ccpipe is on this device's screen, at once (an iPad:
+ * the notification's sound, as the page's own stops the music there). */
+export type PushPrefs = { ask: boolean; done: boolean; details: boolean; open: boolean };
 export type PushDevice = {
   id: string; label: string; device: string; host: string;
   created: number; ok_at: number; prefs: PushPrefs;
