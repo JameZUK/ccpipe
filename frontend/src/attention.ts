@@ -13,6 +13,7 @@
 import { h } from "./dom";
 import { dropdown } from "./dropdown";
 import { ICON_BELL, ICON_X, iconNode } from "./icons";
+import { alertAudio, audioSessionType } from "./audio-session";
 
 export type Level = "ask" | "done";
 
@@ -234,6 +235,9 @@ const isRunning = (c: AudioContext): boolean => (c.state as string) === "running
 function unlockAudio(): void {
   const c = context();
   if (!c || isRunning(c)) return;
+  // Starting it starts the page's audio: as "ambient", or Safari stops the
+  // music (audio-session.ts). Not while the voice or the mic is going.
+  if (!busy()) alertAudio();
   c.resume().catch(() => {});
   try {
     const src = c.createBufferSource();
@@ -292,6 +296,11 @@ function play(what: string, make: (c: AudioContext) => Promise<AudioBuffer> | Au
               blob: () => Blob): void {
   chain = chain.then(async () => {
     const c = context();
+    // Mix with whatever else is playing (audio-session.ts), unless the voice
+    // or the mic is going (then this waited, or it doesn't play).
+    if (busy()) return;
+    alertAudio();
+    const was = c?.state ?? "missing";
     if (c && await ready(c)) {
       try {
         const buf = await make(c);
@@ -301,6 +310,7 @@ function play(what: string, make: (c: AudioContext) => Promise<AudioBuffer> | Au
         const at = Math.max(c.currentTime + 0.02, endsAt);
         src.start(at);
         endsAt = at + buf.duration + 0.12;
+        note(`${what}: web audio (session ${audioSessionType()}, context ${was})`);
         return;
       } catch (e) {
         note(`${what}: web audio failed (${(e as Error)?.name ?? e})`);

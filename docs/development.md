@@ -167,6 +167,9 @@ frontend/
                        Notifications / Voice / Account / Debug)
     settings-passkeys.ts  Account → passkeys and ways to sign in
     settings-notify.ts Notifications → chime, spoken name, push per device
+    audio-session.ts   Safari's audio session: "ambient" (mixes with other
+                       apps' audio) at rest and for chimes, "auto" for
+                       Claude's voice and the microphone
     attention.ts       What needs you on the page: the top bar's bell and
                        its drop-down, banners, the chime (made in code)
                        and the spoken name (Web Audio, which stays off
