@@ -13,7 +13,8 @@ is, and, for claude.ai subscribers, ``rate_limits`` (how much of the plan's
    ``statusLine`` in the project's ``.claude/settings.local.json``, its
    ``.claude/settings.json``, then ``~/.claude/settings.json``, the order
    Claude reads them in), with the same input, and passes its output
-   through. What Claude shows doesn't change; with no command of your own
+   through. The project's files only count once you have accepted Claude's
+   trust prompt for that folder (``trusted``). What Claude shows doesn't change; with no command of your own
    it prints nothing, and Claude draws no status row.
 
 Run as ``python -I statusline_record.py <dir>``: standard library only, no
@@ -63,12 +64,47 @@ def save(out_dir: str, name: str, data: bytes) -> None:
         pass
 
 
+def trusted(project: str, env: dict[str, str]) -> bool:
+    """Whether you accepted Claude's "do you trust this folder?" prompt for
+    *project* (or a folder above it), from Claude's own record of it.
+
+    This recorder is handed to Claude with ``--settings``, so Claude runs it
+    whatever the folder is. Without this check it would in turn run a
+    status-line command taken from the folder's own ``.claude/settings.json``
+    — a cloned repository's — before you had said you trust that folder.
+    Unknown or unreadable counts as not trusted."""
+    home = os.path.expanduser("~")
+    candidates = [os.path.join(home, ".claude.json")]
+    if env.get("CLAUDE_CONFIG_DIR"):
+        candidates.insert(0, os.path.join(env["CLAUDE_CONFIG_DIR"], ".claude.json"))
+    projects = None
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                projects = json.load(f).get("projects")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(projects, dict):
+            break
+    if not isinstance(projects, dict):
+        return False
+    folder = os.path.abspath(project)
+    while True:
+        entry = projects.get(folder)
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+            return True
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            return False
+        folder = parent
+
+
 def _settings_files(info: dict, env: dict[str, str]) -> list[str]:
     ws = info.get("workspace") if isinstance(info.get("workspace"), dict) else {}
     project = ws.get("project_dir") or ws.get("current_dir") or info.get("cwd")
     conf = env.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
     files = []
-    if isinstance(project, str) and project:
+    if isinstance(project, str) and project and trusted(project, env):
         files += [os.path.join(project, ".claude", "settings.local.json"),
                   os.path.join(project, ".claude", "settings.json")]
     files.append(os.path.join(conf, "settings.json"))

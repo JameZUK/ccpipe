@@ -19,6 +19,7 @@ import errno
 import logging
 import os
 import stat as stat_mod
+import struct
 import time
 import zipfile
 from collections.abc import Callable, Iterator
@@ -122,8 +123,22 @@ class _Sink:
 
 
 def _date_time(mtime: float) -> tuple[int, int, int, int, int, int]:
-    t = time.localtime(max(mtime, 315532800))       # zip can't go before 1980
-    return (max(t.tm_year, 1980), t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec)
+    # A zip's dates run from 1980 to 2107; a file dated outside that (a
+    # tarball can carry any date) gets the nearest end.
+    try:
+        t = time.localtime(min(max(mtime, 315532800), 4354732800))
+    except (OverflowError, OSError, ValueError):
+        t = time.localtime(315532800)
+    return (min(max(t.tm_year, 1980), 2107), t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec)
+
+
+def _zippable(name: str) -> bool:
+    """False for a name that isn't valid UTF-8 on disk: a zip can't hold it."""
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def stream_zip(top_fd: int, top: Path, root_name: str, include_hidden: bool,
@@ -136,9 +151,14 @@ def stream_zip(top_fd: int, top: Path, root_name: str, include_hidden: bool,
                              compresslevel=6, allowZip64=True) as zf:
             for rel, dirs, files, dfd, _hidden in _walk(top_fd, top, include_hidden, is_denied):
                 base = f"{root_name}/{rel}/" if rel else f"{root_name}/"
+                if not _zippable(base):
+                    continue
                 if not dirs and not files:
                     zf.writestr(zipfile.ZipInfo(base), b"")   # keep empty dirs
                 for name, st in files:
+                    if not _zippable(name):
+                        log.info("zip: skipping a file in %s whose name isn't valid UTF-8", rel)
+                        continue
                     try:
                         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
                                      | os.O_CLOEXEC, dir_fd=dfd)
@@ -162,7 +182,7 @@ def stream_zip(top_fd: int, top: Path, root_name: str, include_hidden: bool,
                                     dest.write(chunk)
                                     if sink.parts:
                                         yield sink.take()
-                        except (OSError, RuntimeError) as exc:
+                        except (OSError, RuntimeError, ValueError, struct.error) as exc:
                             # Unreadable mid-way, or grew past what the entry
                             # header allowed. The archive is already
                             # partially written, so stop cleanly here.

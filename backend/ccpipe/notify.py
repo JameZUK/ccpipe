@@ -37,7 +37,7 @@ import threading
 import time
 from typing import Any
 
-from . import attention, webpush
+from . import attention, statefile, webpush
 from . import config as app_config
 from .auth import state_file, write_state_file
 
@@ -73,10 +73,10 @@ def _path():
 
 
 def _load() -> dict[str, Any]:
-    try:
-        data = json.loads(_path().read_text())
-    except (OSError, ValueError):
-        data = {}
+    # A read that fails blocks _save (statefile.py): the key and every
+    # device's subscription are in here, and mustn't be replaced by an
+    # empty file because of one bad read.
+    data = statefile.read_json(_path())
     if not isinstance(data, dict):
         data = {}
     subs = data.get("subs")
@@ -101,9 +101,12 @@ def vapid() -> webpush.Vapid:
         try:
             _vapid = webpush.Vapid.from_pem(data["vapid"])
         except (KeyError, TypeError, ValueError):
-            _vapid = webpush.Vapid.generate()
-            data["vapid"] = _vapid.pem()
+            # Saved before it's used: a key that isn't on disk would be
+            # replaced at the next restart, and every device with it.
+            made = webpush.Vapid.generate()
+            data["vapid"] = made.pem()
             _save(data)
+            _vapid = made
             log.info("push: made a new VAPID key")
     return _vapid
 
@@ -179,6 +182,18 @@ def set_prefs(endpoint: str, prefs: Any) -> dict[str, Any] | None:
         sub["prefs"] = _prefs(prefs, sub.get("prefs"))
         _save(data)
         return _public(sub)
+
+
+def unsubscribe_all() -> int:
+    """Forget every device ("sign out everywhere": a lost device mustn't
+    go on receiving Claude's questions). Returns how many there were."""
+    with _lock:
+        data = _load()
+        n = len(data["subs"])
+        if n:
+            data["subs"] = []
+            _save(data)
+        return n
 
 
 def unsubscribe(endpoint: str | None = None, sub_id: str | None = None) -> bool:
@@ -382,6 +397,13 @@ async def _deliver(item: attention.Item) -> None:
 _pending: dict[int, asyncio.Task[None]] = {}
 
 
+def _delivered(task: asyncio.Task[None], item_id: int) -> None:
+    _pending.pop(item_id, None)
+    if not task.cancelled() and task.exception() is not None:
+        # Otherwise pushes stop without a word (a damaged push.json, say).
+        log.error("push: delivery failed", exc_info=task.exception())
+
+
 def _on_attention(event: str, item: attention.Item) -> None:
     if event == "new":
         try:
@@ -389,7 +411,7 @@ def _on_attention(event: str, item: attention.Item) -> None:
         except RuntimeError:
             return      # no loop: nothing to send with
         _pending[item.id] = task
-        task.add_done_callback(lambda _t, i=item.id: _pending.pop(i, None))
+        task.add_done_callback(lambda t, i=item.id: _delivered(t, i))
     elif event == "end":
         task = _pending.pop(item.id, None)
         if task is not None:

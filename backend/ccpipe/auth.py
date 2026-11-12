@@ -39,6 +39,7 @@ import contextlib
 import functools
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -59,6 +60,7 @@ from pydantic import BaseModel
 from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocket
 
+from . import statefile
 from .paths import state_dir
 
 log = logging.getLogger(__name__)
@@ -930,20 +932,10 @@ def state_file(name: str) -> Path:
 
 
 def write_state_file(path: Path, data: bytes) -> None:
-    """Atomically replace *path* with *data*, 0600, in a 0700 dir."""
-    _ensure_state_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    """Atomically replace *path* with *data*, 0600, in a 0700 dir, flushed
+    to disk. Refused (OSError) when the file's last read failed: see
+    statefile.py."""
+    statefile.write(path, data)
 
 
 def _revoked_path() -> Path:
@@ -1114,6 +1106,24 @@ def session_username(session: dict) -> str | None:
     return v if isinstance(v, str) else None
 
 
+def client_bucket(conn: HTTPConnection) -> str:
+    """Who a request counts as for the pre-auth limits (login attempts,
+    passkey challenges). An IPv4 address is itself; an IPv6 address is
+    its /64, because one customer is handed at least that many addresses:
+    counted singly, anyone with an ordinary connection or a rented server
+    has 2^64 fresh budgets."""
+    host = (conn.client.host if conn.client else "") or "unknown"
+    try:
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return host
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network((int(ip) >> 64 << 64, 64)))
+    return str(ip)
+
+
 def require_auth(request: Request) -> None:
     """FastAPI dependency for HTTP routes."""
     if not is_session_authed(request.session):
@@ -1144,17 +1154,37 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
     return True
 
 
+# Refused upgrades are logged, but anyone can send them: at most a few
+# lines a minute, so a flood can't fill the journal.
+_REJECT_LOG_MAX = 5
+_REJECT_LOG_WINDOW_S = 60.0
+_reject_log: list[float] = [0.0, 0.0, 0.0]   # window start, lines logged, lines dropped
+
+
+def _log_ws_rejected(msg: str, *args: Any) -> None:
+    now = time.monotonic()
+    if now - _reject_log[0] >= _REJECT_LOG_WINDOW_S:
+        if _reject_log[2]:
+            log.warning("ws rejected: %d more refused upgrade(s) not logged", int(_reject_log[2]))
+        _reject_log[:] = [now, 0.0, 0.0]
+    if _reject_log[1] >= _REJECT_LOG_MAX:
+        _reject_log[2] += 1
+        return
+    _reject_log[1] += 1
+    log.warning(msg, *args)
+
+
 def _origin_allowed(websocket: WebSocket) -> bool:
     origin = websocket.headers.get("origin")
     # No Origin header: browsers always set it for cross-origin upgrades;
     # most non-browser clients omit it. Reject to be safe.
     if not origin:
-        log.warning("ws rejected: missing Origin header")
+        _log_ws_rejected("ws rejected: missing Origin header")
         return False
     allowed = _allowed_origins(websocket)
     if origin in allowed:
         return True
-    log.warning("ws rejected: origin %r not in allowed list %r", origin, allowed)
+    _log_ws_rejected("ws rejected: origin %r not in allowed list %r", origin[:200], allowed)
     return False
 
 
@@ -1198,7 +1228,7 @@ def _allowed_origins(websocket: HTTPConnection) -> set[str]:
     # to define its own gate. Fail closed instead — startup already
     # warns loudly when the env is missing under TLS.
     if behind_tls():
-        log.warning("ws origin allowlist empty under TLS — refusing upgrade")
+        _log_ws_rejected("ws origin allowlist empty under TLS — refusing upgrade")
         return set()
     # Plain HTTP zero-config LAN deployment: derive from Host so the
     # default deployment keeps working. SameSite=Lax keeps the auth

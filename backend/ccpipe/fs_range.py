@@ -25,7 +25,7 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
 _CHUNK = 64 * 1024
-_RANGE_RE = re.compile(r"^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$", re.IGNORECASE)
+_RANGE_RE = re.compile(r"^\s*bytes\s*=\s*(\d{0,19})\s*-\s*(\d{0,19})\s*$", re.IGNORECASE)
 
 
 class _FdBody:
@@ -105,8 +105,13 @@ def ranged_response(request: Request, fd: int, st: os.stat_result,
     if there is no body."""
     size = st.st_size
     tag = etag(st)
-    last_modified = formatdate(st.st_mtime, usegmt=True)
-    base = {**headers, "Accept-Ranges": "bytes", "ETag": tag, "Last-Modified": last_modified}
+    try:
+        last_modified = formatdate(st.st_mtime, usegmt=True)
+    except (ValueError, OverflowError, OSError):
+        last_modified = ""          # a date no HTTP header can carry (year > 9999)
+    base = {**headers, "Accept-Ranges": "bytes", "ETag": tag}
+    if last_modified:
+        base["Last-Modified"] = last_modified
 
     want = parse_range(request.headers.get("range"), size)
     if want is not None and not _if_range_ok(request, st, tag, last_modified):

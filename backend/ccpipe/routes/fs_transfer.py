@@ -54,7 +54,8 @@ from .. import config as app_config
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..fs_range import ranged_response
 from ..paths import state_dir
-from ..safe_write import NEW_FILE_MODE, atomic_write_text, existing_mode, open_temp, temp_name
+from ..safe_write import (NEW_FILE_MODE, TEMP_NAME_RE, atomic_write_text, existing_mode,
+                          forget_temp, leftover_temps, open_temp, temp_name, write_all)
 from .fs import _resolve_fs_path, _resolve_write_target, _walk_parent_nofollow
 
 log = logging.getLogger(__name__)
@@ -119,7 +120,8 @@ def fs_inline(request: Request, path: str) -> Response:
     fd, st = open_readonly(resolved)
     pdf = ctype == "application/pdf"
     headers = {
-        "Content-Disposition": f"inline; filename*=UTF-8''{quote(resolved.name, safe='')}",
+        "Content-Disposition": "inline; filename*=UTF-8''"
+                               + quote(resolved.name, safe="", errors="surrogateescape"),
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": _PDF_CSP if pdf else _SANDBOX_CSP,
         "X-Frame-Options": "SAMEORIGIN" if pdf else "DENY",
@@ -164,6 +166,8 @@ class _Upload:
 
 
 _uploads: dict[str, _Upload] = {}
+# Upload id → pieces being written right now.
+_writing: dict[str, int] = {}
 _loaded = False
 
 
@@ -191,7 +195,29 @@ def _load() -> None:
         pass
     except (OSError, ValueError, TypeError) as exc:
         log.warning("uploads registry unreadable, ignored: %s", exc)
+    _remove_leftover_temps()
     _sweep()
+
+
+def _remove_leftover_temps() -> None:
+    """Temp files of saves and one-shot uploads that a crash or kill left
+    behind (safe_write.note_temp). Runs once, at startup, before anything
+    can be saving."""
+    for path in leftover_temps():
+        name = os.path.basename(path)
+        try:
+            if TEMP_NAME_RE.fullmatch(name):
+                parent_fd, leaf = _walk_parent_nofollow(path)
+                try:
+                    os.unlink(leaf, dir_fd=parent_fd)
+                    log.info("removed a temp file left by an interrupted save: %s", path)
+                finally:
+                    os.close(parent_fd)
+        except FileNotFoundError:
+            pass
+        except (OSError, HTTPException) as exc:
+            log.warning("could not remove leftover temp file %s: %s", path, exc)
+        forget_temp(path)
 
 
 def _part_open(u: _Upload, flags: int) -> tuple[int, int]:
@@ -208,17 +234,31 @@ def _part_open(u: _Upload, flags: int) -> tuple[int, int]:
     return fd, parent_fd
 
 
+_FORGET_AFTER_S = 7 * 24 * 3600
+
+
 def _discard(u: _Upload) -> None:
-    _uploads.pop(u.id, None)
+    removed = False
     try:
         parent_fd, _ = _walk_parent_nofollow(u.final)
         try:
             os.unlink(u.tmp, dir_fd=parent_fd)
+            removed = True
+        except FileNotFoundError:
+            removed = True
         finally:
             os.close(parent_fd)
-    except (OSError, HTTPException):
-        pass
-    _save()
+    except (OSError, HTTPException) as exc:
+        # Its directory can't be reached right now (renamed, unmounted).
+        # Keep the record so the part-file is removed once it can be,
+        # but not for ever.
+        if time.time() - u.created > _FORGET_AFTER_S:
+            log.warning("upload %s: part-file %s in %s could not be removed (%s); forgetting it",
+                        u.id, u.tmp, os.path.dirname(u.final), exc)
+            removed = True
+    if removed:
+        _uploads.pop(u.id, None)
+        _save()
 
 
 def _sweep() -> None:
@@ -315,6 +355,7 @@ async def upload_status(upload_id: str) -> dict[str, Any]:
 async def upload_chunk(request: Request, upload_id: str, offset: int) -> Response:
     u = _get(upload_id)
     fd, parent_fd = _part_open(u, os.O_WRONLY)
+    _writing[u.id] = _writing.get(u.id, 0) + 1
     try:
         received = os.fstat(fd).st_size
         if offset < 0 or offset > received:
@@ -328,7 +369,7 @@ async def upload_chunk(request: Request, upload_id: str, offset: int) -> Respons
             if buf:
                 data = bytes(buf)
                 buf.clear()
-                await asyncio.to_thread(os.pwrite, fd, data, pos)
+                await asyncio.to_thread(write_all, fd, data, pos)
                 pos += len(data)
 
         try:
@@ -347,6 +388,11 @@ async def upload_chunk(request: Request, upload_id: str, offset: int) -> Respons
             await flush()
         received = os.fstat(fd).st_size
     finally:
+        left = _writing.get(u.id, 1) - 1
+        if left > 0:
+            _writing[u.id] = left
+        else:
+            _writing.pop(u.id, None)
         os.close(fd)
         os.close(parent_fd)
     return JSONResponse({"id": u.id, "received": received, "size": u.size})
@@ -355,6 +401,11 @@ async def upload_chunk(request: Request, upload_id: str, offset: int) -> Respons
 @router.post("/api/fs/uploads/{upload_id}/finish", dependencies=[AuthDep, CsrfDep])
 async def upload_finish(upload_id: str) -> dict[str, Any]:
     u = _get(upload_id)
+    if _writing.get(u.id):
+        # A piece is still being written (a retry racing the finish): the
+        # file mustn't be put in place while something is writing to it.
+        return JSONResponse(status_code=409, content={
+            "detail": "a piece is still arriving; try again", "received": _received(u)})
     # The target is validated again: the jail and deny-list hold at the
     # moment the file appears, not only when the upload began.
     final = _resolve_write_target(u.path)

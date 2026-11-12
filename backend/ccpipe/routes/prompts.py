@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from .. import statefile
 from ..auth import AuthDep, CsrfDep, SameOriginDep, state_file, write_state_file
 from ..drafts import MAX_DRAFT_BYTES
 
@@ -45,10 +46,7 @@ def _path():
 
 
 def _load() -> dict[str, dict[str, Any]]:
-    try:
-        data = json.loads(_path().read_text())
-    except (OSError, ValueError):
-        return {}
+    data = statefile.read_json(_path())
     if not isinstance(data, dict):
         return {}
     return {k: v for k, v in data.items()

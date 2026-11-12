@@ -942,8 +942,13 @@ export function createTerminal(container: HTMLElement, socket: TerminalSocket,
     let i = 0;
     const next = () => {
       if (i >= data.length) return;
-      const slice = data.slice(i, i + INPUT_CHUNK);
-      i += INPUT_CHUNK;
+      // Never cut between the two halves of an emoji (a surrogate pair):
+      // each half alone isn't text, and the server can't encode it.
+      let end = Math.min(data.length, i + INPUT_CHUNK);
+      const last = data.charCodeAt(end - 1);
+      if (end < data.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+      const slice = data.slice(i, end);
+      i = end;
       socket.send({ type: "input", data: slice });
       // setTimeout(0) yields to the event loop so the WS send actually
       // flushes (and the server gets to process each chunk) instead of

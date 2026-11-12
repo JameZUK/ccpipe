@@ -55,7 +55,12 @@ def _load() -> dict[str, dict[str, Any]]:
 
 def cap(text: str) -> str:
     """Truncate *text* to MAX_DRAFT_BYTES of UTF-8 (never mid-codepoint)."""
-    b = text.encode("utf-8")
+    try:
+        b = text.encode("utf-8")
+    except UnicodeEncodeError:
+        # Half a surrogate pair: not text, and it can't be sent on.
+        b = text.encode("utf-8", "replace")
+        text = b.decode("utf-8")
     return text if len(b) <= MAX_DRAFT_BYTES else b[:MAX_DRAFT_BYTES].decode("utf-8", "ignore")
 
 

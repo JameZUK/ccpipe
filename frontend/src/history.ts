@@ -96,8 +96,10 @@ function fragmentFor(blocks: Block[]): DocumentFragment {
   return frag;
 }
 
-const blockEls = () => doc.querySelectorAll<HTMLElement>(".hist-block");
-function firstI(): number { const e = doc.querySelector<HTMLElement>(".hist-block"); return e ? Number(e.dataset.i) : 0; }
+// Direct children only: a block's own text can carry class="hist-block"
+// (markdown keeps classes), and mustn't be counted as a block.
+const blockEls = () => doc.querySelectorAll<HTMLElement>(":scope > .hist-block");
+function firstI(): number { const e = doc.querySelector<HTMLElement>(":scope > .hist-block"); return e ? Number(e.dataset.i) : 0; }
 function lastI(): number { const els = blockEls(); const e = els[els.length - 1]; return e ? Number(e.dataset.i) : -1; }
 function atBottom(): boolean { return doc.scrollTop + doc.clientHeight >= doc.scrollHeight - 40; }
 
@@ -184,7 +186,7 @@ async function loadOlder(): Promise<void> {
     if (g !== gen) { note.remove(); return; }
     note.remove();
     // M2: pin to a stable node, not total height (immune to any concurrent change).
-    const anchor = doc.querySelector<HTMLElement>(".hist-block");
+    const anchor = doc.querySelector<HTMLElement>(":scope > .hist-block");
     const beforeTop = anchor ? anchor.getBoundingClientRect().top : 0;
     doc.insertBefore(fragmentFor(page.blocks), doc.firstChild);
     oldestCursor = firstI(); hasOlder = page.hasOlder;
@@ -211,7 +213,7 @@ async function poll(): Promise<void> {
     // Only render onto the live tail when the reader is there; otherwise just
     // count (avoids yanking them and bounds work while scrolled up).
     if (page.blocks.length && atBottom()) {
-      doc.querySelector(".hist-status")?.remove();   // HR3: clear empty-state on first content
+      doc.querySelector(":scope > .hist-status")?.remove();   // HR3: clear empty-state on first content
       await appendChunked(page.blocks);
       newestCursor = lastI();
       enforceCapTop();

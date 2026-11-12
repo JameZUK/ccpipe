@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import statefile
 from .paths import state_dir
 
 log = logging.getLogger(__name__)
@@ -83,14 +84,9 @@ def _clean(info: Any) -> dict[str, Any]:
 
 
 def load() -> Meta:
-    p = path()
-    try:
-        data = json.loads(p.read_text())
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as exc:
-        log.warning("ignoring malformed session meta at %s: %s", p, exc)
-        return {}
+    # A failed read blocks _save until one works (statefile.py), so a
+    # passing error can't replace every remembered session with one entry.
+    data = statefile.read_json(path())
     if not isinstance(data, dict):
         return {}
     out: Meta = {}
@@ -102,15 +98,7 @@ def load() -> Meta:
 
 
 def _save(data: Meta) -> None:
-    p = path()
-    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, json.dumps(data, indent=2, sort_keys=True).encode() + b"\n")
-    finally:
-        os.close(fd)
-    os.replace(tmp, p)
+    statefile.write(path(), json.dumps(data, indent=2, sort_keys=True).encode() + b"\n")
 
 
 def _try_save(data: Meta) -> None:

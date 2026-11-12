@@ -34,7 +34,11 @@ from pydantic import BaseModel
 from .. import config as app_config
 from .. import fs_zip
 from ..fs_range import ranged_response
-from ..safe_write import existing_mode, open_temp, temp_name
+import sys
+import time
+
+from ..paths import state_dir
+from ..safe_write import existing_mode, forget_temp, note_temp, open_temp, temp_name, write_all
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 
 log = logging.getLogger(__name__)
@@ -95,8 +99,21 @@ def content_disposition_attachment(name: str) -> str:
         c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_"
         for c in name
     ) or "download"
+    # errors=: a name that isn't valid UTF-8 on disk (it reaches Python as
+    # lone surrogates) is sent as the bytes it really is.
     return (f'attachment; filename="{safe_ascii}"; '
-            f"filename*=UTF-8''{quote(name, safe='')}")
+            f"filename*=UTF-8''{quote(name, safe='', errors='surrogateescape')}")
+
+
+def encodable(name: str) -> bool:
+    """False for a file name that isn't valid UTF-8 on disk. It can't be
+    put in JSON (or a zip), so listings leave such files out rather than
+    fail for the whole directory."""
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 # Inline editor cap. Files larger than this won't load into the editor;
@@ -151,6 +168,44 @@ def _fs_root() -> Path:
         return Path("/__ccpipe_invalid_fs_root__")
 
 
+_FOLD_CASE = sys.platform == "darwin"        # a case-insensitive file system
+_deny_cache: tuple[float, tuple[Path, ...], list[tuple[str, ...]]] = (0.0, (), [])
+
+
+def _parts(p: Path) -> tuple[str, ...]:
+    return tuple(s.casefold() for s in p.parts) if _FOLD_CASE else p.parts
+
+
+def _deny_roots() -> list[tuple[str, ...]]:
+    """What the file API never touches, as absolute paths: the entries of
+    _FS_DENY_SUBPATHS under the root, and the same places where they
+    really are (under $HOME and $XDG_STATE_HOME, whatever the root is, and
+    wherever a symlink there leads)."""
+    global _deny_cache
+    now = time.monotonic()
+    root, home = _fs_root(), Path.home()
+    places = [root / d for d in _FS_DENY_SUBPATHS]
+    places += [state_dir(), home / ".config" / "ccpipe", home / ".claude", home / ".claude.json"]
+    # Resolving them costs a few syscalls each, and a directory walk asks
+    # per file: reuse the answer for a few seconds.
+    if now - _deny_cache[0] < 5.0 and _deny_cache[1] == tuple(places):
+        return _deny_cache[2]
+    out: list[tuple[str, ...]] = []
+    for p in places:
+        for q in (p, _resolved_or_none(p)):
+            if q is not None and _parts(q) not in out:
+                out.append(_parts(q))
+    _deny_cache = (now, tuple(places), out)
+    return out
+
+
+def _resolved_or_none(p: Path) -> Path | None:
+    try:
+        return p.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
 def _enforce_fs_jail(resolved: Path) -> None:
     """Raise 403 if *resolved* is outside the root or under a denied
     subpath. Caller must pass an already-resolved Path so symlink
@@ -160,15 +215,22 @@ def _enforce_fs_jail(resolved: Path) -> None:
         rel = resolved.relative_to(root)
     except ValueError:
         raise HTTPException(status_code=403, detail="path outside allowed root")
-    parts = rel.parts
-    if not parts:
+    if not rel.parts:
         return
-    for deny in _FS_DENY_SUBPATHS:
-        deny_parts = tuple(p for p in deny.split("/") if p)
-        if not deny_parts:
-            continue
-        if parts[:len(deny_parts)] == deny_parts:
+    parts = _parts(resolved)
+    for deny in _deny_roots():
+        if parts[:len(deny)] == deny:
             raise HTTPException(status_code=403, detail="path denied")
+
+
+def _enforce_not_above_denied(entry: Path) -> None:
+    """Raise 403 if a denied place lies inside *entry*. Renaming (or
+    removing) ``~/.local`` would otherwise carry ccpipe's credentials to
+    a path the deny-list doesn't know."""
+    parts = _parts(entry)
+    for deny in _deny_roots():
+        if len(deny) > len(parts) and deny[:len(parts)] == parts:
+            raise HTTPException(status_code=403, detail="path denied (it contains protected files)")
 
 
 def _is_denied(resolved: Path) -> bool:
@@ -355,6 +417,8 @@ def _scan_dir_entries(resolved: Path, show_hidden: bool,
                     break
                 if not show_hidden and e.name.startswith("."):
                     continue
+                if not encodable(e.name):
+                    continue
                 # Dir-only mode (the picker): use scandir's d_type via
                 # e.is_dir(follow_symlinks=False) which on ext4/btrfs/
                 # tmpfs is a NO-syscall check — and skip non-dirs
@@ -457,9 +521,10 @@ def fs_markdown_index(root: str) -> dict[str, Any]:
             dirnames[:] = []
         else:
             dirnames[:] = [d for d in dirnames
-                           if not d.startswith(".") and d not in _FS_MD_INDEX_PRUNE]
+                           if not d.startswith(".") and d not in _FS_MD_INDEX_PRUNE
+                           and encodable(d)]
         for fn in filenames:
-            if not fn.lower().endswith(_FS_MD_SUFFIXES):
+            if not fn.lower().endswith(_FS_MD_SUFFIXES) or not encodable(fn):
                 continue
             full = os.path.join(dirpath, fn)
             # Don't surface symlinked "docs": their path is inside the jail
@@ -612,6 +677,8 @@ def fs_write(body: FsWriteBody) -> dict[str, Any]:
     # via *dir_fd*, so the kernel never re-walks the path string
     # again after the canonical walk completed.
     parent_fd, _leaf = _walk_parent_nofollow(str(final))
+    tmp_path = str(final.with_name(tmp_name))
+    note_temp(tmp_path)         # removed at the next start if we die mid-save
     try:
         try:
             # Unique name + O_EXCL|O_NOFOLLOW (safe_write.open_temp): a
@@ -628,7 +695,7 @@ def fs_write(body: FsWriteBody) -> dict[str, Any]:
             raise HTTPException(status_code=500, detail=f"write failed: {exc}")
         try:
             try:
-                os.write(fd, body.content.encode("utf-8"))
+                write_all(fd, body.content.encode("utf-8"))
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -645,11 +712,15 @@ def fs_write(body: FsWriteBody) -> dict[str, Any]:
             raise HTTPException(status_code=500, detail=f"write failed: {exc}")
     finally:
         os.close(parent_fd)
+        forget_temp(tmp_path)
     try:
         st = final.stat()
     except OSError:
         st = None
     return {"path": str(final), "size": st.st_size if st else None}
+
+
+_UPLOAD_BATCH = 1024 * 1024
 
 
 @router.post("/api/fs/upload", dependencies=[AuthDep, CsrfDep])
@@ -669,6 +740,18 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
     # subsequent file ops use the resulting dir_fd, so the kernel
     # never re-walks the path string after we validated it.
     parent_fd, _leaf = _walk_parent_nofollow(str(final))
+    tmp_path = str(final.with_name(tmp_name))
+    note_temp(tmp_path)         # removed at the next start if we die mid-upload
+    # Written in batches on a worker thread: a slow disk mustn't stall the
+    # loop that serves every terminal.
+    buf = bytearray()
+
+    async def flush() -> None:
+        if buf:
+            data = bytes(buf)
+            buf.clear()
+            await asyncio.to_thread(write_all, fd, data)
+
     try:
         try:
             # See fs_write: unique O_EXCL|O_NOFOLLOW temp, original mode kept.
@@ -689,7 +772,10 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
                     raise HTTPException(
                         status_code=413,
                         detail=f"upload exceeds limit ({cap_bytes} bytes)")
-                os.write(fd, chunk)
+                buf += chunk
+                if len(buf) >= _UPLOAD_BATCH:
+                    await flush()
+            await flush()
             # fsync can take a while on a big upload; keep it off the loop
             # that serves every terminal WebSocket.
             await asyncio.to_thread(os.fsync, fd)
@@ -700,6 +786,8 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
             success = True
         except PermissionError:
             raise HTTPException(status_code=403, detail="permission denied")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"upload failed: {exc}")
     finally:
         if fd is not None:
             try: os.close(fd)
@@ -708,6 +796,7 @@ async def fs_upload(request: Request, path: str) -> dict[str, Any]:
             try: os.unlink(tmp_name, dir_fd=parent_fd)
             except OSError: pass
         os.close(parent_fd)
+        forget_temp(tmp_path)
     return {"path": str(final), "size": received}
 
 
@@ -780,80 +869,49 @@ def fs_download_zip(path: str, hidden: int = 0) -> StreamingResponse:
 
 
 @router.get("/api/fs/raw", dependencies=[AuthDep, SameOriginDep])
-def fs_raw(path: str) -> StreamingResponse:
+def fs_raw(request: Request, path: str) -> Response:
     """Serve a file **inline** with its sniffed Content-Type, restricted
     to ``image/*``. This backs relative ``![](./img.png)`` references in
     the Markdown viewer. Capping to images means this can never serve an
     HTML/JS/SVG file inline (an XSS vector that ``download``'s
     ``attachment`` disposition otherwise neutralises); anything else gets
-    415. Path safety mirrors ``/api/fs/download`` exactly."""
+    415. Path safety mirrors ``/api/fs/download`` exactly, and it is sent
+    the same way (fs_range): the size comes from the open file, and the
+    descriptor is closed even when the response is never read."""
+    from .fs_transfer import open_readonly
     resolved = _resolve_fs_path(path)
-    try:
-        st = resolved.stat()
-    except OSError:
-        raise HTTPException(status_code=404, detail="path not found")
-    if not stat_mod.S_ISREG(st.st_mode):
-        raise HTTPException(status_code=400, detail="not a regular file")
-    if st.st_size > _FS_RAW_MAX_BYTES:
-        raise HTTPException(status_code=413,
-                            detail=f"image too large for inline render "
-                                   f"({st.st_size} > {_FS_RAW_MAX_BYTES})")
     # SVG is an image MIME but can carry inline script, so exclude it —
     # raster images only. The viewer's CSP forbids script execution
     # anyway, but defence in depth is cheap here.
     ctype, _enc = mimetypes.guess_type(resolved.name)
     if not ctype or not ctype.startswith("image/") or ctype == "image/svg+xml":
         raise HTTPException(status_code=415, detail="not a raster image")
-
-    parent_fd, leaf = _walk_parent_nofollow(str(resolved))
     try:
-        try:
-            fd = os.open(
-                leaf,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_fd,
-            )
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise HTTPException(status_code=403, detail="symlink at target")
-            if exc.errno == errno.ENOENT:
-                raise HTTPException(status_code=404, detail="path not found")
-            if exc.errno == errno.EACCES:
-                raise HTTPException(status_code=403, detail="permission denied")
-            raise HTTPException(status_code=500, detail=f"open failed: {exc}")
-    finally:
-        os.close(parent_fd)
-
-    def _gen():
-        try:
-            with os.fdopen(fd, "rb") as f:
-                while True:
-                    chunk = f.read(64 * 1024)
-                    if not chunk:
-                        return
-                    yield chunk
-        except OSError:
-            return
-
-    return StreamingResponse(
-        _gen(),
-        media_type=ctype,
-        headers={
-            "Content-Length": str(st.st_size),
-            "Content-Disposition": "inline",
-            "X-Content-Type-Options": "nosniff",
-            # Short private cache so the viewer's live re-renders reuse the
-            # already-fetched image (no flicker) instead of re-downloading
-            # it every time the document text changes. A changed image is
-            # at most this stale.
-            "Cache-Control": "private, max-age=30",
-        },
-    )
+        fd, st = open_readonly(resolved)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="path not found")
+        raise
+    if st.st_size > _FS_RAW_MAX_BYTES:
+        os.close(fd)
+        raise HTTPException(status_code=413,
+                            detail=f"image too large for inline render "
+                                   f"({st.st_size} > {_FS_RAW_MAX_BYTES})")
+    return ranged_response(request, fd, st, ctype, {
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+        # Short private cache so the viewer's live re-renders reuse the
+        # already-fetched image (no flicker) instead of re-downloading
+        # it every time the document text changes. A changed image is
+        # at most this stale.
+        "Cache-Control": "private, max-age=30",
+    })
 
 
 @router.post("/api/fs/rename", dependencies=[AuthDep, CsrfDep])
 def fs_rename(body: FsRenameBody) -> dict[str, Any]:
     src = _resolve_fs_entry(body.src)
+    _enforce_not_above_denied(src)
     _, final = _resolve_fs_parent_for_new(body.dst)
     # Close the intermediate-symlink TOCTOU the same way read/write/
     # upload/download do (M1 fix): walk both parents with per-component
@@ -887,6 +945,7 @@ def fs_delete(body: FsPathBody) -> dict[str, bool]:
     walks a confirm UX for those; we don't recursively rm to keep
     a missed click from nuking a tree)."""
     target = _resolve_fs_entry(body.path)
+    _enforce_not_above_denied(target)
     # Same M1 nofollow walk + dir_fd-relative syscall as rename/write so
     # an intermediate-directory symlink swap between resolve() and the
     # unlink/rmdir can't redirect the delete outside the jail.

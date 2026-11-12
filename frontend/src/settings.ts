@@ -15,6 +15,7 @@
 import { getMicConfig, type MicConfig, setMicConfig } from "./api";
 import { buildPasskeySection, SIGNIN_CHANGED } from "./settings-passkeys";
 import { changeCredentials, logout as apiLogout, logoutEverywhere } from "./auth";
+import { disablePush } from "./push";
 import { CURSOR_COLORS } from "./terminal-cursor";
 import { TERMINAL_FONTS } from "./terminal-fonts";
 import { onUpdateChange, pendingUpdate } from "./update";
@@ -736,6 +737,9 @@ function buildAccountSection(opts: SettingsOpts): HTMLElement {
   });
 
   signOutBtn.addEventListener("click", async () => {
+    // A signed-out device mustn't go on receiving Claude's questions as
+    // notifications: turn its push off first (that call needs the login).
+    await disablePush().catch(() => {});
     await apiLogout().catch(() => {});
     closeSettings();
     opts.onSessionInvalidated();

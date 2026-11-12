@@ -30,7 +30,7 @@ def _frontend_dist() -> Path:
 # main module calls during startup.
 def mount_static(app: FastAPI) -> None:
     dist = _frontend_dist()
-    if dist.exists():
+    if (dist / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
     else:
         log.warning("CCPIPE_FRONTEND_DIST=%s does not exist; static routes will 503 "
@@ -51,11 +51,10 @@ def _serve_file(relative: str) -> FileResponse:
     except ValueError:
         raise HTTPException(status_code=404, detail="not found")
     if not target.exists():
-        raise HTTPException(
-            status_code=503,
-            detail=f"frontend not built; missing {target}. "
-                   f"Run: cd frontend && npm run build",
-        )
+        # The path goes in the log, not the reply: this route needs no
+        # login, and the path names the home directory.
+        log.error("frontend not built; missing %s. Run: cd frontend && npm run build", target)
+        raise HTTPException(status_code=503, detail="frontend not built")
     # HTML (and any other non-hashed top-level asset) MUST be revalidated
     # on every load — without this, browsers heuristically cache index.html
     # for hours and keep referencing stale hashed asset URLs even after a

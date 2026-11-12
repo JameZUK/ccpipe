@@ -133,6 +133,10 @@ _WARN_INTERVAL_S = 10.0
 _warn_state: dict[str, tuple[float, int]] = {}   # key → (last logged, suppressed)
 
 
+# Relay output held in memory while a connection's history replay is sent.
+HELD_PTY_MAX = 4 * 1024 * 1024
+
+
 def _warn_limited(key: str, fmt: str, *args: object) -> None:
     now = time.monotonic()
     last, suppressed = _warn_state.get(key, (0.0, 0))
@@ -547,6 +551,10 @@ class _TerminalConnection:
         # Relay output held back until the replay has been sent (run()).
         self.hold_pty = False
         self.held_pty: list[bytes] = []
+        # How much is held, and the signal that the hold is over: past
+        # HELD_PTY_MAX the relay waits for it instead of holding more.
+        self.held_bytes = 0
+        self.held_released = asyncio.Event()
         # Set by the first held output with text in it: tmux's drawing of
         # this client's screen (_send_history).
         self.pty_redraw = asyncio.Event()
@@ -832,9 +840,13 @@ class _TerminalConnection:
     async def _release_pty(self) -> None:
         """Forward the relay output held during the replay, in order, then
         stop holding."""
-        while self.held_pty:
-            await self._send_pty(self.held_pty.pop(0))
-        self.hold_pty = False
+        try:
+            while self.held_pty:
+                await self._send_pty(self.held_pty.pop(0))
+        finally:
+            self.held_bytes = 0
+            self.hold_pty = False
+            self.held_released.set()
 
     async def _start_pty(self, cols: int, rows: int) -> None:
         # ── Commit zone ──────────────────────────────────────────────────
@@ -1290,10 +1302,17 @@ class _TerminalConnection:
         # a reconnect for guaranteed eventual consistency.
         self._watch_for_listening(data)
         if self.hold_pty:
-            self.held_pty.append(data)
             if not self.pty_redraw.is_set() and _has_visible_text(data):
                 self.pty_redraw.set()
-            return
+            if self.held_bytes < HELD_PTY_MAX:
+                self.held_pty.append(data)
+                self.held_bytes += len(data)
+                return
+            # Enough is held. Wait here for the replay to finish: the relay
+            # stops reading and tmux holds the rest back, instead of a busy
+            # session's output piling up in memory for as long as a slow
+            # client takes to receive its history.
+            await self.held_released.wait()
         await self._send_pty(data)
 
     def _watch_for_listening(self, data: bytes) -> None:
@@ -1828,7 +1847,10 @@ def _handle_client_text(text: str, pty_proc: PtyProcess,
                 # mid-deploy.
                 if sys.platform == "darwin" and data == "\x1bk":
                     return
-                pty_proc.write(data.encode("utf-8"))
+                # "replace": half of a surrogate pair (an emoji cut in two
+                # by a client's chunking) can't be encoded; it becomes "?"
+                # rather than an exception that drops the connection.
+                pty_proc.write(data.encode("utf-8", "replace"))
         case "resize":
             try:
                 cols = _clamp_dim(int(msg.get("cols", 120)))
@@ -1888,7 +1910,7 @@ def _handle_client_binary(data: bytes, pty_proc: PtyProcess,
             return
         _mic_writer.write(payload)
         return
-    log.warning("unknown binary frame type: 0x%02x", frame_type)
+    _warn_limited("unknown-binary", "unknown binary frame type: 0x%02x", frame_type)
 
 
 class _SlidingByteLimiter:
@@ -1913,9 +1935,10 @@ class _SlidingByteLimiter:
             _, expired = self._window.popleft()
             self._total -= expired
         if self._total + n_bytes > self._budget:
-            log.warning("%s rate budget exceeded (%d > %d in %.1fs); dropping",
-                        self._label, self._total + n_bytes, self._budget,
-                        self._window_s)
+            _warn_limited("budget-" + self._label,
+                          "%s rate budget exceeded (%d > %d in %.1fs); dropping",
+                          self._label, self._total + n_bytes, self._budget,
+                          self._window_s)
             return False
         self._window.append((now, n_bytes))
         self._total += n_bytes

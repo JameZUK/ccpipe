@@ -22,6 +22,7 @@ import texmath from "markdown-it-texmath";
 import katex from "katex";
 import hljs from "highlight.js/lib/common";
 import DOMPurify from "dompurify";
+import { markdownSanitizeOptions } from "./md-sanitize";
 import { makeHighlight } from "./md-highlight";
 import { registerExtraLanguages } from "./hljs-extra";
 import { MORE_LANGUAGES } from "./hljs-extra-more";
@@ -127,7 +128,11 @@ function renderSource(source: string): void {
   // directly — no innerHTML. Defaults strip <script>/event-handlers while
   // keeping HTML, SVG and MathML (the latter needed for KaTeX output).
   const frag = DOMPurify.sanitize(dirty, {
-    ADD_ATTR: ["align", "target", "rel"],
+    // No "target" / "rel" from the document: where a link opens is decided
+    // below, never by the file (a target="_top" link in the file panel's
+    // preview would replace ccpipe itself with another site).
+    ADD_ATTR: ["align"],
+    ...markdownSanitizeOptions(),
     RETURN_DOM_FRAGMENT: true,
   }) as unknown as DocumentFragment;
   docEl.replaceChildren(frag);
@@ -156,9 +161,20 @@ function renderSource(source: string): void {
       } else {
         a.setAttribute("href", `/api/fs/download?path=${encodeURIComponent(target)}`);
       }
-    } else if (/^https?:\/\//i.test(href)) {
-      a.setAttribute("target", "_blank");
-      a.setAttribute("rel", "noopener noreferrer");
+    } else {
+      // Everything else: a link to another site (written any way:
+      // "https://…", "//host/…", "mailto:") opens in a new tab without
+      // the opener; a link within ccpipe stays in this frame.
+      a.removeAttribute("target");
+      a.removeAttribute("rel");
+      let elsewhere = true;
+      try {
+        elsewhere = new URL(href, location.href).origin !== location.origin;
+      } catch { /* unparseable: treat as elsewhere */ }
+      if (elsewhere) {
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+      }
     }
   });
 

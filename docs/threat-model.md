@@ -157,3 +157,50 @@ it otherwise doesn't (Kokoro aside):
   finished turn per session per device a minute, so a runaway loop of
   tiny turns can't buzz a phone all day.
 
+## Rendered markdown (`/history`, `/view`)
+
+Transcripts and files are rendered as markdown with raw HTML allowed, so
+the text of anything Claude read (a web page, a cloned repository's
+README) ends up on a page of ccpipe's own origin. Script is out twice
+over: DOMPurify, and the page's CSP (`script-src 'self'`). On top of that
+`frontend/src/md-sanitize.ts` keeps the text from redrawing the page
+around it:
+
+- no `<style>`, and inline `style=` only for a short list of properties
+  with capped lengths (table alignment, KaTeX's boxes), so nothing can
+  cover the page, hide the tool blocks or paint a fake sign-in form;
+- no form controls, except a task list's disabled checkbox;
+- no `data-*` attributes (the pages keep their own state in them);
+- where a link opens is never the document's choice: a link to another
+  site opens in a new tab without the opener, written any way
+  (`https://…`, `//host/…`). A `target="_top"` link in the file panel's
+  preview would otherwise replace ccpipe itself with a lookalike.
+
+When you add a renderer, pass `markdownSanitizeOptions()` to its
+`DOMPurify.sanitize` call.
+
+## Review of 2026-11-12
+
+Design points from that review, beyond the above:
+
+- **Login limit.** The per-client budget (5 a minute) counts an IPv6
+  client by its /64 (`auth.client_bucket`); counted by single address,
+  anyone with an ordinary IPv6 connection had a fresh budget per address
+  and only the global cap (300 a minute) applied. The global cap still
+  lets a flood from many networks keep you from signing in (open
+  sessions are unaffected): a rate rule at the edge proxy on
+  `/api/auth/login` is the answer to that.
+- **State files** (`statefile.py`). A read that fails is not an empty
+  file: the path is blocked for writing until a read works, and a file
+  that isn't JSON is moved aside, never overwritten. Use it for any new
+  read-change-write state file.
+- **The deny-list** also refuses renaming or deleting a folder that
+  contains a denied place (`~/.local`), and names the state directory
+  wherever `XDG_STATE_HOME` puts it.
+- **Status line.** The recorder runs a project's own `statusLine`
+  command only when Claude's record says you accepted the trust prompt
+  for that folder (`statusline_record.trusted`).
+- **Sign out.** Signing out turns that device's push off; "sign out
+  everywhere" forgets every push device, so a lost one stops receiving
+  Claude's questions. Each device turns push back on after signing in.
+

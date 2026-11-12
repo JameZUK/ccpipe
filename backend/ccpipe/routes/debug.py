@@ -13,6 +13,8 @@ the backend's live counters in a single log line.
 from __future__ import annotations
 
 import asyncio
+import bisect
+import collections
 import contextlib
 import difflib
 import json
@@ -195,6 +197,82 @@ async def _capture_logical(session: str, lines: int, history_size: int) -> list[
     return (history or []) + screen
 
 
+# difflib on its own is roughly cubic on repetitive input: 800 blank lines
+# against 800 alternating blank / text lines takes 8 s, 1500 takes 50 s
+# (measured 2026-11-12), and a terminal buffer is mostly blank lines. So
+# the two sides are first pinned together at the lines that occur exactly
+# once in each (in order), and difflib only gets the stretches between
+# those pins, and only the small ones.
+_GAP_CELLS = 100 * 100
+
+
+def _bounded_opcodes(a: list[str], b: list[str]) -> list[tuple[str, int, int, int, int]]:
+    """Like SequenceMatcher.get_opcodes(), in time that stays near linear
+    whatever the input: stretches too large to compare line by line are
+    reported as one difference."""
+    ops: list[tuple[str, int, int, int, int]] = []
+
+    def differ(i1: int, i2: int, j1: int, j2: int) -> None:
+        if i1 == i2 and j1 == j2:
+            return
+        if i1 == i2:
+            ops.append(("insert", i1, i2, j1, j2))
+        elif j1 == j2:
+            ops.append(("delete", i1, i2, j1, j2))
+        elif (i2 - i1) * (j2 - j1) <= _GAP_CELLS:
+            sm = difflib.SequenceMatcher(None, a[i1:i2], b[j1:j2], autojunk=False)
+            ops.extend((tag, i1 + x1, i1 + x2, j1 + y1, j1 + y2)
+                       for tag, x1, x2, y1, y2 in sm.get_opcodes())
+        else:
+            ops.append(("replace", i1, i2, j1, j2))
+
+    def gap(i1: int, i2: int, j1: int, j2: int) -> None:
+        start_i, start_j = i1, j1
+        while i1 < i2 and j1 < j2 and a[i1] == b[j1]:
+            i1 += 1
+            j1 += 1
+        if i1 > start_i:
+            ops.append(("equal", start_i, i1, start_j, j1))
+        end_i, end_j = i2, j2
+        while i2 > i1 and j2 > j1 and a[i2 - 1] == b[j2 - 1]:
+            i2 -= 1
+            j2 -= 1
+        differ(i1, i2, j1, j2)
+        if end_i > i2:
+            ops.append(("equal", i2, end_i, j2, end_j))
+
+    count_a, count_b = collections.Counter(a), collections.Counter(b)
+    where_b = {line: j for j, line in enumerate(b) if count_b[line] == 1}
+    pairs = [(i, where_b[line]) for i, line in enumerate(a)
+             if count_a[line] == 1 and line in where_b]
+    # The longest run of pins that is in order on both sides.
+    tails: list[int] = []          # tails[k]: index into pairs ending a run of k + 1
+    tail_js: list[int] = []
+    prev = [-1] * len(pairs)
+    for n, (_i, j) in enumerate(pairs):
+        k = bisect.bisect_left(tail_js, j)
+        prev[n] = tails[k - 1] if k else -1
+        if k == len(tails):
+            tails.append(n)
+            tail_js.append(j)
+        else:
+            tails[k] = n
+            tail_js[k] = j
+    pins: list[tuple[int, int]] = []
+    n = tails[-1] if tails else -1
+    while n >= 0:
+        pins.append(pairs[n])
+        n = prev[n]
+    pins.reverse()
+    i0 = j0 = 0
+    for i, j in pins:
+        gap(i0, i, j0, j)
+        ops.append(("equal", i, i + 1, j, j + 1))
+        i0, j0 = i + 1, j + 1
+    gap(i0, len(a), j0, len(b))
+    return ops
+
+
 def _diff_buffers(
     frontend_tail: list[str], backend_tail: list[str],
 ) -> dict[str, Any]:
@@ -218,10 +296,10 @@ def _diff_buffers(
     # the frontend has near its top can still find their partners.
     back_n = min(len(backend_tail), n + 64)
     back = [(line or "").rstrip() for line in backend_tail[-back_n:]] if back_n else []
-    sm = difflib.SequenceMatcher(None, front, back, autojunk=False)
-    matches = sum(block.size for block in sm.get_matching_blocks())
+    ops = _bounded_opcodes(front, back)
+    matches = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in ops if tag == "equal")
     mismatch_examples: list[dict[str, Any]] = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+    for tag, i1, i2, j1, j2 in ops:
         if tag == "equal" or len(mismatch_examples) >= 5:
             continue
         if tag == "insert" and i1 == 0:
@@ -407,11 +485,11 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
             diff = {
                 "active_type": active_type,
                 "normal": (
-                    _diff_buffers(list(normal_tail), normal_back)
+                    await asyncio.to_thread(_diff_buffers, list(normal_tail), normal_back)
                     if want_normal and normal_back is not None else None
                 ),
                 "alternate": (
-                    _diff_buffers(list(alt_tail), alt_back)
+                    await asyncio.to_thread(_diff_buffers, list(alt_tail), alt_back)
                     if want_alt and alt_back is not None else None
                 ),
             }
@@ -425,7 +503,8 @@ async def post_frontend_snapshot(body: FrontendSnapshot) -> dict[str, object]:
                 if back_tail is not None:
                     diff = {
                         "active_type": "unknown (schema-1)",
-                        "normal": _diff_buffers(list(front_tail), back_tail),
+                        "normal": await asyncio.to_thread(
+                            _diff_buffers, list(front_tail), back_tail),
                         "alternate": None,
                     }
     # Sanitise the session string for the log line — Pydantic doesn't

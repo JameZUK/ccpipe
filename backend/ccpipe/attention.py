@@ -587,8 +587,23 @@ async def tick(quiet: bool = False) -> None:
     results = await asyncio.gather(*steps, return_exceptions=True)
     for n, r in zip(claudes, results):
         if isinstance(r, Exception):
-            log.debug("attention step for %s failed", n, exc_info=r)
+            _warn_step(n, r)
     _take_snapshot(claudes)
+
+
+# A session whose check keeps failing is said so once a minute, not hidden
+# at debug level and not once a second.
+_step_warned: dict[str, float] = {}
+
+
+def _warn_step(name: str, exc: BaseException) -> None:
+    now = time.monotonic()
+    if now - _step_warned.get(name, -1e9) < 60.0:
+        return
+    if len(_step_warned) > 256:
+        _step_warned.clear()
+    _step_warned[name] = now
+    log.warning("attention: checking %s failed: %r", name, exc)
 
 
 async def run() -> None:
@@ -596,15 +611,24 @@ async def run() -> None:
     starts is listed but not announced: a restart of ccpipe mustn't ring
     every device again."""
     quiet = True
+    failures = 0
     while True:
         try:
             await tick(quiet)
             quiet = False
+            failures = 0
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("attention tick failed")
-        await asyncio.sleep(POLL_S)
+            failures += 1
+            # The first failure in full; while it keeps failing, wait
+            # longer (up to a minute) and say so now and then, instead of
+            # a traceback every second.
+            if failures == 1:
+                log.exception("attention tick failed")
+            elif failures % 20 == 0:
+                log.error("attention tick still failing (%d in a row)", failures)
+        await asyncio.sleep(min(60.0, POLL_S * (2 ** min(failures, 6))) if failures else POLL_S)
 
 
 def _reset_for_tests() -> None:

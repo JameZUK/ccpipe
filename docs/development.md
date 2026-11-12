@@ -85,6 +85,8 @@ backend/
                        denylist + hidden filtering, size pre-flight
     drafts.py          Per-session composer drafts (drafts.json), relayed
                        live between devices by ws.py
+    statefile.py       Read / write of the small JSON state files: a failed
+                       read blocks the write, a corrupt file is moved aside
     safe_write.py      Atomic saves that keep the file's mode and write
                        through symlinks (file panel + settings patch)
     paths.py           state_dir() shared by auth/config/sticky;
@@ -168,6 +170,7 @@ frontend/
     settings-passkeys.ts  Account → passkeys and ways to sign in
     settings-notify.ts Notifications → chime, spoken name, push per device
     audio-session.ts   Safari's audio session, reported to the server log
+    md-sanitize.ts     what rendered markdown may not carry (style, forms, data-*), for /history and /view
                        (ccpipe leaves its type alone: the file says why)
     attention.ts       What needs you on the page: the top bar's bell and
                        its drop-down, banners, the chime (made in code)

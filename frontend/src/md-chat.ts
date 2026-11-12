@@ -9,6 +9,7 @@ import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
 import hljs from "highlight.js/lib/core";
 import DOMPurify from "dompurify";
+import { markdownSanitizeOptions } from "./md-sanitize";
 import "highlight.js/styles/github-dark.css";
 import { makeHighlight } from "./md-highlight";
 import { registerExtraLanguages } from "./hljs-extra";
@@ -89,6 +90,7 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 export function renderMarkdown(source: string): DocumentFragment {
   return DOMPurify.sanitize(md.render(source), {
     USE_PROFILES: { html: true },
+    ...markdownSanitizeOptions(),
     RETURN_DOM_FRAGMENT: true,
   }) as unknown as DocumentFragment;
 }

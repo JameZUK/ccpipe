@@ -747,7 +747,7 @@ class TtsService:
         await self._speak_pipelined(sentences, targets, text, uid)
 
     @staticmethod
-    async def _safe_sub_call(coro: Awaitable[None], what: str) -> None:
+    async def _safe_sub_call(coro: Awaitable[None], what: str) -> bool:
         """Await one subscriber callback with a bounded timeout.
 
         A subscriber's on_start/on_chunk/on_end sends bytes over a WS; a
@@ -762,8 +762,25 @@ class TtsService:
         except asyncio.TimeoutError:
             log.warning("tts: subscriber %s timed out after %ss — skipping",
                         what, _SUB_CB_TIMEOUT_S)
+            return False
         except Exception:
             log.exception("%s failed", what)
+        return True
+
+    async def _fan_out(self, targets: list[_Subscription],
+                       call: Callable[[_Subscription], Awaitable[None]], what: str) -> None:
+        """Send one event to every listener at once. A listener whose send
+        timed out (a phone that dropped off the network, its socket not
+        yet closed) is taken out of *targets* for the rest of this
+        utterance: left in, every later chunk would wait the full timeout
+        on it again, and everyone else's audio with it."""
+        if not targets:
+            return
+        subs = list(targets)
+        fine = await asyncio.gather(*(self._safe_sub_call(call(s), what) for s in subs))
+        for sub, ok in zip(subs, fine):
+            if not ok and sub in targets:
+                targets.remove(sub)
 
     async def _speak_one(self, text: str, targets: list[_Subscription],
                          utterance: str = "", uid: int = 0) -> None:
@@ -771,15 +788,12 @@ class TtsService:
         async for evt in self._kokoro_stream(text):
             kind, payload = evt
             if kind == "start":
-                for sub in targets:
-                    await self._safe_sub_call(
-                        sub.on_start(text, utterance or text, uid), "on_start")
+                await self._fan_out(
+                    targets, lambda sub: sub.on_start(text, utterance or text, uid), "on_start")
             elif kind == "chunk":
-                for sub in targets:
-                    await self._safe_sub_call(sub.on_chunk(payload), "on_chunk")
+                await self._fan_out(targets, lambda sub: sub.on_chunk(payload), "on_chunk")
             elif kind == "end":
-                for sub in targets:
-                    await self._safe_sub_call(sub.on_end(), "on_end")
+                await self._fan_out(targets, lambda sub: sub.on_end(), "on_end")
 
     async def _speak_pipelined(self, sentences: list[str],
                                 targets: list[_Subscription],
@@ -866,14 +880,15 @@ class TtsService:
                         # it has at least one chunk, so sent_start tracking
                         # here is purely defensive against a duplicate event.
                         if not sent_start:
-                            for sub in targets:
-                                await self._safe_sub_call(
-                                    sub.on_start(sentence, utterance or " ".join(sentences), uid),
-                                    "on_start")
+                            await self._fan_out(
+                                targets,
+                                lambda sub: sub.on_start(
+                                    sentence, utterance or " ".join(sentences), uid),
+                                "on_start")
                             sent_start = True
                     elif kind == "chunk":
-                        for sub in targets:
-                            await self._safe_sub_call(sub.on_chunk(payload), "on_chunk")
+                        await self._fan_out(
+                            targets, lambda sub: sub.on_chunk(payload), "on_chunk")
                     elif kind == "end":
                         # We'll fire on_end below after EOS, so we know we've
                         # actually exhausted the queue.
@@ -883,8 +898,7 @@ class TtsService:
                 # the client sees an end event for a sentence it never knew
                 # had started, which corrupts its visualiser state.
                 if sent_start:
-                    for sub in targets:
-                        await self._safe_sub_call(sub.on_end(), "on_end")
+                    await self._fan_out(targets, lambda sub: sub.on_end(), "on_end")
                 # Reap the producer task cleanly. Cancel-then-gather so if
                 # we ourselves are being cancelled (outer task teardown),
                 # the producer is told to stop AND its result is reaped —

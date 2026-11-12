@@ -146,7 +146,7 @@ def _gc(store: dict[str, _Challenge], now: float) -> None:
 
 
 def _client_of(conn: HTTPConnection) -> str:
-    return (conn.client.host if conn.client else "") or "unknown"
+    return auth.client_bucket(conn)
 
 
 def _remember_login(challenge: bytes, rp_id: str, origin: str, client: str) -> None:

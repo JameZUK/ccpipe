@@ -47,6 +47,7 @@ from ..auth import (
     SameOriginDep,
     add_passkey,
     bump_credential_version,
+    client_bucket,
     combo_usable,
     effective_signin,
     get_credential,
@@ -186,7 +187,8 @@ async def _enforce_throttle(request: Request, endpoint: str) -> None:
     by endpoint, so an attacker can't farm a fresh budget by rotating
     through /credentials → /totp/enroll → /totp/confirm → /totp/disable
     after burning the /login bucket."""
-    client_ip = (request.client.host if request.client else "") or "unknown"
+    # An IPv6 client is counted by its /64 (auth.client_bucket).
+    client_ip = client_bucket(request)
     if not _login_throttle_ok(client_ip):
         log.warning("cred-check throttle tripped for ip=%s endpoint=%s "
                      "(per-IP %d/%ds + global %d/%ds)",
@@ -339,6 +341,15 @@ async def auth_logout_all(request: Request) -> AuthStatus:
     request.session.clear()
     from ..ws import close_stale_ws_sockets
     await close_stale_ws_sockets("signed out everywhere")
+    # A lost device mustn't go on receiving Claude's questions as
+    # notifications either. Each device turns push back on after it signs in.
+    from .. import notify
+    try:
+        dropped = await asyncio.to_thread(notify.unsubscribe_all)
+        if dropped:
+            log.info("signed out everywhere: forgot %d push device(s)", dropped)
+    except OSError as exc:
+        log.error("signed out everywhere, but push devices couldn't be forgotten: %s", exc)
     return AuthStatus(required=True, authenticated=False, username=None)
 
 
