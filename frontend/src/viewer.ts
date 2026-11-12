@@ -199,6 +199,12 @@ function loadMermaid(): Promise<typeof import("mermaid").default> {
       theme: "dark",
       securityLevel: "strict",
       fontFamily: "inherit",
+      // Mermaid 12 lays diagrams out with ELK and draws them in a new
+      // style by default. Keep the layout and look diagrams had before:
+      // they stay as their authors saw them, and the 1.5 MB ELK chunk is
+      // never fetched.
+      layout: "dagre",
+      look: "classic",
     });
     return mermaid;
   });
