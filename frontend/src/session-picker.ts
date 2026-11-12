@@ -72,6 +72,11 @@ type SessionInfo = {
   claude?: string | null;
   /** What needs you here: Claude's question, or a finished turn. */
   attention?: AttentionItem | null;
+  /** "background": it yields CPU and memory to the other sessions.
+   * null / absent: this host can't do that, so the menu doesn't offer it. */
+  priority?: "normal" | "background" | null;
+  /** A background session whose memory is being held back right now. */
+  mem_held?: boolean;
 };
 
 /** A remembered session that isn't running; opening it resumes it. */
@@ -856,7 +861,27 @@ export function renderSessionPicker(
       const stopItem = confirmItem("stop",
         "Stop its processes to free memory; it stays listed and resumes (same conversation) when opened",
         () => apiJson(`/api/sessions/${enc}/stop`, { method: "POST" }));
-      menu.append(openItem, renameItem, stickyItem, stopItem, forgetItem);
+      menu.append(openItem, renameItem, stickyItem);
+      if (s.priority) {
+        const toBackground = s.priority !== "background";
+        const prioItem = menuItem(toBackground ? "run in background" : "run normally");
+        prioItem.title = toBackground
+          ? "Keep it working, but let the other sessions have the processor and the memory first"
+          : "Give it its full share of the processor and memory again";
+        menu.append(prioItem);
+        prioItem.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          closeMenu();
+          try {
+            await apiJson<SessionInfo>(`/api/sessions/${enc}/priority`,
+              { method: "POST", body: JSON.stringify({ level: toBackground ? "background" : "normal" }) });
+            void load("full");
+          } catch (err) {
+            showError(`priority change failed: ${(err as Error).message}`);
+          }
+        });
+      }
+      menu.append(stopItem, forgetItem);
       openItem.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); onPick(s.name); });
       renameItem.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1022,6 +1047,13 @@ export function renderSessionPicker(
       titleRow.append(b);
     }
     if (s.windows > 1) titleRow.append(h("span", "sess__badge", `${s.windows} windows`));
+    if (s.priority === "background") {
+      const b = h("span", "sess__badge sess__badge--bg", s.mem_held ? "background · held" : "background");
+      b.title = s.mem_held
+        ? "Background: memory is short, so it is being held back (and partly moved to swap) until the others need less"
+        : "Background: the other sessions get the processor and the memory first";
+      titleRow.append(b);
+    }
 
     // Never `hidden`: in the list views it holds a grid column even empty.
     const taskText = stopped

@@ -116,6 +116,9 @@ backend/
                        conversation id, stopped / why
     lifecycle.py       Resume / stop / forget, which sessions start at
                        boot, and the careful idle auto-stop
+    priority.py        Background sessions: a small CPU share, a soft
+                       memory limit that follows what's spare, first to
+                       go if memory runs out (per-pane systemd scopes)
     sysstats.py        Host CPU/mem/disk sampler + per-session PSS/CPU,
                        project sizes (du at idle priority)
     proctree.py        /proc process-table snapshot (busy detection,

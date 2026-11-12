@@ -18,14 +18,15 @@ import socket
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import config as app_config
-from .. import attention, drafts, lifecycle, plan_usage, session_meta, sticky, sysstats, tmux, tmux_ui
+from .. import (attention, drafts, lifecycle, plan_usage, priority, session_meta, sticky, sysstats,
+                tmux, tmux_ui)
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..paths import claude_project_dir
@@ -99,6 +100,11 @@ class SessionInfo(BaseModel):
     # What needs you here (attention.py): Claude's question, or its
     # finished turn that no one has looked at. None = nothing.
     attention: dict[str, Any] | None = None
+    # "normal" or "background" (priority.py: yields CPU and memory to the
+    # other sessions); None where this host can't do it. mem_held: its
+    # memory is being held back right now, so it runs slower.
+    priority: str | None = None
+    mem_held: bool = False
 
 
 class StoppedSessionInfo(BaseModel):
@@ -143,6 +149,10 @@ class StickyBody(BaseModel):
     sticky: bool
 
 
+class PriorityBody(BaseModel):
+    level: Literal["normal", "background"]
+
+
 _HOSTNAME = socket.gethostname()
 
 
@@ -182,6 +192,8 @@ def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
         claude=cstate,
         claude_since=csince or None,
         attention=_attention_of(s.name),
+        priority=priority.level_of(m) if priority.available() else None,
+        mem_held=priority.held(s.name),
     )
 
 
@@ -466,6 +478,26 @@ async def set_sticky_endpoint(name: str, body: StickyBody) -> SessionInfo:
         sticky.set_sticky(name, cwd)
     else:
         sticky.clear(name)
+    info = await _session_info(name)
+    if info is None:
+        raise HTTPException(status_code=500, detail="session vanished")
+    return info
+
+
+@router.post("/api/sessions/{name}/priority", response_model=SessionInfo,
+             dependencies=[AuthDep, CsrfDep])
+async def set_priority_endpoint(name: str, body: PriorityBody) -> SessionInfo:
+    """Make a running session a background one (it yields CPU and memory
+    to the others, see priority.py) or a normal one again. The level is
+    remembered with the session, so it survives a stop and a resume."""
+    name = await _existing_session(name)
+    if not priority.available():
+        raise HTTPException(status_code=409, detail="not available on this host")
+    try:
+        await priority.set_level(name, body.level)
+    except OSError as exc:
+        log.warning("could not save the priority of %s: %s", name, exc)
+        raise HTTPException(status_code=500, detail="could not save the setting")
     info = await _session_info(name)
     if info is None:
         raise HTTPException(status_code=500, detail="session vanished")

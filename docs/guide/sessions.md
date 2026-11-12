@@ -104,6 +104,30 @@ Two edge cases:
 The details are in
 [Configuration → Remembered, stopped and sticky sessions](../configuration.md#remembered-stopped-and-sticky-sessions).
 
+## Leaving a session to work in the background
+
+When one session is busy with something long and you want to get on with
+another, open its **⋮** menu and choose **run in background**. It keeps
+working, and gives way to everything else:
+
+- **Processor.** When other work wants the processor it gets a small
+  share (about a sixth of a normal session's, measured with both flat
+  out). When nothing else does, it runs at full speed.
+- **Memory.** It can only grow into memory that is spare. About 15% of
+  the machine's memory is kept free for the other sessions. If that runs
+  short, the background session is held back and partly moved to swap,
+  and its badge reads **background · held**. That makes it slower; it is
+  never stopped for it.
+- **If the machine runs out of memory anyway**, the background session's
+  processes are the first the system ends, not the session you're in.
+
+**run normally** in the same menu puts it back. The choice stays with the
+session through a stop and a resume, and applies to everything the
+session starts, in every pane.
+
+It needs Linux with systemd and tmux 3.4 or newer (each pane then runs in
+its own systemd scope). Elsewhere the menu doesn't show the item.
+
 ## Starting a session
 
 **+ new** opens a panel. Pick a working directory (type it or

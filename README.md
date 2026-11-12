@@ -43,8 +43,9 @@ software one and speech plays in your browser.
 
 - **Every session in one list.** Running and stopped, with what Claude is
   working on, whether it's busy, and each session's CPU, memory and disk.
-  A stopped session resumes its conversation with a tap, and idle ones
-  can stop themselves to free memory.
+  A stopped session resumes its conversation with a tap, idle ones can
+  stop themselves to free memory, and one you leave working can run in
+  the background, giving way to the session you're in.
   [Sessions →](docs/guide/sessions.md)
 - **A terminal that works on a phone.** A key row for Esc, Tab, Ctrl and
   the arrows, a prompt box whose drafts sync between devices, saved

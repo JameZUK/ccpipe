@@ -126,6 +126,16 @@ the server drops the tile's input frames as well. Tile layouts
 (`/api/layouts/{name}`) are validated: session names go through
 `safe_name`, and there are at most 9 tiles, 4 levels deep.
 
+## Background sessions
+
+`POST /api/sessions/{name}/priority` takes one of two level names, never
+a number or a unit name. What gets changed is found from the kernel's own
+record of each pane's cgroup (`/proc/<pid>/cgroup`), and only a
+`tmux-spawn-<uuid>.scope` that isn't the tmux server's or ccpipe's own is
+touched (`priority.py`). The systemd call is an argv list, no shell. It
+needs no privilege: the scopes belong to the user manager. Nothing here
+can kill a session; the memory limit is a soft one (`memory.high`).
+
 ## Push notifications
 
 Push is off until a signed-in device turns it on (Settings →

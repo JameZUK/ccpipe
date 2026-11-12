@@ -14,6 +14,8 @@ keeps what the session picker shows and what resuming needs:
                              not just the newest one in the directory
         "shell":   true,     never seen running Claude (a plain shell session,
                              e.g. one started over ssh): resumes as a shell
+        "priority": "background",  yields CPU and memory to the other
+                             sessions (priority.py); absent = normal
         "stopped": <unix>,   set while it isn't running
         "stop_reason": "idle" | "stopped" | "gone"
     }, ...}
@@ -77,6 +79,8 @@ def _clean(info: Any) -> dict[str, Any]:
         out["claude"] = cid
     elif info.get("shell") is True:
         out["shell"] = True
+    if info.get("priority") == "background":
+        out["priority"] = "background"
     reason = info.get("stop_reason")
     if reason in _REASONS and "stopped" in out:
         out["stop_reason"] = reason
@@ -176,6 +180,19 @@ def mark_running(name: str) -> None:
             entry.pop("stopped", None)
             entry.pop("stop_reason", None)
             _try_save(data)
+
+
+def set_priority(name: str, level: str) -> None:
+    """"background" or "normal" (priority.py). Raises OSError when it
+    can't be saved: the caller is answering a request to change it."""
+    with _lock:
+        data = load()
+        entry = data.setdefault(name, {})
+        if level == "background":
+            entry["priority"] = "background"
+        else:
+            entry.pop("priority", None)
+        _save(data)
 
 
 def rename(old: str, new: str) -> None:
