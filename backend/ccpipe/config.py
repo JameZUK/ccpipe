@@ -102,7 +102,12 @@ class SessionsConfig:
         no terminal attached, no output or input, Claude not working, no
         command / task running and no CPU use — see lifecycle.busy_reason.
         Sticky sessions get the longer default.
+      - ``auto_update``: restart an idle session whose Claude is older
+        than the installed Claude Code, on the same conversation
+        (claude_update.py). Off by default: a restart ends anything that
+        lives only in the running Claude.
     """
+    auto_update: bool = False
     boot_sticky: int = 5
     boot_other: int = 0
     idle_stop_other_min: int = 120
@@ -118,6 +123,7 @@ class SessionsConfig:
                 setattr(c, k, max(0, min(BOOT_MAX, int(d.get(k, getattr(c, k))))))
             except (TypeError, ValueError):
                 pass
+        c.auto_update = d.get("auto_update") is True
         c.idle_stop_other_min = _idle_minutes(d.get("idle_stop_other_min", c.idle_stop_other_min),
                                               c.idle_stop_other_min)
         c.idle_stop_sticky_min = _idle_minutes(d.get("idle_stop_sticky_min", c.idle_stop_sticky_min),

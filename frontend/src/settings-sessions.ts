@@ -17,6 +17,8 @@ interface SessionsConfig {
   boot_other: number;
   idle_stop_sticky_min: number;
   idle_stop_other_min: number;
+  /** Absent from an older backend. */
+  auto_update?: boolean;
 }
 
 
@@ -116,16 +118,25 @@ export function buildSessionsSection(): HTMLElement {
     ["720", "12 h"], ["1440", "1 day"], ["2880", "2 days"], ["10080", "7 days"]], "1440");
   const otherIdle = select([["0", "never"], ["15", "15 min"], ["30", "30 min"], ["60", "1 h"], ["120", "2 h"],
     ["240", "4 h"], ["480", "8 h"], ["1440", "1 day"]], "120");
+  const autoUpdate = checkbox(false);
   rows.append(
     row("Start at boot · sticky", "the most recently used sticky sessions; the rest resume when opened", bootSticky),
     row("Start at boot · other", "the most recently used non-sticky sessions", bootOther),
     row("Stop sticky sessions idle for", "", stickyIdle),
     row("Stop other sessions idle for", "", otherIdle),
+    row("Keep Claude Code up to date",
+      "restart an idle session whose Claude is older than the installed version, on the same conversation",
+      autoUpdate),
   );
   sec.append(h("p", "modal__note",
     "Idle means completely idle: no terminal attached, no output or input, Claude not working, "
     + "no command or background task running, no CPU use, and no question waiting for you. "
     + "Anything running keeps the session running."));
+  sec.append(h("p", "modal__note",
+    "An update restart waits until Claude has been idle for 10 minutes with nothing running, no terminal "
+    + "open on it and a single pane. It can't see a wake-up or loop Claude has scheduled for later: "
+    + "that would be lost. A session that is behind shows \u201cupdate\u201d in the list either way, "
+    + "and its menu can restart it."));
 
   const actions = h("div", "modal__row-actions");
   const status = h("span", "modal__status");
@@ -145,6 +156,7 @@ export function buildSessionsSection(): HTMLElement {
   const fill = (cfg: SessionsConfig): void => {
     bootSticky.value = String(cfg.boot_sticky);
     bootOther.value = String(cfg.boot_other);
+    autoUpdate.checked = cfg.auto_update === true;
     const setSel = (s: HTMLSelectElement, minutes: number): void => {
       const v = String(minutes);
       if (![...s.options].some((o) => o.value === v)) {
@@ -178,6 +190,7 @@ export function buildSessionsSection(): HTMLElement {
           boot_other: clamp(bootOther.value),
           idle_stop_sticky_min: parseInt(stickyIdle.value, 10) || 0,
           idle_stop_other_min: parseInt(otherIdle.value, 10) || 0,
+          auto_update: autoUpdate.checked,
         }),
       });
       fill(next);

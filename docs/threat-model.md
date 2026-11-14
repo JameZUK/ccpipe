@@ -136,6 +136,14 @@ touched (`priority.py`). The systemd call is an argv list, no shell. It
 needs no privilege: the scopes belong to the user manager. Nothing here
 can kill a session; the memory limit is a soft one (`memory.high`).
 
+## Update restarts
+
+`POST /api/sessions/{name}/update` takes no parameters: it restarts a
+session on the installed Claude Code only when `claude_update.py` finds
+its Claude older and idle, and resumes the conversation id read from
+that Claude's own session file (a UUID, checked, and its transcript must
+exist). The version check runs `claude --version`, an argv list.
+
 ## Push notifications
 
 Push is off until a signed-in device turns it on (Settings →

@@ -868,6 +868,104 @@ async def stop_job(job: str) -> bool:
     return await proctree.run_argv([exe, "stop", job], 30.0, env=tmux_env(), check=True) is not None
 
 
+async def respawn_job(job: str) -> bool:
+    """`claude respawn <job>`: restart a background Claude on the installed
+    Claude Code version, same conversation. Its viewer exits (seen
+    2026-11-14: "Session … has exited — run `claude attach …`"), so the
+    pane has to attach again afterwards."""
+    exe = shutil.which("claude")
+    if not exe or not _JOB_RE.match(job):
+        return False
+    return await proctree.run_argv([exe, "respawn", job], 60.0, env=tmux_env(), check=True) is not None
+
+
+def job_idle(job: str) -> bool | None:
+    """Nothing in flight in the background session (no task running or
+    queued), from Claude's own record of it; None when that can't be read."""
+    if not _JOB_RE.match(job):
+        return None
+    try:
+        data = json.loads((Path.home() / ".claude" / "jobs" / job / "state.json").read_text())
+        flight = data["inFlight"]
+        return int(flight.get("tasks", 0)) == 0 and int(flight.get("queued", 0)) == 0
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+@dataclass(frozen=True)
+class ClaudeProc:
+    """One live Claude of a session, from its session file."""
+    pid: int
+    status: str
+    version: str
+    sid: str
+    job: str | None = None      # a background session the pane is attached to
+
+
+def _under(pid: int, ancestor: int) -> bool:
+    for _ in range(32):
+        if pid == ancestor:
+            return True
+        if pid <= 1:
+            return False
+        try:
+            pid = _read_ppid(pid)
+        except (OSError, ValueError, IndexError):
+            return False
+    return False
+
+
+def _read_claude_procs(pane_sessions: dict[str, tuple[str, int]],
+                       bg: dict[int, str]) -> dict[str, list[ClaudeProc]]:
+    """session name → its live Claudes. ``pane_sessions``: pane id →
+    (session, pane pid). A Claude that names a pane must also run under
+    that pane's process: another tmux server has the same pane ids."""
+    out: dict[str, list[ClaudeProc]] = {}
+    try:
+        files = list((Path.home() / ".claude" / "sessions").glob("*.json"))
+    except OSError:
+        return out
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        pid, status, where = data.get("pid"), data.get("status"), data.get("tmux")
+        if not (isinstance(pid, int) and isinstance(status, str)):
+            continue
+        if str(data.get("procStart", "")) != _proc_start_time(pid):
+            continue
+        job: str | None = None
+        if isinstance(where, str):
+            name, pane_pid = pane_sessions.get(where.rpartition(".")[2], ("", 0))
+            if not name or not _under(pid, pane_pid):
+                continue
+        else:
+            name = bg.get(pid, "")
+            job = data.get("jobId") if isinstance(data.get("jobId"), str) else None
+            if not name or not job:
+                continue
+        version, sid = data.get("version"), data.get("sessionId")
+        out.setdefault(name, []).append(ClaudeProc(
+            pid, status, version if isinstance(version, str) else "",
+            sid if isinstance(sid, str) else "", job))
+    return out
+
+
+async def claude_procs() -> dict[str, list[ClaudeProc]]:
+    """session name → every live Claude in it (or attached to it)."""
+    out = await _tmux_out("list-panes", "-a", "-F",
+                          f"#{{pane_id}}{_FIELD_SEP}#{{session_name}}{_FIELD_SEP}#{{pane_pid}}")
+    panes: dict[str, tuple[str, int]] = {}
+    for line in (out or "").splitlines():
+        pane, name, pid = (line.split(_FIELD_SEP) + ["", ""])[:3]
+        if pane and name and name != CONTROL_SESSION_NAME and pid.isdigit():
+            panes[pane] = (name, int(pid))
+    return await asyncio.to_thread(_read_claude_procs, panes, await bg_owners())
+
+
 def job_known(job: str | None) -> bool:
     """Claude still has this background session on record, so
     `claude attach <job>` can open (or restart) it."""

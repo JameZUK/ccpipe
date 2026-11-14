@@ -25,8 +25,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import config as app_config
-from .. import (attention, drafts, lifecycle, plan_usage, priority, session_meta, sticky, sysstats,
-                tmux, tmux_ui)
+from .. import (attention, claude_update, drafts, lifecycle, plan_usage, priority, session_meta, sticky,
+                sysstats, tmux, tmux_ui)
 from . import layouts
 from ..auth import AuthDep, CsrfDep, SameOriginDep
 from ..paths import claude_project_dir
@@ -105,6 +105,9 @@ class SessionInfo(BaseModel):
     # memory is being held back right now, so it runs slower.
     priority: str | None = None
     mem_held: bool = False
+    # Its Claude is older than the installed Claude Code (claude_update.py):
+    # {"from", "to", "blocked": why it can't be restarted now | None}.
+    update: dict[str, Any] | None = None
 
 
 class StoppedSessionInfo(BaseModel):
@@ -126,6 +129,7 @@ class StoppedSessionInfo(BaseModel):
 
 
 class SessionsConfigBody(BaseModel):
+    auto_update: bool | None = None
     boot_sticky: int | None = Field(default=None, ge=0, le=app_config.BOOT_MAX)
     boot_other: int | None = Field(default=None, ge=0, le=app_config.BOOT_MAX)
     # 0 = never; otherwise 15 min .. 30 days (clamped).
@@ -194,6 +198,7 @@ def _to_session_info(s: tmux.TmuxSession, sticky_names: set[str],
         attention=_attention_of(s.name),
         priority=priority.level_of(m) if priority.available() else None,
         mem_held=priority.held(s.name),
+        update=claude_update.status(s.name),
     )
 
 
@@ -484,6 +489,23 @@ async def set_sticky_endpoint(name: str, body: StickyBody) -> SessionInfo:
     info = await _session_info(name)
     if info is None:
         raise HTTPException(status_code=500, detail="session vanished")
+    return info
+
+
+@router.post("/api/sessions/{name}/update", response_model=SessionInfo,
+             dependencies=[AuthDep, CsrfDep])
+async def update_session_endpoint(name: str) -> SessionInfo:
+    """Restart a session whose Claude is older than the installed Claude
+    Code, on the same conversation. Refused (409, with the reason) unless
+    Claude is idle with nothing running: see claude_update.py."""
+    name = await _existing_session(name)
+    try:
+        await claude_update.restart(name, manual=True)
+    except lifecycle.LifecycleError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    info = await _session_info(name)
+    if info is None:
+        raise HTTPException(status_code=500, detail="restarted but not found")
     return info
 
 

@@ -77,6 +77,9 @@ type SessionInfo = {
   priority?: "normal" | "background" | null;
   /** A background session whose memory is being held back right now. */
   mem_held?: boolean;
+  /** Its Claude is older than the installed Claude Code; `blocked` is why
+   * it can't be restarted on the new one right now (null = it can). */
+  update?: { from: string; to: string; blocked: string | null } | null;
 };
 
 /** A remembered session that isn't running; opening it resumes it. */
@@ -86,7 +89,7 @@ type StoppedInfo = {
   created: number;
   opened: number;
   stopped: number;
-  stop_reason: "idle" | "stopped" | "gone";
+  stop_reason: "idle" | "stopped" | "gone" | "update";
   cwd: string;
   conversation: boolean;
   /** Never ran Claude: it resumes as a plain shell. */
@@ -251,6 +254,7 @@ const STOP_REASON: Record<StoppedInfo["stop_reason"], string> = {
   idle: "stopped when idle",
   stopped: "stopped",
   gone: "not running",
+  update: "stopped for an update",
 };
 
 function matches(s: SessionInfo, query: string): boolean {
@@ -881,6 +885,25 @@ export function renderSessionPicker(
           }
         });
       }
+      if (s.update) {
+        const u = s.update;
+        const updItem = menuItem(`restart on ${u.to}`);
+        updItem.title = u.blocked
+          ? `Can't restart now: ${u.blocked}`
+          : `Restart Claude Code ${u.from} on ${u.to}, on the same conversation`;
+        if (u.blocked) updItem.classList.add("sess__menu__item--off");
+        menu.append(updItem);
+        updItem.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          closeMenu();
+          try {
+            await apiJson<SessionInfo>(`/api/sessions/${enc}/update`, { method: "POST" });
+          } catch (err) {
+            showError(`restart of ${s.name} for the update failed: ${(err as Error).message}`);
+          }
+          void load("full");
+        });
+      }
       menu.append(stopItem, forgetItem);
       openItem.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); onPick(s.name); });
       renameItem.addEventListener("click", (e) => {
@@ -1047,6 +1070,12 @@ export function renderSessionPicker(
       titleRow.append(b);
     }
     if (s.windows > 1) titleRow.append(h("span", "sess__badge", `${s.windows} windows`));
+    if (s.update) {
+      const b = h("span", "sess__badge sess__badge--update", "update");
+      b.title = `Running Claude Code ${s.update.from}; ${s.update.to} is installed. `
+        + (s.update.blocked ? `Not restarting now: ${s.update.blocked}.` : "It can be restarted now (\u22ee menu).");
+      titleRow.append(b);
+    }
     if (s.priority === "background") {
       const b = h("span", "sess__badge sess__badge--bg", s.mem_held ? "background · held" : "background");
       b.title = s.mem_held

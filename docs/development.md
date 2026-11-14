@@ -116,6 +116,9 @@ backend/
                        conversation id, stopped / why
     lifecycle.py       Resume / stop / forget, which sessions start at
                        boot, and the careful idle auto-stop
+    claude_update.py   Sessions whose Claude is older than the installed
+                       Claude Code: the picker's mark, and the restart
+                       (by hand or when idle) that must not cost anything
     priority.py        Background sessions: a small CPU share, a soft
                        memory limit that follows what's spare, first to
                        go if memory runs out (per-pane systemd scopes)

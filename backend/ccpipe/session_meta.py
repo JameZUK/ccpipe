@@ -20,7 +20,8 @@ keeps what the session picker shows and what resuming needs:
         "priority": "background",  yields CPU and memory to the other
                              sessions (priority.py); absent = normal
         "stopped": <unix>,   set while it isn't running
-        "stop_reason": "idle" | "stopped" | "gone"
+        "stop_reason": "idle" | "stopped" | "gone" | "update" (being
+                             restarted on a newer Claude Code: claude_update.py)
     }, ...}
 
 Storage: ``$XDG_STATE_HOME/ccpipe/session_meta.json`` (override with
@@ -54,7 +55,7 @@ MAX_STOPPED = 100
 # lifecycle.py and routes/sessions.py validate ids with it too.
 JOB_RE = re.compile(r"^[0-9a-f]{4,36}$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-_REASONS = ("idle", "stopped", "gone")
+_REASONS = ("idle", "stopped", "gone", "update")
 
 _lock = threading.Lock()
 _opened_written: dict[str, float] = {}

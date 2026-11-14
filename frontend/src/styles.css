@@ -933,6 +933,8 @@ a:hover { color: var(--fg); }
 }
 /* A background session: deliberately quiet, it isn't asking for anything. */
 .sess__badge--bg { border-style: dashed; }
+.sess__badge--update { color: var(--accent); border-color: var(--accent-soft); }
+.sess__menu__item--off { opacity: 0.55; }
 .sess__task {
   color: var(--fg-dim);
   font-size: var(--t-sm);

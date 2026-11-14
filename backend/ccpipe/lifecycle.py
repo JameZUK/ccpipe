@@ -252,7 +252,8 @@ def ended_note(name: str) -> str:
     if m is None:
         return f"{name} was removed"
     return {"stopped": f"{name} was stopped",
-            "idle": f"{name} was stopped after being idle"}.get(m.get("stop_reason", ""),
+            "idle": f"{name} was stopped after being idle",
+            "update": f"{name} was restarted on the new Claude Code"}.get(m.get("stop_reason", ""),
                                                                 f"{name} has ended")
 
 
@@ -300,8 +301,27 @@ async def _stop_background(name: str) -> None:
         log.info("stopped background Claude %s of session %r", job, name)
 
 
-async def stop(name: str, reason: str = "stopped") -> None:
-    """Stop the session's processes, keeping it listed to resume later."""
+async def _respawn_background(name: str) -> None:
+    """Have Claude restart the background sessions this session shows, on
+    the installed version (`claude respawn`). They keep running under
+    Claude's daemon; only the viewer in the pane ends."""
+    for job in await tmux.attached_jobs(name):
+        if not await tmux.respawn_job(job):
+            raise LifecycleError(500, f"could not restart its background Claude ({job})")
+        log.info("respawned background Claude %s of session %r", job, name)
+
+
+async def restart_for_update(name: str) -> None:
+    """Restart the session's Claude on the installed Claude Code, same
+    conversation (claude_update.py decides when that is safe). If the
+    resume fails the session is left stopped, to be resumed with a tap."""
+    await stop(name, reason="update", respawn=True)
+    await resume(name, capped=False)
+
+
+async def stop(name: str, reason: str = "stopped", *, respawn: bool = False) -> None:
+    """Stop the session's processes, keeping it listed to resume later.
+    ``respawn``: a background Claude it shows is restarted, not stopped."""
     if not await tmux.session_exists(name):
         return
     try:
@@ -315,7 +335,10 @@ async def stop(name: str, reason: str = "stopped") -> None:
                                   jobs[0] if jobs else None)
     except Exception:
         log.debug("details before stop failed", exc_info=True)
-    await _stop_background(name)
+    if respawn:
+        await _respawn_background(name)
+    else:
+        await _stop_background(name)
     if not await tmux.kill_session(name):
         raise LifecycleError(500, "stop failed")
     session_meta.mark_stopped(name, reason)

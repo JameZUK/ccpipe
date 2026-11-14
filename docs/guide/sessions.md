@@ -139,6 +139,29 @@ the pane is attached to.
 It needs Linux with systemd and tmux 3.4 or newer (each pane then runs in
 its own systemd scope). Elsewhere the menu doesn't show the item.
 
+## Keeping Claude Code up to date
+
+Updating Claude Code replaces the program, but a Claude that is already
+running stays on the old version until it is restarted. A session that
+is behind shows an **update** badge (hover for the two versions), and
+its **⋮** menu gets **restart on <version>**: the session restarts on the
+same conversation.
+
+A restart is refused, with the reason, unless nothing can be lost:
+Claude says it is idle (not working, not waiting for an answer, no
+background task), nothing else is running in the session, and it has a
+single pane and a single Claude.
+
+**Settings → Sessions → Keep Claude Code up to date** does the same by
+itself, one session at a time, once a session has been idle like that
+for 10 minutes with no terminal open on it. It is off by default,
+because one thing can't be seen from outside: a wake-up or loop an idle
+Claude has scheduled for later, which a restart would drop.
+
+A pane attached to a Claude background session is restarted by Claude
+itself (`claude respawn <job>`) and attached again; that needs Claude's
+own record of the session to show nothing in flight.
+
 ## Starting a session
 
 **+ new** opens a panel. Pick a working directory (type it or
