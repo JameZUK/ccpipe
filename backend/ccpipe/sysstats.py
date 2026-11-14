@@ -180,7 +180,7 @@ def _measure_sessions(panes: dict[str, list[int]]) -> dict[str, dict[str, Any]]:
 
 async def _session_pass() -> None:
     global _sessions, _sessions_at
-    panes = await tmux.all_panes()
+    panes = await tmux.session_roots()
     cwds = await tmux.active_panes()
     _sessions = await asyncio.to_thread(_measure_sessions, panes)
     _session_cwds.clear()

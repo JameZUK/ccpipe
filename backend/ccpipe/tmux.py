@@ -237,7 +237,10 @@ async def claude_pid(name: str) -> int | None:
     pp = await _pane_pid(name)
     if pp is None:
         return None
-    return await _find_claude_descendant(pp) or pp
+    pid = await _find_claude_descendant(pp) or pp
+    # `claude attach <job>` is only a viewer: the Claude doing the work is
+    # the background session it shows (see "Claude background sessions").
+    return await asyncio.to_thread(_behind_attach, pid) or pid
 
 
 async def session_cwd(name: str) -> str | None:
@@ -655,7 +658,8 @@ async def all_panes() -> dict[str, list[int]]:
 _STATUS_RANK = {"waiting": 4, "busy": 3, "shell": 2, "mcp": 2, "idle": 1}
 
 
-def _read_claude_states(pane_sessions: dict[str, str]) -> dict[str, tuple[str, int]]:
+def _read_claude_states(pane_sessions: dict[str, str],
+                        bg: dict[int, str] | None = None) -> dict[str, tuple[str, int]]:
     result: dict[str, tuple[str, int]] = {}
     d = Path.home() / ".claude" / "sessions"
     try:
@@ -670,14 +674,19 @@ def _read_claude_states(pane_sessions: dict[str, str]) -> dict[str, tuple[str, i
         if not isinstance(data, dict):
             continue
         pid, status, where = data.get("pid"), data.get("status"), data.get("tmux")
-        if not (isinstance(pid, int) and isinstance(status, str) and isinstance(where, str)):
+        if not (isinstance(pid, int) and isinstance(status, str)):
+            continue
+        if not isinstance(where, str) and pid not in (bg or {}):
             continue
         # Stale files outlive their process (and pids get reused): the file
         # records the process start time, which must match /proc.
         start = _proc_start_time(pid)
         if start is None or str(data.get("procStart", "")) != start:
             continue
-        name = pane_sessions.get(where.rpartition(".")[2])
+        # A background session has no pane of its own: it belongs to the
+        # session whose pane is attached to it.
+        name = (pane_sessions.get(where.rpartition(".")[2]) if isinstance(where, str)
+                else (bg or {}).get(pid))
         if not name:
             continue
         since = data.get("statusUpdatedAt")
@@ -698,4 +707,134 @@ async def claude_states() -> dict[str, tuple[str, int]]:
         pane, _, name = line.partition(_FIELD_SEP)
         if pane and name and name != CONTROL_SESSION_NAME:
             panes[pane] = name
-    return await asyncio.to_thread(_read_claude_states, panes)
+    return await asyncio.to_thread(_read_claude_states, panes, await bg_owners())
+
+
+# ─── Claude background sessions ───────────────────────────────────────────
+# Claude Code can run a conversation under its own daemon ("kind": "bg" in
+# ~/.claude/sessions/<pid>.json, with a "jobId" and no "tmux" pane), and a
+# pane then only runs a viewer: `claude attach <jobId>`. Seen 2026-11-14
+# (Claude Code 2.1.322): the working Claude was a child of the daemon, not
+# of the pane, so the session read as idle with 140 MB, on the wrong
+# conversation. The pane's session owns the background Claude its viewer
+# is attached to: for status, the busy check, CPU / memory and the
+# conversation id.
+
+_JOB_RE = re.compile(r"^[0-9a-f][0-9a-f-]{3,35}$")
+_BG_TTL_S = 10.0
+_bg_cache: tuple[float, dict[int, str]] | None = None
+
+
+def attach_job(argv: list[str]) -> str | None:
+    """The job id of a `claude attach <job>` command line, else None."""
+    # "attach" must directly follow the program (`claude attach …`, or
+    # `node …/claude-code/cli.js attach …`): anywhere else it's an argument.
+    for at in (1, 2):
+        if len(argv) > at + 1 and argv[at] == "attach":
+            prog = argv[at - 1]
+            if _is_claude_argv([prog]) or (at == 2 and "claude" in prog):
+                break
+    else:
+        return None
+    job = argv[at + 1]
+    return job if _JOB_RE.match(job) else None
+
+
+def _read_bg_jobs() -> dict[str, int]:
+    """job id (and conversation id) → pid of every live background Claude."""
+    out: dict[str, int] = {}
+    try:
+        files = list((Path.home() / ".claude" / "sessions").glob("*.json"))
+    except OSError:
+        return out
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("kind") != "bg":
+            continue
+        pid = data.get("pid")
+        if not isinstance(pid, int) or str(data.get("procStart", "")) != _proc_start_time(pid):
+            continue
+        for key in (data.get("jobId"), data.get("sessionId")):
+            if isinstance(key, str) and key:
+                out[key] = pid
+    return out
+
+
+def _job_pid(job: str, jobs: dict[str, int]) -> int | None:
+    if job in jobs:
+        return jobs[job]
+    # `attach` takes a prefix of the conversation id too.
+    hits = {pid for key, pid in jobs.items() if key.startswith(job)}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def _behind_attach(pid: int) -> int | None:
+    """The background Claude that process *pid* is a viewer of, if it is one."""
+    try:
+        job = attach_job(_read_argv(pid))
+    except OSError:
+        return None
+    return _job_pid(job, _read_bg_jobs()) if job else None
+
+
+def _attached_under(root: int, jobs: dict[str, int]) -> list[int]:
+    """Background Claudes that a viewer under pane process *root* shows."""
+    found: list[int] = []
+    stack, seen = [root], 0
+    while stack and seen < 256:
+        pid = stack.pop()
+        seen += 1
+        try:
+            argv = _read_argv(pid)
+            job = attach_job(argv)
+            if job:
+                hit = _job_pid(job, jobs)
+                if hit is not None:
+                    found.append(hit)
+                continue
+            if _is_claude_argv(argv[:2]):
+                continue                # an ordinary Claude: its tree isn't ours to walk
+            stack.extend(_read_children(pid))
+        except OSError:
+            continue
+    return found
+
+
+def _find_bg_owners(panes: dict[str, list[int]]) -> dict[int, str]:
+    jobs = _read_bg_jobs()
+    if not jobs:
+        return {}
+    owners: dict[int, str] = {}
+    for name, roots in panes.items():
+        for root in roots:
+            for pid in _attached_under(root, jobs):
+                owners.setdefault(pid, name)
+    return owners
+
+
+async def bg_owners(panes: dict[str, list[int]] | None = None) -> dict[int, str]:
+    """pid of a background Claude → the session whose pane is attached to
+    it. Cached for a few seconds: it is asked on every status poll."""
+    global _bg_cache
+    now = time.monotonic()
+    if _bg_cache is not None and now - _bg_cache[0] < _BG_TTL_S:
+        return _bg_cache[1]
+    if panes is None:
+        panes = await all_panes()
+    owners = await asyncio.to_thread(_find_bg_owners, panes)
+    _bg_cache = (now, owners)
+    return owners
+
+
+async def session_roots() -> dict[str, list[int]]:
+    """session name → the processes its work hangs under: every pane's,
+    plus any background Claude a pane is attached to."""
+    panes = await all_panes()
+    roots = {name: list(pids) for name, pids in panes.items()}
+    for pid, name in (await bg_owners(panes)).items():
+        if name in roots and pid not in roots[name]:
+            roots[name].append(pid)
+    return roots

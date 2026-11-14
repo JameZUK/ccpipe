@@ -253,6 +253,7 @@ def last_reply(state: dict[str, Any]) -> str:
 
 _pane_map: dict[str, tuple[str, int]] = {}   # tmux pane id → (session name, pane pid)
 _panes_at = float("-inf")
+_bg_owners: dict[int, str] = {}              # background Claude pid → session (tmux.bg_owners)
 _file_cache: dict[Path, tuple[int, int, dict[str, Any]]] = {}
 # Claudes (pid, start) that aren't in one of this tmux server's panes: in
 # another tmux server (pane ids are only unique within one), or none.
@@ -356,14 +357,20 @@ def _read_files() -> list[dict[str, Any]]:
 def _place(data: dict[str, Any]) -> str | None:
     """The session of this Claude, or None when its pane isn't known yet."""
     where = data.get("tmux")
-    entry = _pane_map.get(where.rpartition(".")[2]) if isinstance(where, str) else None
+    if not isinstance(where, str):
+        # A background Claude (no pane of its own): the session whose pane
+        # is attached to it, see tmux.bg_owners.
+        return _bg_owners.get(data.get("pid"))
+    entry = _pane_map.get(where.rpartition(".")[2])
     return entry[0] if entry else None
 
 
 async def _claudes() -> dict[str, dict[str, Any]]:
     """session name → the session file of its Claude (the one that needs
     you most, when a session has several)."""
+    global _bg_owners
     files = await asyncio.to_thread(_read_files)
+    _bg_owners = await tmux.bg_owners()
     if time.monotonic() - _panes_at >= PANES_EVERY_S:
         await _refresh_panes()
     ours: list[tuple[str, dict[str, Any]]] = []
@@ -374,7 +381,9 @@ async def _claudes() -> dict[str, dict[str, Any]]:
             continue
         name = _place(data)
         if name is None:
-            unplaced.append(data)
+            if isinstance(data.get("tmux"), str):
+                unplaced.append(data)
+            # else: a background Claude nobody is attached to (yet)
         else:
             ours.append((name, data))
     # A Claude in a pane we don't know yet (a new session or split): read
@@ -392,9 +401,11 @@ async def _claudes() -> dict[str, dict[str, Any]]:
     for name, data in ours:
         # The same pane id in another tmux server: this Claude must run
         # under the pane's own process to be this session's.
-        where = data.get("tmux", "")
-        pane_pid = _pane_map.get(where.rpartition(".")[2], ("", 0))[1]
-        if not _descends(data["pid"], pane_pid):
+        where = data.get("tmux")
+        if not isinstance(where, str):
+            where = None          # background: placed by its viewer, not by a pane
+        pane_pid = _pane_map.get(where.rpartition(".")[2], ("", 0))[1] if where else 0
+        if where and not _descends(data["pid"], pane_pid):
             _foreign.add((data["pid"], str(data.get("procStart", ""))))
             continue
         prev = out.get(name)

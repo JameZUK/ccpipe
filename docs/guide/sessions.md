@@ -61,6 +61,10 @@ ccpipe reads Claude Code's own status file
 shell task) rather than guessing from the screen. A long tool call that
 prints nothing for minutes still counts as working.
 
+A pane that only shows a Claude background session (`claude attach
+<job>`) counts as that session: its status, CPU, memory, history and
+idle time are the background Claude's, not the viewer's.
+
 ## Stopped sessions come back
 
 A session that isn't running stays on the list under **stopped**. That

@@ -151,7 +151,7 @@ async def tick() -> None:
     if not sessions:
         return
     panes, details, claude = await asyncio.gather(
-        tmux.all_panes(), tmux.active_panes(), attention.claude_states())
+        tmux.session_roots(), tmux.active_panes(), attention.claude_states())
     table = await asyncio.to_thread(proctree.snapshot)
     stick = sticky.load()
     meta = session_meta.load()
@@ -286,7 +286,7 @@ async def stop(name: str, reason: str = "stopped") -> None:
     try:
         sid, cwd = await tmux.claude_sid_and_cwd(name)
         details, panes, states = await asyncio.gather(
-            tmux.active_panes(), tmux.all_panes(), attention.claude_states())
+            tmux.active_panes(), tmux.session_roots(), attention.claude_states())
         table = await asyncio.to_thread(proctree.snapshot)
         claude_in = has_claude(panes.get(name, []), table, states.get(name, (None, 0))[0])
         session_meta.note_details(name, cwd or details.get(name, (None, None))[0], sid, claude_in)
