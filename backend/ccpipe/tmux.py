@@ -720,13 +720,23 @@ async def claude_states() -> dict[str, tuple[str, int]]:
 # is attached to: for status, the busy check, CPU / memory and the
 # conversation id.
 
-_JOB_RE = re.compile(r"^[0-9a-f][0-9a-f-]{3,35}$")
+_JOB_RE = re.compile(r"^[0-9a-f]{4,36}$")
 _BG_TTL_S = 10.0
 _bg_cache: tuple[float, dict[int, str]] | None = None
 
 
+@dataclass(frozen=True)
+class BgClaude:
+    """A live background Claude, from its session file."""
+    pid: int
+    job: str            # the daemon's short id: what `claude stop` takes
+    sid: str            # its conversation id
+    name: str           # the name `claude agents` shows
+
+
 def attach_job(argv: list[str]) -> str | None:
-    """The job id of a `claude attach <job>` command line, else None."""
+    """What a `claude attach <id|name>` command line is attached to (as
+    typed: an id, or part of a session name), else None."""
     # "attach" must directly follow the program (`claude attach …`, or
     # `node …/claude-code/cli.js attach …`): anywhere else it's an argument.
     for at in (1, 2):
@@ -736,13 +746,15 @@ def attach_job(argv: list[str]) -> str | None:
                 break
     else:
         return None
-    job = argv[at + 1]
-    return job if _JOB_RE.match(job) else None
+    what = argv[at + 1]
+    if not what or what.startswith("-") or len(what) > 200 or _CTRL_RE.search(what):
+        return None
+    return what
 
 
-def _read_bg_jobs() -> dict[str, int]:
-    """job id (and conversation id) → pid of every live background Claude."""
-    out: dict[str, int] = {}
+def _read_bg() -> list[BgClaude]:
+    """Every live background Claude."""
+    out: list[BgClaude] = []
     try:
         files = list((Path.home() / ".claude" / "sessions").glob("*.json"))
     except OSError:
@@ -754,33 +766,39 @@ def _read_bg_jobs() -> dict[str, int]:
             continue
         if not isinstance(data, dict) or data.get("kind") != "bg":
             continue
-        pid = data.get("pid")
-        if not isinstance(pid, int) or str(data.get("procStart", "")) != _proc_start_time(pid):
+        pid, job = data.get("pid"), data.get("jobId")
+        if not isinstance(pid, int) or not isinstance(job, str) or not _JOB_RE.match(job):
             continue
-        for key in (data.get("jobId"), data.get("sessionId")):
-            if isinstance(key, str) and key:
-                out[key] = pid
+        if str(data.get("procStart", "")) != _proc_start_time(pid):
+            continue                    # a stale file for a reused pid
+        sid, name = data.get("sessionId"), data.get("name")
+        out.append(BgClaude(pid, job, sid if isinstance(sid, str) else "",
+                            name if isinstance(name, str) else ""))
     return out
 
 
-def _job_pid(job: str, jobs: dict[str, int]) -> int | None:
-    if job in jobs:
-        return jobs[job]
-    # `attach` takes a prefix of the conversation id too.
-    hits = {pid for key, pid in jobs.items() if key.startswith(job)}
+def _job_pid(what: str, bgs: list[BgClaude]) -> int | None:
+    """The background Claude `claude attach <what>` means: its id, the
+    start of its conversation id, or (part of) its name. None when that
+    fits none of them, or more than one."""
+    exact = [b.pid for b in bgs if what in (b.job, b.sid, b.name)]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    hits = {b.pid for b in bgs
+            if (len(what) >= 4 and b.sid.startswith(what)) or (b.name and what in b.name)}
     return hits.pop() if len(hits) == 1 else None
 
 
 def _behind_attach(pid: int) -> int | None:
     """The background Claude that process *pid* is a viewer of, if it is one."""
     try:
-        job = attach_job(_read_argv(pid))
+        what = attach_job(_read_argv(pid))
     except OSError:
         return None
-    return _job_pid(job, _read_bg_jobs()) if job else None
+    return _job_pid(what, _read_bg()) if what else None
 
 
-def _attached_under(root: int, jobs: dict[str, int]) -> list[int]:
+def _attached_under(root: int, jobs: list[BgClaude]) -> list[int]:
     """Background Claudes that a viewer under pane process *root* shows."""
     found: list[int] = []
     stack, seen = [root], 0
@@ -804,7 +822,7 @@ def _attached_under(root: int, jobs: dict[str, int]) -> list[int]:
 
 
 def _find_bg_owners(panes: dict[str, list[int]]) -> dict[int, str]:
-    jobs = _read_bg_jobs()
+    jobs = _read_bg()
     if not jobs:
         return {}
     owners: dict[int, str] = {}
@@ -827,6 +845,34 @@ async def bg_owners(panes: dict[str, list[int]] | None = None) -> dict[int, str]
     owners = await asyncio.to_thread(_find_bg_owners, panes)
     _bg_cache = (now, owners)
     return owners
+
+
+async def attached_jobs(name: str) -> list[str]:
+    """Job ids of the background Claudes session *name* is attached to,
+    read afresh (this decides what a stop has to stop)."""
+    global _bg_cache
+    _bg_cache = None
+    owners = await bg_owners()
+    bgs = await asyncio.to_thread(_read_bg)
+    return [b.job for b in bgs if owners.get(b.pid) == name]
+
+
+async def stop_job(job: str) -> bool:
+    """`claude stop <job>`: end a background Claude, keeping its
+    conversation (`claude attach <job>` starts it again). Asked of Claude's
+    own daemon, not done with a signal: the daemon restarts a worker that
+    just dies."""
+    exe = shutil.which("claude")
+    if not exe or not _JOB_RE.match(job):
+        return False
+    return await proctree.run_argv([exe, "stop", job], 30.0, env=tmux_env(), check=True) is not None
+
+
+def job_known(job: str | None) -> bool:
+    """Claude still has this background session on record, so
+    `claude attach <job>` can open (or restart) it."""
+    return bool(job and _JOB_RE.match(job)
+                and (Path.home() / ".claude" / "jobs" / job / "state.json").is_file())
 
 
 async def session_roots() -> dict[str, list[int]]:

@@ -177,7 +177,9 @@ async def tick() -> None:
             _details_at[s.name] = now
             try:
                 sid, ccwd = await tmux.claude_sid_and_cwd(s.name)
-                session_meta.note_details(s.name, ccwd or cwd, sid, claude_in)
+                jobs = await tmux.attached_jobs(s.name)
+                session_meta.note_details(s.name, ccwd or cwd, sid, claude_in,
+                                          jobs[0] if jobs else None)
             except Exception:
                 log.debug("details for %s failed", s.name, exc_info=True)
 
@@ -194,6 +196,7 @@ async def tick() -> None:
                 await stop(s.name, reason="idle")
             except Exception:
                 log.exception("idle stop of %s failed", s.name)
+                _busy_at[s.name] = now      # try again after another idle period
 
 
 async def run() -> None:
@@ -214,12 +217,17 @@ def _transcript_exists(cwd: str, claude_id: str) -> bool:
     return (claude_project_dir(cwd) / f"{claude_id}.jsonl").is_file()
 
 
-def resume_command(cwd: str, claude_id: str | None, shell: bool = False) -> str:
+def resume_command(cwd: str, claude_id: str | None, shell: bool = False,
+                   job: str | None = None) -> str:
     """The conversation the session was on when known (and its transcript is
     still there); otherwise the directory's most recent one. A session that
-    never ran Claude gets its shell back."""
+    never ran Claude gets its shell back. One that was showing a Claude
+    background session attaches to it again (which restarts it if it was
+    stopped), as long as Claude still has it on record."""
     if shell:
         return f"exec {shlex.quote(os.environ.get('SHELL') or '/bin/bash')} -i"
+    if tmux.job_known(job):
+        return tmux.wrap_in_shell(f"claude attach {shlex.quote(str(job))}")
     if claude_id and session_meta.UUID_RE.match(claude_id) and _transcript_exists(cwd, claude_id):
         return tmux.wrap_in_shell(plan_usage.claude_command(f"--resume {shlex.quote(claude_id)}"))
     return tmux.wrap_in_shell(plan_usage.claude_command("--continue"))
@@ -229,12 +237,13 @@ class Resumable(NamedTuple):
     cwd: str
     claude: str | None
     shell: bool
+    job: str | None = None
 
 
 def resumable(name: str) -> Resumable | None:
     m = session_meta.load().get(name, {})
     cwd = m.get("cwd") or sticky.load().get(name, {}).get("cwd")
-    return Resumable(cwd, m.get("claude"), bool(m.get("shell"))) if cwd else None
+    return Resumable(cwd, m.get("claude"), bool(m.get("shell")), m.get("job")) if cwd else None
 
 
 def ended_note(name: str) -> str:
@@ -254,7 +263,7 @@ async def resume(name: str, *, capped: bool = True) -> None:
     target = resumable(name)
     if target is None:
         raise LifecycleError(404, "nothing to resume: its directory isn't known")
-    cwd, claude_id, shell = target
+    cwd, claude_id, shell, job = target
     try:
         resolved = Path(cwd).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -271,12 +280,24 @@ async def resume(name: str, *, capped: bool = True) -> None:
         raise LifecycleError(403, f"directory is outside the allowed root: {cwd}")
     if capped and await tmux.at_session_cap():
         raise LifecycleError(429, f"session limit reached ({tmux.MAX_SESSIONS})")
-    await tmux.create_session(name, command=resume_command(str(resolved), claude_id, shell),
+    await tmux.create_session(name, command=resume_command(str(resolved), claude_id, shell, job),
                               cwd=str(resolved))
     session_meta.mark_running(name)
     _busy_at[name] = time.time()
     log.info("resumed session %r in %s (%s)", name, resolved,
-             "shell" if shell else f"conversation {claude_id}" if claude_id else "latest conversation")
+             "shell" if shell else f"background session {job}" if tmux.job_known(job) else f"conversation {claude_id}" if claude_id else "latest conversation")
+
+
+async def _stop_background(name: str) -> None:
+    """End the Claude background sessions this session is showing. Ending
+    the pane only ends the viewer: the Claude behind it runs under Claude's
+    own daemon and would carry on, unseen, holding its memory. If one
+    can't be stopped the session is left as it is, still visible."""
+    for job in await tmux.attached_jobs(name):
+        if not await tmux.stop_job(job):
+            raise LifecycleError(500, f"could not stop its background Claude ({job}); "
+                                      f"try `claude stop {job}` in the session")
+        log.info("stopped background Claude %s of session %r", job, name)
 
 
 async def stop(name: str, reason: str = "stopped") -> None:
@@ -289,9 +310,12 @@ async def stop(name: str, reason: str = "stopped") -> None:
             tmux.active_panes(), tmux.session_roots(), attention.claude_states())
         table = await asyncio.to_thread(proctree.snapshot)
         claude_in = has_claude(panes.get(name, []), table, states.get(name, (None, 0))[0])
-        session_meta.note_details(name, cwd or details.get(name, (None, None))[0], sid, claude_in)
+        jobs = await tmux.attached_jobs(name)
+        session_meta.note_details(name, cwd or details.get(name, (None, None))[0], sid, claude_in,
+                                  jobs[0] if jobs else None)
     except Exception:
         log.debug("details before stop failed", exc_info=True)
+    await _stop_background(name)
     if not await tmux.kill_session(name):
         raise LifecycleError(500, "stop failed")
     session_meta.mark_stopped(name, reason)
@@ -302,6 +326,7 @@ async def forget(name: str) -> None:
     """Stop it if running and remove it from the list for good (sticky too,
     or it would come back after a reboot)."""
     if await tmux.session_exists(name):
+        await _stop_background(name)
         await tmux.kill_session(name)
     session_meta.forget(name)
     sticky.clear(name)

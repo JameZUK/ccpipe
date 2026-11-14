@@ -12,6 +12,9 @@ keeps what the session picker shows and what resuming needs:
         "claude":  "<uuid>", the Claude conversation it was on — so a resume
                              picks THAT conversation (`claude --resume`),
                              not just the newest one in the directory
+        "job":     "<id>",   it was showing a Claude background session
+                             (`claude attach <id>`): resumes by attaching
+                             to that again while Claude still knows it
         "shell":   true,     never seen running Claude (a plain shell session,
                              e.g. one started over ssh): resumes as a shell
         "priority": "background",  yields CPU and memory to the other
@@ -49,6 +52,7 @@ ACTIVE_WRITE_STEP_S = 60
 MAX_STOPPED = 100
 # A Claude Code conversation id (the transcript's file name). The one copy:
 # lifecycle.py and routes/sessions.py validate ids with it too.
+JOB_RE = re.compile(r"^[0-9a-f]{4,36}$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _REASONS = ("idle", "stopped", "gone")
 
@@ -79,6 +83,9 @@ def _clean(info: Any) -> dict[str, Any]:
         out["claude"] = cid
     elif info.get("shell") is True:
         out["shell"] = True
+    job = info.get("job")
+    if isinstance(job, str) and JOB_RE.match(job) and "claude" in out:
+        out["job"] = job
     if info.get("priority") == "background":
         out["priority"] = "background"
     reason = info.get("stop_reason")
@@ -137,14 +144,16 @@ def note_opened(name: str, when: float | None = None) -> None:
 
 
 def note_details(name: str, cwd: str | None, claude: str | None,
-                 has_claude: bool | None = None) -> None:
+                 has_claude: bool | None = None, job: str | None = None) -> None:
     """Record a running session's directory and Claude conversation.
 
     ``has_claude`` is whether a Claude process is in the session right now
     (None = not checked). A session never seen with Claude is marked
     ``shell`` so it resumes as a shell, not as `claude --continue`; once a
     conversation has been seen it stays a Claude session (Claude may just
-    have exited to the shell for a while)."""
+    have exited to the shell for a while). ``job``: the Claude seen is a
+    background session the pane is attached to; an ordinary Claude seen
+    later clears it."""
     with _lock:
         data = load()
         entry = data.setdefault(name, {})
@@ -154,6 +163,10 @@ def note_details(name: str, cwd: str | None, claude: str | None,
         if claude and UUID_RE.match(claude):
             new["claude"] = claude
             new.pop("shell", None)
+            if job and JOB_RE.match(job):
+                new["job"] = job
+            else:
+                new.pop("job", None)
         elif has_claude:
             new.pop("shell", None)
         elif has_claude is False and "claude" not in new:

@@ -431,7 +431,10 @@ async def stop_session(name: str) -> dict[str, bool]:
 async def forget_session(name: str) -> dict[str, bool]:
     """Stop it if running and drop it from the list (and the sticky set)."""
     name = _lifecycle_name(name)
-    await lifecycle.forget(name)
+    try:
+        await lifecycle.forget(name)
+    except lifecycle.LifecycleError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
     return {"forgotten": True}
 
 

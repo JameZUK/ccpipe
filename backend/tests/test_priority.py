@@ -117,6 +117,33 @@ def test_restoring_lifts_the_memory_limit(cgroups, monkeypatch):
     assert (scope / "memory.high").read_text() == "max"
 
 
+def test_a_background_claude_is_moved_into_its_sessions_scope(cgroups, monkeypatch):
+    add, table = cgroups
+    a = add(10, "tmux-spawn-11111111-aaaa-bbbb-cccc-000000000001.scope")   # session a's pane
+    b = add(20, "tmux-spawn-11111111-aaaa-bbbb-cccc-000000000002.scope")   # session b's pane
+    # b's background Claude (30, child 31) runs under the daemon in a's scope.
+    table[30] = table[31] = table[10]
+    from ccpipe import proctree
+    P = proctree.Proc
+    snap = proctree.Table({30: P(30, 1, "claude", 0, 0), 31: P(31, 30, "bash", 0, 0)}, {30: [31]})
+    monkeypatch.setattr(proctree, "snapshot", lambda: snap)
+    monkeypatch.setattr(priority, "_recheck", set())
+    panes = {"a": [10], "b": [20]}
+    # Nobody is background: it stays where it is.
+    assert priority._adopt({30: "b"}, panes, set(), set()) == 0
+    # b goes to the background: its Claude must be in b's scope to be covered.
+    assert priority._adopt({30: "b"}, panes, {"b"}, set()) == 2
+    assert (b / "cgroup.procs").read_text() == "31"            # (a real cgroup file takes one pid a write)
+    # a is background instead: b's Claude must leave a's scope.
+    monkeypatch.setattr(priority, "_recheck", set())
+    assert priority._adopt({30: "b"}, panes, {"a"}, set()) == 2
+    # Already in its own scope: nothing to do.
+    table[30] = table[31] = table[20]
+    monkeypatch.setattr(priority, "_recheck", set())
+    assert priority._adopt({30: "b"}, panes, {"b"}, set()) == 0
+    assert a.exists()
+
+
 # ── the level is kept with the session ──────────────────────────────────
 
 def test_level_is_remembered_and_follows_a_rename(tmp_path, monkeypatch):

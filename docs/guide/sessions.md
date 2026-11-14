@@ -65,6 +65,12 @@ A pane that only shows a Claude background session (`claude attach
 <job>`) counts as that session: its status, CPU, memory, history and
 idle time are the background Claude's, not the viewer's.
 
+Stopping such a session (by hand, or when it has sat idle) also stops
+the background Claude, with Claude's own `claude stop <job>`; closing
+the pane alone would leave it running out of sight. Opening the session
+again attaches to the same background session, which starts it again. If
+Claude can't stop it, ccpipe leaves the session running and says so.
+
 ## Stopped sessions come back
 
 A session that isn't running stays on the list under **stopped**. That
@@ -127,7 +133,8 @@ working, and gives way to everything else:
 
 **run normally** in the same menu puts it back. The choice stays with the
 session through a stop and a resume, and applies to everything the
-session starts, in every pane.
+session starts, in every pane, and to a Claude background session
+the pane is attached to.
 
 It needs Linux with systemd and tmux 3.4 or newer (each pane then runs in
 its own systemd scope). Elsewhere the menu doesn't show the item.

@@ -36,6 +36,12 @@ first moments in the tmux server's own scope, which is never touched.
 A scope ccpipe changed carries ``cpu.weight == BG_WEIGHT``: that marker
 is how a restarted ccpipe finds what to put back.
 
+A Claude background session (`claude --bg`, see tmux.py) runs under
+Claude's one daemon, so in the cgroup of whichever pane first started
+that daemon, which may be another session's. When that matters (its
+session is background, or it sits in a background session's scope) its
+process tree is moved into its own session's scope: ``_adopt``.
+
 Linux with cgroup v2 and systemd only; elsewhere ``supported()`` is
 False and the picker doesn't offer it.
 """
@@ -75,6 +81,7 @@ _dirty = True                 # a pass is owed even with no background session
 _usable: bool | None = None   # panes really are in scopes of their own
 _ours: set[str] = set()       # cgroup paths this process has changed
 _held: set[str] = set()       # sessions whose memory is being held back now
+_recheck: set[int] = set()    # background Claudes moved on the last tick
 _warned: dict[str, float] = {}
 
 
@@ -204,6 +211,46 @@ def _survey(panes: dict[str, list[int]], wanted: set[str],
             restore.extend(s for s in sorted(scopes)
                            if str(s) in _ours or _read_int(s / "cpu.weight") == BG_WEIGHT)
     return background, restore, seen
+
+
+def _adopt(owners: dict[int, str], panes: dict[str, list[int]], wanted: set[str],
+           never: set[str]) -> int:
+    """Move each attached background Claude (pid → its session) into its
+    session's own scope when it is somewhere a different level applies.
+    Returns how many processes were moved.
+
+    Its children inherit the new cgroup; the ones it already had are moved
+    with it, and looked at once more on the next tick for any forked from
+    a parent that hadn't been moved yet."""
+    global _recheck
+    scopes = {name: sorted({s for s in (_scope_dir(p, never) for p in pids) if s is not None})
+              for name, pids in panes.items()}
+    background_dirs = {s for name in wanted for s in scopes.get(name, [])}
+    table: proctree.Table | None = None
+    moved = 0
+    again: set[int] = set()
+    for pid, name in owners.items():
+        own = scopes.get(name)
+        here = _cgroup_path(pid)
+        if not own or not here:
+            continue
+        here_dir = CGROUP_ROOT / here.lstrip("/")
+        misplaced = here_dir not in own and (name in wanted or here_dir in background_dirs)
+        if not misplaced and pid not in _recheck:
+            continue
+        target = here_dir if here_dir in own else own[0]
+        if table is None:
+            table = proctree.snapshot()
+        for p in table.subtree(pid):
+            path = _cgroup_path(p)
+            if path and CGROUP_ROOT / path.lstrip("/") != target:
+                if _write(target / "cgroup.procs", str(p)):
+                    moved += 1
+        if misplaced:
+            again.add(pid)
+            log.info("moved background Claude %d into %s's scope %s", pid, name, target.name)
+    _recheck = again
+    return moved
 
 
 def memory_limits(usage: dict[str, int], available: int, total: int) -> dict[str, int]:
@@ -336,6 +383,9 @@ async def _tick() -> None:
     never = await _never_touch()
     if never is None:
         return                              # no tmux server: nothing to set
+    owners = await tmux.bg_owners(panes)
+    if owners:
+        await asyncio.to_thread(_adopt, owners, panes, wanted, never)
     background, restore, seen = await asyncio.to_thread(_survey, panes, wanted, never)
     if panes:
         _usable = seen
