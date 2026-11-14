@@ -129,18 +129,16 @@ def test_a_background_claude_is_moved_into_its_sessions_scope(cgroups, monkeypat
     monkeypatch.setattr(proctree, "snapshot", lambda: snap)
     monkeypatch.setattr(priority, "_recheck", set())
     panes = {"a": [10], "b": [20]}
-    # Nobody is background: it stays where it is.
-    assert priority._adopt({30: "b"}, panes, set(), set()) == 0
-    # b goes to the background: its Claude must be in b's scope to be covered.
-    assert priority._adopt({30: "b"}, panes, {"b"}, set()) == 2
+    # Moved whatever the levels are: its memory is then counted in b's scope.
+    assert priority._adopt({30: "b"}, panes, set()) == 2
     assert (b / "cgroup.procs").read_text() == "31"            # (a real cgroup file takes one pid a write)
-    # a is background instead: b's Claude must leave a's scope.
-    monkeypatch.setattr(priority, "_recheck", set())
-    assert priority._adopt({30: "b"}, panes, {"a"}, set()) == 2
-    # Already in its own scope: nothing to do.
+    # Already in its own scope: nothing to do (after the one look back).
     table[30] = table[31] = table[20]
-    monkeypatch.setattr(priority, "_recheck", set())
-    assert priority._adopt({30: "b"}, panes, {"b"}, set()) == 0
+    assert priority._adopt({30: "b"}, panes, set()) == 0
+    assert priority._recheck == set()
+    # b's pane is still in the tmux server's scope (its first moments): wait.
+    table[30] = table[31] = table[10]
+    assert priority._adopt({30: "b"}, panes, {table[20]}) == 0
     assert a.exists()
 
 

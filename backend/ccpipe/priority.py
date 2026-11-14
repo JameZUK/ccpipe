@@ -38,9 +38,12 @@ is how a restarted ccpipe finds what to put back.
 
 A Claude background session (`claude --bg`, see tmux.py) runs under
 Claude's one daemon, so in the cgroup of whichever pane first started
-that daemon, which may be another session's. When that matters (its
-session is background, or it sits in a background session's scope) its
-process tree is moved into its own session's scope: ``_adopt``.
+that daemon, which may be another session's. Its process tree is moved
+into its own session's scope as soon as a pane attaches to it
+(``_adopt``), whatever the levels are. Memory already charged doesn't
+move with a process (cgroup v2 has no charge migration; 440 MB of a
+505 MB fresh Claude stayed behind, measured 2026-11-14), so the sooner
+it is moved, the more of it the session's limit can see later.
 
 Linux with cgroup v2 and systemd only; elsewhere ``supported()`` is
 False and the picker doesn't offer it.
@@ -213,11 +216,10 @@ def _survey(panes: dict[str, list[int]], wanted: set[str],
     return background, restore, seen
 
 
-def _adopt(owners: dict[int, str], panes: dict[str, list[int]], wanted: set[str],
-           never: set[str]) -> int:
+def _adopt(owners: dict[int, str], panes: dict[str, list[int]], never: set[str]) -> int:
     """Move each attached background Claude (pid → its session) into its
-    session's own scope when it is somewhere a different level applies.
-    Returns how many processes were moved.
+    session's own scope when it is anywhere else. Returns how many
+    processes were moved.
 
     Its children inherit the new cgroup; the ones it already had are moved
     with it, and looked at once more on the next tick for any forked from
@@ -225,7 +227,6 @@ def _adopt(owners: dict[int, str], panes: dict[str, list[int]], wanted: set[str]
     global _recheck
     scopes = {name: sorted({s for s in (_scope_dir(p, never) for p in pids) if s is not None})
               for name, pids in panes.items()}
-    background_dirs = {s for name in wanted for s in scopes.get(name, [])}
     table: proctree.Table | None = None
     moved = 0
     again: set[int] = set()
@@ -235,7 +236,7 @@ def _adopt(owners: dict[int, str], panes: dict[str, list[int]], wanted: set[str]
         if not own or not here:
             continue
         here_dir = CGROUP_ROOT / here.lstrip("/")
-        misplaced = here_dir not in own and (name in wanted or here_dir in background_dirs)
+        misplaced = here_dir not in own
         if not misplaced and pid not in _recheck:
             continue
         target = here_dir if here_dir in own else own[0]
@@ -376,16 +377,16 @@ async def _tick() -> None:
         return
     meta = await asyncio.to_thread(session_meta.load)
     wanted = {name for name, entry in meta.items() if level_of(entry) == "background"}
-    if not wanted and not _dirty:
+    if not wanted and not _dirty and not await asyncio.to_thread(tmux._read_bg):
         _held.clear()
-        return
+        return                              # nothing to keep in place
     panes = await tmux.all_panes()
     never = await _never_touch()
     if never is None:
         return                              # no tmux server: nothing to set
     owners = await tmux.bg_owners(panes)
     if owners:
-        await asyncio.to_thread(_adopt, owners, panes, wanted, never)
+        await asyncio.to_thread(_adopt, owners, panes, never)
     background, restore, seen = await asyncio.to_thread(_survey, panes, wanted, never)
     if panes:
         _usable = seen
